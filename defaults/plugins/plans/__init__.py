@@ -888,23 +888,19 @@ WHICH PATH THIS WORK IS ON
   makes a plan and gets the approval it skipped — rather than carrying on and mentioning it
   in the summary at the end.
 
-  THE PATH ALSO SUITS A MODEL TIER. `gpt-luna-max-effort` is the cheap model thinking as
-  hard as it can, and it suits the two buckets above it — a DIRECT change, or a change too
-  small for a record at all. Two ways onto it, since 2026-09-07: a `builder` is on it by
-  DEFAULT, so `--role builder` is enough, and a `worker` takes it per spawn as an explicit
-  `--model gpt-luna-max-effort`. `sb models` says whether the tier resolves here.
+  THE PATH ALSO PICKS A MODEL TIER. `gpt-luna-max-effort` is the cheap model thinking as
+  hard as it can, and it is for the two buckets above it — a DIRECT change, or a change too
+  small for a record at all — spawned onto a `worker` or a `builder` with an explicit
+  `--model gpt-luna-max-effort`. Nothing infers it: whoever decides the work is direct is
+  who names the tier. No role defaults to it (`builder` did between 2026-09-07 and
+  2026-09-10 and no longer does), so `sb models` is what says whether the tier resolves
+  here.
 
-  WHICH MEANS THE TIER NO LONGER TELLS YOU THE PATH, and that is the part to read if you
-  are on it. It used to arrive only because somebody had judged the work direct; a builder
-  now gets it for being a builder, whatever its job turns out to be. So the judgment is
-  still owed and it is still yours — nothing infers "this work is direct" from a record, and
-  nothing ever did.
-
-  The tier is not aimed at the shaped path, nor at anything before the path is decided —
+  It is not for the shaped path, and not for anything before the path is decided —
   investigation, an open design question, review-only work. `lead`, `dispatcher` and
-  `reviewer` are refused it outright rather than trusted to judge. A direct change that
-  moves onto the shaped path mid-flight keeps whatever model it started on: the PATH moves,
-  and on a builder the tier does not follow it.
+  `reviewer` are refused it outright rather than trusted to judge, so what is left to judge
+  is only whether the WORK is direct, which is the same call this section already asks for.
+  A direct change that moves onto the shaped path mid-flight moves off this tier with it.
 
 WHEN A PLAN EXISTS
 
