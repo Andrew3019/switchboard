@@ -380,34 +380,35 @@ class DiscoverabilityTest(Fixture, unittest.TestCase):
         store.seed_capabilities(self.db, "w1", ["spawn"])
         self.assertNotIn("isolation-at-the-spawn", ids("w1", command="delegate"))
 
-    def test_the_direct_path_tier_is_offered_at_the_spawn_and_only_to_a_spawner(self):
-        """`gpt-luna-max-effort` is chosen at a spawn or never — the model is written
-        before the child's shell launches and `restore` reuses the stored tier — so the
-        one moment this can be acted on is `sb delegate`, and an agent that cannot spawn
-        is never told about a tier it has no way to name."""
-        self.agent("lead-x", role="lead")
-        store.seed_capabilities(self.db, "lead-x", ["spawn"])
-        ids = lambda who, **kw: [r.id for r in guidance.resolve(self.db, who, **kw)]  # noqa: E731
-        self.assertNotIn("direct-path-tier-at-the-spawn", ids("lead-x"))
-        self.assertIn("direct-path-tier-at-the-spawn", ids("lead-x", command="delegate"))
+    def test_the_ledger_nudges_no_model_tier_at_a_spawn(self):
+        """A DECISION, pinned so that re-arming it is deliberate (Andrew, 2026-09-10).
 
-        self.agent("r1", role="researcher")
-        store.seed_capabilities(self.db, "r1", [])
-        self.assertNotIn("direct-path-tier-at-the-spawn", ids("r1", command="delegate"))
+        `direct-path-tier-at-the-spawn` used to fire on every `sb delegate` and name
+        `--model gpt-luna-max-effort` as what a plainly direct job wanted. It worked, and
+        that is why it went: agents put workers on the cheap tier because the ledger kept
+        offering it, at the one moment a model choice cannot be taken back. The tier is
+        untouched and still resolves — `test_models` and `test_roles` pin that — and where
+        it is the right choice is written in the plans guide and the two leaf role files,
+        where an agent deciding already looks.
 
-    def test_the_direct_path_tier_is_said_at_every_delegate_and_not_just_the_first(self):
-        """`every-time`, against the ledger's own default, and the decision worth pinning:
-        a dispatcher makes this choice once per issue it hands out, so a rule that fired
-        on its first-ever delegate and never again would be the weak version of it. The
-        rows keyed on the same verb beside it are `once`; this one is deliberately not."""
+        Asserted over `ledger()` — every shipped row, not the ones one agent happens to
+        resolve — because the failure this guards against is a new row doing the same thing
+        under a different id, key or role.
+        """
+        rules = guidance.ledger()
+        self.assertTrue(rules)
+        for rule in rules:
+            with self.subTest(rule=rule.id):
+                self.assertNotIn("gpt-luna-max-effort", rule.text)
+
+    def test_a_once_row_keyed_on_delegate_is_said_on_the_first_one_only(self):
+        """The cursor, on the shipped ledger rather than a hand-built rule: a `once` row
+        keyed on a verb fires on that agent's first run of it and never again, however
+        many times the agent goes on to spawn."""
         self.agent("d1", role="dispatcher")
         store.seed_capabilities(self.db, "d1", ["spawn"])
         said = lambda: guidance.deliver(self.db, "d1", command="delegate", repo=self.repo)  # noqa: E731
         first, second = said(), said()
-        self.assertIn("gpt-luna-max-effort", first)
-        self.assertIn("gpt-luna-max-effort", second)
-        # The `once` row keyed on the same verb, for contrast: said on the first delegate
-        # of this agent's life and never again.
         self.assertIn("WHO OWNS IT", first)
         self.assertNotIn("WHO OWNS IT", second)
 
