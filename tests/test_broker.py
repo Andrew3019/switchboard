@@ -4535,6 +4535,96 @@ class BrokerTest(unittest.TestCase):
         main, _ = self._repo_with_worktree()
         self.assertEqual(Broker(self.db, self.h, repo=main).link_config(), [])
 
+    def _relocate(self, wt, *, retire):
+        """Re-pin the main checkout to a different tree, as a relocation would.
+
+        `retire` says whether the old tree is torn down with it. Both orders happen for
+        real: a copy-then-delete leaves the links dangling, a copy-then-keep leaves them
+        resolving at a tree nobody writes to any more.
+
+        The new tree is another worktree of the same repo rather than a bare directory,
+        because `_exclude` reaches `store.repo_root(main)` and a plain `mkdir` is not
+        inside a git repo. What is under test is which tree the links NAME, and one
+        checkout of this repo is as good as another for that.
+        """
+        import subprocess
+        main = self.repo / "main"
+        moved = self.repo / "moved"
+        subprocess.run(["git", "worktree", "add", "-q", str(moved), "-b", "moved"],
+                       cwd=main, capture_output=True)
+        (moved / "CLAUDE.md").write_text("# moved protocol\n")
+        (moved / ".switchboard").mkdir()
+        if retire:
+            (main / "CLAUDE.md").unlink()
+            (main / ".switchboard").rmdir()
+        store.write_config({"main_checkout": str(moved)}, wt)
+        return moved
+
+    def test_a_dangling_link_is_repaired_not_read_as_finished(self):
+        """The state a relocated checkout leaves behind. A dangling symlink is False to
+        `exists()` and True to `is_symlink()`, so the guard that tested both used to skip
+        it forever and the worktree quietly read no repo-local config at all."""
+        main, wt = self._repo_with_worktree()
+        Broker(self.db, self.h, repo=main).init()
+        b = Broker(self.db, self.h, repo=wt)
+        b.link_config()
+        moved = self._relocate(wt, retire=True)
+        self.assertFalse((wt / "CLAUDE.md").exists())     # dangling, before the repair
+        self.assertTrue((wt / "CLAUDE.md").is_symlink())
+
+        self.assertEqual(sorted(b.link_config()), [".switchboard", "CLAUDE.md"])
+        self.assertEqual((wt / "CLAUDE.md").read_text(), "# moved protocol\n")
+        self.assertEqual((wt / ".switchboard").resolve(), (moved / ".switchboard").resolve())
+
+    def test_a_link_to_a_surviving_old_checkout_is_stale_too(self):
+        """Staleness is disagreement with the pinned main, not a broken target. The old
+        tree is normally still sitting there mid-migration: the link resolves perfectly
+        and still points at config nobody is writing to."""
+        main, wt = self._repo_with_worktree()
+        Broker(self.db, self.h, repo=main).init()
+        b = Broker(self.db, self.h, repo=wt)
+        b.link_config()
+        self._relocate(wt, retire=False)
+        self.assertTrue((wt / "CLAUDE.md").exists())      # resolves, and is still wrong
+
+        self.assertIn("CLAUDE.md", b.link_config())
+        self.assertEqual((wt / "CLAUDE.md").read_text(), "# moved protocol\n")
+
+    def test_a_repair_is_recorded_as_its_own_event(self):
+        """`link_config` is the routine case and `link_repaired` the one worth finding in
+        `sb log` — a worktree that had been reading the wrong tree is a fact about how
+        long it was doing it, not just about the fix."""
+        main, wt = self._repo_with_worktree()
+        Broker(self.db, self.h, repo=main).init()
+        b = Broker(self.db, self.h, repo=wt)
+        b.link_config()
+        self._relocate(wt, retire=True)
+        b.link_config()
+        kinds = [r["kind"] for r in store.recent_events(self.db, limit=50)]
+        self.assertIn("link_repaired", kinds)
+
+    def test_a_relative_link_naming_the_pinned_main_is_left_alone(self):
+        """`_points_at` compares what the link SAYS, resolved against its own directory.
+        A link spelled relatively already names the right file, and relinking it every
+        spawn would be churn dressed up as a repair."""
+        main, wt = self._repo_with_worktree()
+        Broker(self.db, self.h, repo=main).init()
+        (wt / "CLAUDE.md").symlink_to(os.path.relpath(main / "CLAUDE.md", wt))
+
+        self.assertEqual(Broker(self.db, self.h, repo=wt).link_config(), [".switchboard"])
+        self.assertEqual(os.readlink(wt / "CLAUDE.md"), os.path.join("..", "main", "CLAUDE.md"))
+
+    def test_a_real_directory_is_never_adopted_over_a_link(self):
+        """The half of the old guard that stays. Whatever an orphaned `.switchboard`
+        holds — notes, briefs — replacing it with a symlink would discard it silently."""
+        main, wt = self._repo_with_worktree()
+        (wt / ".switchboard").mkdir()
+        (wt / ".switchboard" / "notes").mkdir()
+
+        self.assertEqual(Broker(self.db, self.h, repo=wt).link_config(), ["CLAUDE.md"])
+        self.assertFalse((wt / ".switchboard").is_symlink())
+        self.assertTrue((wt / ".switchboard" / "notes").is_dir())
+
     # -- init ------------------------------------------------------------
 
     # -- protocol sync ---------------------------------------------------
