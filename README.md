@@ -39,9 +39,10 @@ parent ends its turn and is woken when a child reports. A parent that decides to
 child's work itself is the failure mode this design is arranged against, and the prompts
 say so in as many words.
 
-**Nothing ever waits on anything.** There is no `ask`, no `wait`, no blocking call
-between agents — they were tried and deleted. `sb tell` writes a message and rings a
-doorbell, in one of three delivery modes:
+**Nothing ever blocks.** There is no `ask` and no blocking call between agents — they were
+tried and deleted. `sb waiting`, for a turn ending with child or background work still out,
+is no exception: it records the wait, returns, and the agent is woken when the work lands.
+`sb tell` writes a message and rings a doorbell, in one of three delivery modes:
 
 - *next turn* (the default) — queued by the agent's own system and picked up at its next
   step. Cancels nothing.
@@ -66,9 +67,11 @@ person writes the full question as the last message in its own chat and then cal
 `sb block`, which ends its turn. The board lights up, the human reads that chat, answers
 by typing into the pane, and the agent clears its own block and carries on.
 
-That is the whole agent-facing vocabulary: `delegate`, `tell`, `inbox`, `done`, `block`,
-`status`. The rest of `sb` — `cleanup`, `restore`, `inspect`, `log`, `board`, `workspace`,
-`doctor` — is the human's. `sb board` is gated, not merely undocumented: it checks who is
+That is the core agent-facing vocabulary: `delegate`, `tell`, `inbox`, `done`, `block`,
+`status` — with `waiting`, `merge`, `grant`, `cleanup`, `restore` and `presets` beside it
+as the tree grew, and `plugin` for the installed ones (plan and PR tracking, bug
+reporting). The operator's own — `board`, `workspace`, `inspect`, `log`, `doctor`, `start`
+— is a separate set. `sb board` is gated, not merely undocumented: it checks who is
 calling and refuses an agent, because a screen made for a person is not a place an agent
 should be reading its own state from.
 
@@ -98,7 +101,7 @@ well enough to adopt instead.
 
 ## Architecture
 
-About sixteen thousand lines of Python, standard library only — with one optional
+About thirty-three thousand lines of Python, standard library only — with one optional
 exception. `tomllib` and `sqlite3` do the work a config parser and a database would
 otherwise be pulled in for, and nothing switchboard *does* needs anything installed.
 
@@ -156,7 +159,7 @@ says which:
   No model name appears anywhere in the code; a role is a markdown file; adding a
   behaviour means adding a file and registering it nowhere.
 
-There is a pytest suite in `tests/` — around 1,700 tests, no network and no herdr
+There is a pytest suite in `tests/` — around 2,400 tests, no network and no herdr
 required — covering the store's migration paths, the herdr adapter against a fake runner
 whose cases were each verified against the live binary, and the structural rules above.
 `python -m pytest tests` runs it, in parallel across every core (`pytest.ini` sets
