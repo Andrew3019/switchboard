@@ -1110,6 +1110,11 @@ def _degraded(deficit: list[str], cmd: str) -> str:
 # the fleet-wide max/p95 this report exists to make legible. Nothing is lost: efficiency
 # analysis is about command cost, not how long a person left a dashboard open.
 _USAGE_SKIP = {"board"}
+# An env marker an internal sb-subprocess sets to keep its own call out of the usage log.
+# The board's per-agent `sb inspect` poll (board.py `_inspect`) sets it: that poll was
+# ~99.7% of every `inspect` row and buried the real agent/human signal the log exists for.
+# Agents never set it, so their own `sb inspect` calls are still recorded.
+_USAGE_SKIP_ENV = "SB_BOARD_POLL"
 
 
 def _usage_command(argv: list[str]) -> Optional[str]:
@@ -1203,7 +1208,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         # Never `return`/`break` here: a finally that returns would swallow the SystemExit
         # this block re-raises. Guard with a plain condition instead.
         try:
-            if capture["command"] not in _USAGE_SKIP:
+            if capture["command"] not in _USAGE_SKIP and not os.environ.get(_USAGE_SKIP_ENV):
                 # Validation and parser failures happen before the store is opened. They
                 # still get repo identity when git can resolve it; outside a repo, null.
                 if capture["repo"] is None:

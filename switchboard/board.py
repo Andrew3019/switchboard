@@ -2905,8 +2905,12 @@ def _inspect(name: str) -> Optional[dict]:
     if not sb:
         return None
     try:
+        # SB_BOARD_POLL keeps this poll out of the usage log — it fires per agent per
+        # render and would otherwise be ~99.7% of every `inspect` row. The name mirrors
+        # `cli._USAGE_SKIP_ENV`; copied rather than imported, like the rest of this renderer.
         p = subprocess.run([sb, "inspect", name, "--json", "-n", "1", "--events", "1"],
-                           capture_output=True, text=True, timeout=_INSPECT_TIMEOUT)
+                           capture_output=True, text=True, timeout=_INSPECT_TIMEOUT,
+                           env={**os.environ, "SB_BOARD_POLL": "1"})
     except (OSError, subprocess.SubprocessError):
         return None
     if p.returncode != 0:
