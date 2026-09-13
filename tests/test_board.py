@@ -30,7 +30,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import board, panel, richboard, status  # noqa: E402
+from switchboard import board, cli, panel, richboard, status  # noqa: E402
 
 # `rich` is optional — `richboard.available()` is asked rather than assumed, and where the
 # answer is no `richboard.layout` returns None by contract and the plain renderer draws.
@@ -2673,6 +2673,21 @@ class InspectDeadlineTest(unittest.TestCase):
         self.assertEqual(seen["timeout"], board._INSPECT_TIMEOUT)
         self.assertGreater(board._INSPECT_TIMEOUT, 12)
         self.assertGreater(board._INSPECT_TIMEOUT, board._SUBPROCESS_TIMEOUT)
+
+    def test_the_board_poll_marks_its_inspect_so_the_usage_log_skips_it(self):
+        # The board forks `sb inspect` per agent per render — ~99.7% of every `inspect`
+        # usage row. It sets SB_BOARD_POLL on that subprocess so `cli`'s recorder drops it,
+        # keeping the log to real agent/human activity. Agents never set it. The name is
+        # asserted against `cli._USAGE_SKIP_ENV` so the two halves cannot drift apart.
+        seen = {}
+
+        def spy(argv, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+        with mock.patch.object(board.subprocess, "run", spy):
+            board._inspect("w1")
+        self.assertEqual(seen["env"].get(cli._USAGE_SKIP_ENV), "1")
 
     def test_a_slow_but_working_inspect_is_read_rather_than_lost(self):
         # Both halves against one live child: the deadline is the whole of what decides

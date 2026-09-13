@@ -45,6 +45,18 @@ class ArgumentCaptureTests(unittest.TestCase):
         self.assertEqual([row["argv"] for row in rows],
                          [["plugins", "why did this stop working"]])
 
+    def test_a_call_marked_as_a_board_poll_is_not_recorded(self):
+        # The board's per-agent `sb inspect` poll sets SB_BOARD_POLL (board.py `_inspect`).
+        # `main()` must drop such a call, or ~99.7% of `inspect` rows are board noise. The
+        # control above proves the same command WITHOUT the marker does write a row.
+        with mock.patch.dict(os.environ, {cli._USAGE_SKIP_ENV: "1"}):
+            with self.assertRaises(SystemExit):
+                cli.main(["plugins", "why did this stop working"])
+        sink = usage.usage_dir()
+        rows = [line for path in sorted(sink.glob("*.jsonl"))
+                for line in path.read_text().splitlines()]
+        self.assertEqual(rows, [])
+
 
 class ModelCaptureTests(unittest.TestCase):
     """What a row has to carry so a Luna-vs-Claude split is answerable later."""
