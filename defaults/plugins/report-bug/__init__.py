@@ -255,7 +255,7 @@ def _render(ctx, args, what: str, now) -> str:
 def _session_tail(agent: Optional[str]) -> str:
     """The last `TAIL_LINES` lines of this agent's pane, or "" if that cannot be had.
 
-    `sb inspect --json` rather than any import: `switchboard.plugins` is the one sb module
+    `sb inspect --json --full` rather than any import: `switchboard.plugins` is the one sb module
     a plugin may reach for, and it deliberately hands over no store handle and no broker.
     Shelling out to the CLI is the same door `_sb_version` uses.
 
@@ -266,7 +266,7 @@ def _session_tail(agent: Optional[str]) -> str:
     if not agent:
         return ""
     try:
-        r = subprocess.run(["sb", "inspect", agent, "-n", str(TAIL_LINES), "--json"],
+        r = subprocess.run(["sb", "inspect", agent, "-n", str(TAIL_LINES), "--json", "--full"],
                            capture_output=True, text=True, timeout=TIMEOUT)
         if r.returncode != 0 or not r.stdout.strip():
             return ""

@@ -2799,6 +2799,62 @@ def render(snap: Snapshot, *, show_archived: Optional[bool] = None) -> str:
     return "\n".join(l.rstrip() for l in lines)
 
 
+def render_compact(snap: Snapshot, *, show_archived: Optional[bool] = None) -> str:
+    """The default agent-facing status view: one decision-bearing line per row.
+
+    ``render`` remains the complete pre-v2 table for ``--full``. The compact view keeps
+    identity, role, state, task and attention markers while dropping duplicate telemetry
+    columns and per-row explanatory lines. Warnings and the summary remain, so reducing
+    output cannot hide work that needs a decision.
+    """
+    if show_archived is None:
+        show_archived = SHOW_ARCHIVED
+    lines: list[str] = []
+    if snap.herdr_error:
+        lines.append(f"! herdr unreachable ({snap.herdr_error}) — store-only status")
+    if not snap.agents:
+        lines.append("(no agents)" + (f"  [{snap.hidden} hidden by filters]" if snap.hidden else ""))
+        return "\n".join(lines)
+
+    rows = display_rows(snap.agents, show_archived=show_archived)
+    for row in rows:
+        if isinstance(row, Collapsed):
+            lines.append(collapsed_label(row))
+            continue
+        indent = "  " * row.depth
+        line = f"{indent}{row.name} ({row.role})  {row.display_state}"
+        if row.task:
+            line += f" — {clip(row.task, 120)}"
+        elif row.finished and row.summary:
+            line += f" — {clip(row.summary, 120)}"
+        if row.unread:
+            line += f" · {row.unread} unread"
+        flags = _flags(row)
+        if flags:
+            line += flags
+        lines.append(line.rstrip())
+
+    lines.append("")
+    lines.append(summary_line(snap))
+    lines.extend(_attention(snap))
+    return "\n".join(l.rstrip() for l in lines)
+
+
+def compact_dict(snap: Snapshot, *, field_limit: int = 240) -> dict:
+    """Stable JSON status with large free-text fields reduced to summaries.
+
+    The key set intentionally matches :meth:`Snapshot.as_dict`; consumers can migrate by
+    changing only their requested level, while task and summary text stays bounded.
+    """
+    data = snap.as_dict()
+    for agent in data.get("agents", ()):
+        for key in ("task", "summary", "blocked_why"):
+            value = agent.get(key)
+            if isinstance(value, str):
+                agent[key] = clip(value, field_limit)
+    return data
+
+
 def _what(a: AgentStatus) -> list[str]:
     """What this agent is actually doing, under its row.
 
@@ -3236,3 +3292,52 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
         else:
             out.append("  (nothing)")
     return "\n".join(l.rstrip() for l in out)
+
+
+def render_compact_detail(d: Detail) -> str:
+    """The default ``inspect`` view, focused on the caller's next action."""
+    a = d.agent
+    head = f"{a.name} ({a.role})  {a.display_state}"
+    if a.parent:
+        head += f"  parent {a.parent}"
+    out = [head]
+    out.append(f"  task       {clip(a.task, 160) if a.task else '(none recorded)'}")
+    out.append(f"  workspace  {a.workspace or '-'}")
+    if a.blocked and a.blocked_why:
+        out.append(f"  blocked    {clip(a.blocked_why, 160)}")
+    if d.undelivered:
+        out.append(f"  mail       {len(d.undelivered)} undelivered, oldest "
+                   f"{fmt_age(a.undelivered_age)}")
+    elif d.unread:
+        out.append(f"  mail       {len(d.unread)} unread")
+    else:
+        out.append("  mail       none")
+    if a.summary:
+        out.append(f"  last done  {clip(a.summary, 160)}")
+    if d.output is not None:
+        out.append(f"  output     {d.output.source}" +
+                   (f" ({d.output.detail})" if d.output.detail else ""))
+    else:
+        out.append("  output     not read (use --full for terminal detail)")
+    return "\n".join(out)
+
+
+def compact_detail_dict(d: Detail, *, field_limit: int = 240,
+                        output_limit: int = 1000) -> dict:
+    """Stable inspect JSON with free text summarized but board paths preserved."""
+    data = d.as_dict()
+    for key in ("task", "summary", "blocked_why"):
+        value = data.get(key)
+        if isinstance(value, str):
+            data[key] = clip(value, field_limit)
+    for group in ("unread_mail", "undelivered_mail"):
+        for message in data.get(group, ()):
+            if isinstance(message.get("body"), str):
+                message["body"] = clip(message["body"], field_limit)
+    for event in data.get("events", ()):
+        if isinstance(event.get("payload"), str):
+            event["payload"] = clip(event["payload"], field_limit)
+    output = data.get("output")
+    if isinstance(output, dict) and isinstance(output.get("text"), str):
+        output["text"] = clip(output["text"], output_limit)
+    return data

@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import cli as cli_mod, config  # noqa: E402
 from switchboard import herdr as herdr_mod, status, store  # noqa: E402
+from switchboard.broker import Broker  # noqa: E402
 from switchboard.herdr import Agent, Herdr, HerdrError  # noqa: E402
 
 
@@ -1503,6 +1504,17 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(d["counts"]["stalled"], 1)
         self.assertEqual(d["counts"]["unread"], 1)
 
+    def test_status_output_levels_keep_full_detail_out_of_the_default(self):
+        store.create_agent(self.db, name="root", role="lead", task="x" * 500)
+        snap = status.collect(self.db, FakeHerdr([alive("root")]))
+        compact = status.render_compact(snap)
+        full = status.render(snap)
+        self.assertLess(len(compact), len(full))
+        self.assertIn("root (lead)", compact)
+        self.assertNotIn("HERDR", compact)
+        payload = status.compact_dict(snap)
+        self.assertLessEqual(len(payload["agents"][0]["task"]), 240)
+
 
 _STATUS_JSON_SAMPLE = {                                  # a minimal legal argv per verb
     "start": [], "delegate": ["do a thing"],
@@ -1514,6 +1526,7 @@ _STATUS_JSON_SAMPLE = {                                  # a minimal legal argv 
     # `models`' two siblings. The role name is optional, so a bare listing is the
     # minimal legal argv for both.
     "roles": [], "capabilities": [], "instructions": [],
+    "context": [], "whoami": [],
     "cleanup": [], "workspace": ["list"], "restore": ["w1"],
     "grant": ["w1", "spawn"],
     "who-holds": ["spawn"],
@@ -1596,6 +1609,24 @@ class StatusCliTest(unittest.TestCase):
         self.assertEqual(_reason(KeyError("no such agent: w1")), "no such agent: w1")
         self.assertEqual(_reason(ValueError("no such agent: w1")), "no such agent: w1")
         self.assertEqual(_reason(KeyError()), "")
+
+    def test_context_alias_and_output_levels_parse(self):
+        from switchboard.cli import build_parser
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["context"]).cmd, "context")
+        self.assertEqual(parser.parse_args(["whoami"]).cmd, "whoami")
+        self.assertTrue(parser.parse_args(["--full", "status"]).full)
+        self.assertTrue(parser.parse_args(["status", "--full"]).full)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        db = store.connect(path=root / "state.db")
+        self.addCleanup(db.close)
+        store.create_agent(db, name="root", role="lead", task="ship the fix",
+                           parent=None, workspace="wave")
+        context = cli_mod._context_data(Broker(db, FakeHerdr(), repo=root), db, "root")
+        self.assertEqual(context["assignment"], "ship the fix")
+        self.assertEqual(context["workspace"], "wave")
 
 class StatusArchivedCliTest(unittest.TestCase):
     """`sb status` end to end, because the parser alone cannot see the wiring.
