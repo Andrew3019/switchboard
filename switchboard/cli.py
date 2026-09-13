@@ -282,24 +282,26 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("message")
     # Says what it does to the RECIPIENT, because what it does to the sender is nothing:
     # `tell` still returns immediately, and no agent ever waits on another agent.
-    t.add_argument("--needs-reply", action="store_true",
-                   help="tell them you are waiting for a reply — they are asked to answer "
-                        "at some point. You do not wait: this returns immediately")
-    # DESIGN-TRUTH: "`sb tell` has three delivery modes." Mutually exclusive because they
-    # are one choice with three answers, and argparse saying so beats the broker raising on
-    # a combination that was never meant to exist. No `--next-turn` flag: the default is
-    # the answer for almost every message, and a flag for it would only invite the reader
-    # to think there is a fourth thing to decide.
+    reply = t.add_mutually_exclusive_group()
+    reply.add_argument("--needs-reply", action="store_true",
+                       help="tell them you are waiting for a reply — they are asked to answer "
+                            "at some point. You do not wait: this returns immediately")
+    reply.add_argument("--no-reply", action="store_true",
+                       help="tell them no reply is expected; reply only if something is "
+                            "wrong or blocking")
+    # §7 defines two delivery modes. The old when-idle spelling remains
+    # accepted as a compatibility alias for NORMAL, while interrupt is the only explicit
+    # alternative. No `--normal` flag: the default is the answer for almost every message.
     m = t.add_mutually_exclusive_group()
     m.add_argument("--when-idle", dest="mode", action="store_const",
-                   const=broker_mod.WHEN_IDLE,
-                   help="hold it until they have finished what they are doing. The "
-                        "default reaches them at their next step, which is sooner")
+                   const=broker_mod.NORMAL,
+                   help="compatibility alias for NORMAL; deliver at their next turn "
+                        "boundary instead of holding until idle")
     m.add_argument("--interrupt", dest="mode", action="store_const",
                    const=broker_mod.INTERRUPT,
                    help="CANCEL what they are doing and deliver this instead — for "
                         "changing course, not for being quick")
-    t.set_defaults(mode=broker_mod.NEXT_TURN)
+    t.set_defaults(mode=broker_mod.NORMAL)
 
     # Agents only. A human has no mailbox — see the `inbox` branch in `run`.
     ib = cmd("inbox", help="read your unread messages")
@@ -1421,6 +1423,18 @@ def _needs_reply(m) -> bool:
         return False
 
 
+def _no_reply(m) -> bool:
+    """Whether this message asks the recipient not to answer by default.
+
+    Older stores do not have the additive column, so they keep their pre-v2 meaning and
+    render without the courtesy line until the schema migrates.
+    """
+    try:
+        return bool(m["no_reply"])
+    except (IndexError, KeyError):
+        return False
+
+
 def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     cmd = args.cmd
 
@@ -1602,7 +1616,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "tell":
         ids = b.tell(args.who, args.message, me=me,
-                     needs_reply=args.needs_reply, mode=args.mode)
+                     needs_reply=args.needs_reply, no_reply=getattr(args, "no_reply", False),
+                     mode=args.mode)
         # Whether the doorbell actually rang. `tell` used to report plain success even
         # when the ring failed outright, so the sender proceeded believing the handoff had
         # happened — liveness loss, which in an async system is worse than an error.
@@ -1635,14 +1650,11 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         lost = [n for n in lost if n not in closed]
         notes = []
         if waiting:
-            # Being mid-turn only holds a message back in `--when-idle`; the default rings
-            # a working agent on the spot. So the two modes get told different things, and
-            # neither is told the other's reason: under the default, a target still waiting
-            # is one that has STOPPED for a person, and "mid-turn" would send the sender
-            # looking for a turn that is not running.
-            why = ("mid-turn or blocked" if args.mode == broker_mod.WHEN_IDLE
-                   else "blocked, waiting on the human")
-            notes.append(f"{', '.join(waiting)} {why} — will be rung when free")
+            # NORMAL queues at the next turn boundary, so an undelivered target is blocked
+            # on a human (or otherwise unavailable), never merely mid-turn. The old
+            # `--when-idle` spelling is normalized before this report is built.
+            notes.append(f"{', '.join(waiting)} blocked, waiting on the human — "
+                         "will be rung when free")
         if lost:
             notes.append(f"{', '.join(lost)} UNREACHABLE — herdr no longer answers to its "
                          f"name and the doorbell will not ring again; the message is "
@@ -1689,6 +1701,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             if _needs_reply(m):
                 lines.append("    " + config.prompt("notify.needs_reply", b.repo,
                                                     who=m["from_agent"]))
+            if _no_reply(m):
+                lines.append("    " + config.prompt("notify.no_reply", b.repo))
         _emit(args, "\n".join(lines),
               {"messages": [dict(m) for m in msgs]})
         return 0

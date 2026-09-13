@@ -42,17 +42,16 @@ say so in as many words.
 **Nothing ever blocks.** There is no `ask` and no blocking call between agents — they were
 tried and deleted. `sb waiting`, for a turn ending with child or background work still out,
 is no exception: it records the wait, returns, and the agent is woken when the work lands.
-`sb tell` writes a message and rings a doorbell, in one of three delivery modes:
+`sb tell` writes a message and rings a doorbell, in one of two delivery modes:
 
-- *next turn* (the default) — queued by the agent's own system and picked up at its next
-  step. Cancels nothing.
-- *when idle* — held until the target's turn actually ends. This is how a parent that has
-  gone quiet learns a child finished, without polling.
+- *NORMAL* (the default) — queued by the agent's own system and picked up at its next
+  step. Cancels nothing. The old `--when-idle` spelling remains accepted as an alias.
 - *interrupt* — cancels the turn in progress and delivers the instruction instead. For
   changing course, and nothing else.
 
 A question is `sb tell --needs-reply`, which asks someone to answer at some point and
-returns straight away.
+returns straight away. `sb tell --no-reply` asks for no response unless something is
+actually wrong or blocking.
 
 **Work is reported upward as a summary, not a transcript.** `sb done` is how an agent
 finishes: it commits, then writes one or two lines saying what it was asked, what it did,

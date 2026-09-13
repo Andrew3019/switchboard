@@ -9,23 +9,23 @@ Everything here obeys one rule: the agent states an intent, the tooling does the
 Some verbs look like duplicates of each other and are not. The distinctions are
 load-bearing, so they are written down where the code is rather than argued about again:
 
-- **`tell`'s three delivery modes.** `tell` writes a durable message and, when it fits a
+- **`tell`'s two delivery modes.** `tell` writes a durable message and, when it fits a
   safe single prompt, carries that tagged payload directly. Otherwise it rings a mailbox
   doorbell. *next-turn*, the default, sends straight away: the prompt QUEUES and
   the agent's own system delivers it at the next point the model can act, so nothing is
-  cancelled and nothing waits. *when-idle* holds the ring until the target's turn has
-  ended. *interrupt* cancels the turn with `esc` and puts the instruction itself on the
-  wire. Deferring an interrupt would defeat it; interrupting on every `tell` is what the
-  other two modes exist to stop. See `TELL_MODES`.
+  cancelled and nothing waits. *interrupt* cancels the turn with `esc` and puts the
+  instruction itself on the wire. Deferring an interrupt would defeat it; interrupting on
+  every `tell` is what NORMAL exists to stop. Legacy *next-turn* and *when-idle* spellings
+  are accepted as NORMAL. See `TELL_MODES`.
 - **`block` vs telling somebody.** The human has NO mailbox, so needing a person is always
   a block. `block` ends the turn and the doorbell restarts it, which for an answer that may
   take hours is the only shape that is not a trap. There is no verb that waits: `sb ask`
   used to be one, blocking its caller in a poll loop, and it is gone — no agent ever waits
   on another agent, so a question is a `tell --needs-reply` and the answer is a `tell`
   back.
-- **`wait` vs deferred delivery.** They are deliberately not merged; see status.py.
-  Deferred delivery is what `--when-idle` does to a message, and `wait` serves callers
-  that are not agents.
+- **`wait` vs explicit holdback.** They are deliberately not merged; see status.py.
+  `wait` serves callers that are not agents, while a small set of internal mutation
+  signals may still use an explicit coalescing holdback.
 """
 
 from __future__ import annotations
@@ -169,6 +169,8 @@ LIFECYCLE_PROMPTS = (
      "`sb tell --interrupt` cancels what this agent is doing, mid-turn"),
     ("notify.needs_reply",
      "a message arrived with `--needs-reply`; the sender wants an answer eventually"),
+    ("notify.no_reply",
+     "a message arrived with `--no-reply`; the sender wants no answer unless something is wrong"),
     ("notify.preset",
      "`sb presets <name> --apply` pastes a preset into this agent's own session"),
     ("notify.granted",
@@ -239,24 +241,36 @@ INTERRUPT_SETTLE = config.setting("timeouts.interrupt_settle")
 # remains the separate admission cap for one stored message.
 INLINE_MAIL_MAX = config.setting("limits.inline_mail")
 
-# DESIGN-TRUTH: "`sb tell` has three delivery modes." They differ only in WHEN the
+# §7: `sb tell` has two delivery modes. They differ only in WHEN the
 # doorbell is allowed to ring and whether the turn in progress survives it:
 #
 #   next-turn   ring now. `agent prompt` queues the text and the agent's own system hands
 #               it over at the next point the model can act — the instant the in-flight
 #               tool call returns. Nothing is cancelled and nothing waits. The default.
-#   when-idle   hold the ring until the target has no turn left to end. What every
-#               message did before modes existed, and what `sb done` still uses.
 #   interrupt   cancel the turn with `esc` and put the instruction itself on the wire.
+#
+# `next-turn` and `when-idle` remain accepted as compatibility spellings by the Python
+# API, but both now mean NORMAL. Keeping their names here avoids breaking older callers
+# while making the externally visible mode set the two values specified by §7.
 #
 # That next-turn is reachable at all is a measured fact, not an assumption: `agent prompt`
 # was sent into three genuine 90-second single tool calls and all three ran to completion
 # with the text delivered at the boundary after them. The older note here — "`agent
 # prompt` INTERLEAVES" — was wrong; see `Herdr.prompt`.
-NEXT_TURN = "next-turn"
-WHEN_IDLE = "when-idle"
+NORMAL = "normal"
+NEXT_TURN = "next-turn"       # legacy spelling; normalized to NORMAL
+WHEN_IDLE = "when-idle"       # legacy spelling; normalized to NORMAL
 INTERRUPT = "interrupt"
-TELL_MODES = (NEXT_TURN, WHEN_IDLE, INTERRUPT)
+TELL_MODES = (NORMAL, INTERRUPT)
+
+
+def normalize_tell_mode(mode: str) -> str:
+    """Map pre-v2 tell modes onto the two §7 delivery modes."""
+    if mode in (NORMAL, NEXT_TURN, WHEN_IDLE):
+        return NORMAL
+    if mode == INTERRUPT:
+        return INTERRUPT
+    raise ValueError(f"no such delivery mode: {mode} (one of {', '.join(TELL_MODES)})")
 
 
 def tag(sender: str) -> str:
@@ -354,8 +368,8 @@ SIGNAL = "signal"
 # agent on purpose, and delaying that would be a new latency for the sake of a burst that
 # does not happen. And the two absolute carve-outs are not in this tuple's gift at all:
 # `block` writes no message row and rings nothing (it goes to `_surface`), and
-# `--interrupt` is `mode=INTERRUPT`, which never reaches the holdback because it never
-# reaches the when-idle branch. Neither is exempted by being missing from a kind list;
+# `--interrupt` is `mode=INTERRUPT`, which never reaches the explicit holdback. Neither
+# is exempted by being missing from a kind list;
 # both are exempt because they are not this shape of thing.
 HELD_RING_KINDS = ("done", "failed", SIGNAL)
 # The event `_ring` writes when it holds a doorbell back on the IDLE path, and the one
@@ -6208,9 +6222,10 @@ class Broker:
 
     def tell(
         self, targets: Iterable[str], message: str, *, me: Optional[str] = None,
-        kind: str = "tell", needs_reply: bool = False, mode: str = NEXT_TURN,
+        kind: str = "tell", needs_reply: bool = False, no_reply: bool = False,
+        mode: str = NORMAL,
     ) -> list[int]:
-        """Send and return, always. `needs_reply` changes what the recipient READS.
+        """Send and return, always. Reply flags change what the recipient READS.
 
         It records that the sender is waiting for an answer, so the recipient's `sb inbox`
         tells it to reply at some point. It does not make the sender wait, poll or block —
@@ -6220,15 +6235,15 @@ class Broker:
         reason.
 
         `mode` chooses WHEN the doorbell rings — see `TELL_MODES`. The sender returns
-        immediately in all three: even *interrupt*, which is the only one that changes what
+        immediately in both: even *interrupt*, which is the only one that changes what
         the recipient is doing, is over the moment the keypress and the text are on the
-        wire. Defaulting to *next-turn* rather than *when-idle* is the whole of item 3.1:
+        wire. NORMAL is the next-turn mode; old *next-turn* and *when-idle* spellings are
+        normalized to it for compatibility:
         the message a busy agent is sent now reaches it at its next tool-call boundary
         instead of sitting until its entire turn has ended, which measured five and a half
         minutes the last time it was timed.
         """
-        if mode not in TELL_MODES:
-            raise ValueError(f"no such delivery mode: {mode} (one of {', '.join(TELL_MODES)})")
+        mode = normalize_tell_mode(mode)
         me = me or self.whoami()
         ids = []
         for who in targets:
@@ -6261,11 +6276,12 @@ class Broker:
                 # Its own path from the first line: the text travels INLINE rather than
                 # behind a doorbell, so the row it writes holds the cancel wrapper and is
                 # marked read on delivery. Nothing below this branch applies to it.
-                ids.append(self._interrupt(t, message, me=me, needs_reply=needs_reply))
+                ids.append(self._interrupt(t, message, me=me, needs_reply=needs_reply,
+                                           no_reply=no_reply))
                 continue
             mid = store.put_message(
                 self.db, from_agent=me, to_agent=t, kind=kind, body=message,
-                needs_reply=needs_reply,
+                needs_reply=needs_reply, no_reply=no_reply,
             )
             ids.append(mid)
             # Only the human answers a block, so only the human's `tell` clears one.
@@ -6392,7 +6408,7 @@ class Broker:
             return True, None
         causal = [m for m in mine if m["id"] > wait["after_id"]]
         # A direct instruction supersedes every kind of wait, but the intent is cleared
-        # only after the prompt actually lands. While a when-idle delivery is still held,
+            # only after the prompt actually lands. While an explicit delivery hold is still held,
         # the stop hook must continue to recognize the turn as intentionally waiting.
         if any(m["kind"] in ("ask", "tell") for m in causal):
             return True, wait
@@ -6456,8 +6472,10 @@ class Broker:
         lines = []
         for m in mine:
             line = f"{tag(m['from_agent'])} {m['body']}"
-            if m["needs_reply"]:
+            if _column(m, "needs_reply"):
                 line += " " + self._say("notify.needs_reply", who=m["from_agent"])
+            if _column(m, "no_reply"):
+                line += " " + self._say("notify.no_reply")
             lines.append(line)
         text = " ".join(lines)
         try:
@@ -8944,7 +8962,8 @@ class Broker:
                                            a["name"]))
 
     def _interrupt(self, name: str, text: str, *, me: Optional[str] = None,
-                   stop: bool = True, needs_reply: bool = False) -> int:
+                   stop: bool = True, needs_reply: bool = False,
+                   no_reply: bool = False) -> int:
         """Change course mid-flight — `tell(..., mode=INTERRUPT)`'s implementation.
 
         Private, and no longer a verb of its own: interrupting is a delivery mode of
@@ -8984,11 +9003,14 @@ class Broker:
             except HerdrError as e:
                 store.log_event(self.db, kind="interrupt_stop_failed", agent=name, error=str(e))
         body = f"{tag(me)} {self._say('notify.interrupt', text=text)}"
+        delivery = body
+        if no_reply:
+            delivery += " " + self._say("notify.no_reply")
         mid = store.put_message(self.db, from_agent=me, to_agent=name, kind="tell", body=body,
-                                needs_reply=needs_reply)
+                                needs_reply=needs_reply, no_reply=no_reply)
         # Raises Undeliverable if it cannot land — deliberately not caught here. The store
         # row survives it, undelivered, which is exactly the state a queued `tell` is in.
-        self._ring(name, body, mode=INTERRUPT)
+        self._ring(name, delivery, mode=INTERRUPT)
         store.mark_collected(self.db, mid)
         store.log_event(self.db, kind="interrupt", agent=name, stopped=stop, text=text[:EVENT_CLIP])
         return mid
@@ -9190,10 +9212,9 @@ class Broker:
 
         OUR signal first (`agents.turn`, written by the hooks in `hooks.py` at the two
         edges of a turn), herdr's screen reading only where we have none. This is the
-        single most load-bearing consumer of it: `_ring` holds a when-idle doorbell back
-        on this answer. When herdr's busy detector went dark for every Claude pane on the
-        machine, that inverted — held mail was delivered into turns that were still
-        running.
+        the explicit holdback path uses this answer. Normal tell delivery no longer waits
+        on it. When herdr's busy detector went dark for every Claude pane on the machine,
+        that inverted — held mail was delivered into turns that were still running.
 
         Unknown still reads as not busy, and only the *unknown* case does: the doorbell
         this gates is held back for a busy agent, and holding it back on a hunch is how
@@ -9321,7 +9342,7 @@ class Broker:
         - **`block` is not in this work list at all.** It writes no message row; it goes
           to `_surface`, straight to a person.
         - **`--interrupt` never reaches this method.** It is delivered by `_ring` on the
-          spot with `mode=INTERRUPT`, and every ring this drain sends is when-idle.
+          spot with `mode=INTERRUPT`, and every ring this drain sends is NORMAL.
 
         None of the three is a `kind` a filter has to remember to exclude, which is the
         property that keeps this safe to extend: a new coalescing ring joins
@@ -9362,7 +9383,7 @@ class Broker:
         enter didn't go through."
 
         OFF EVERYBODY'S TURN, which is the whole shape of it. Next-turn delivery waits for
-        nothing and cancels nothing (DESIGN-TRUTH: "`sb tell` has three delivery modes."),
+        nothing and cancels nothing under the NORMAL §7 delivery mode,
         and it still does not: routing the doorbell through `Herdr.deliver` instead was
         measured at three to six minutes per `tell`, ending in a false failure, because that
         proof cannot see a submission to a busy agent at all until its turn ends. And the
@@ -9759,29 +9780,23 @@ class Broker:
 
         The carve-outs are untouched and this path cannot reintroduce a hold on either:
         `block` writes no message row at all, and `--interrupt` is `mode=INTERRUPT`, which
-        never reaches the when-idle branch the holdback lives on. Both stay exempt by
+        never reaches the explicit holdback. Both stay exempt by
         shape, not by a filter this method would have to remember.
         """
         for target in who:
             self._ring(target, f"{tag(frm)} {self._say('notify.mail')}",
                        mode=WHEN_IDLE, hold=True)
 
-    def _ring(self, who: str, text: str, *, mode: str = WHEN_IDLE,
+    def _ring(self, who: str, text: str, *, mode: str = NORMAL,
               answer: bool = False, repair: bool = True, hold: bool = False) -> bool:
         """Deliver pending mail inline when safe, or ring its durable inbox.
 
-        `mode` is the delivery mode of the `tell` behind it (see `TELL_MODES`), and the
-        only thing it decides here is what to do about a target that is mid-turn:
-
-        - *when-idle* holds the ring — `ring_deferred` — and `flush_pending` rings it once
-          the turn has ended. The default, because most callers here are not a `tell` at
-          all: `done`'s poke to a parent, and `flush_pending`'s own re-ring, are both
-          when-idle by their nature (DESIGN-TRUTH: "`sb done` keeps the agent open." for `done`).
-        - *next-turn* rings anyway. `agent prompt` queues rather than interleaves — three
-          90-second single tool calls, none cut short, text delivered at the boundary
-          after each — so this is not a stealth interrupt: the in-flight tool call
-          finishes and the text is waiting when it does.
-        - *interrupt* rings anyway too, and its caller has already sent `esc`. It is also
+        `mode` is the delivery mode of the `tell` behind it (see `TELL_MODES`). NORMAL
+        rings a busy target immediately; `agent prompt` queues rather than interleaves —
+        three 90-second single tool calls, none cut short, text delivered at the boundary
+        after each — so this is not a stealth interrupt: the in-flight tool call finishes
+        and the text is waiting when it does.
+        *interrupt* rings anyway too, and its caller has already sent `esc`. It is also
           the one mode whose send is CONFIRMED rather than fired and hoped for — see
           `_deliver_interrupt` — because it is the one mode whose text is the message.
 
@@ -9839,6 +9854,7 @@ class Broker:
         a wasted `sb inbox` and nothing else. `apply_preset` is the exception, because there
         the ring's TEXT is the payload; see its call site.
         """
+        mode = normalize_tell_mode(mode)
         force = mode == INTERRUPT
         if who == HUMAN:
             return False
@@ -9881,13 +9897,9 @@ class Broker:
             # block (see `_unblock_if_needed`) and bury the answer it is waiting for.
             store.log_event(self.db, kind="ring_held", agent=who, reason="blocked")
             return False
-        if mode == WHEN_IDLE and self._busy(who):
-            store.log_event(self.db, kind="ring_deferred", agent=who)
-            return False
-        if hold and mode == WHEN_IDLE and not answer:
-            # The IDLE-path holdback, and the only new hold in this method. The busy path
-            # above is untouched: mail deferred while the recipient was mid-turn is still
-            # `flush_pending`'s to ring, unchanged.
+        if hold and not answer:
+            # The explicit coalescing holdback. Ordinary NORMAL mail is never held merely
+            # because the recipient is mid-turn; `agent prompt` queues it at the boundary.
             #
             # An idle recipient used to be rung here and now, individually — which is
             # correct for one child and wrong for five, because five prompts spend five
@@ -9901,7 +9913,7 @@ class Broker:
             # `answer` is out, structurally: the human's reply is the one ring that
             # clears a block, and holding it would leave an agent stopped on a question
             # that has already been answered. INTERRUPT never arrives here — it is not
-            # `WHEN_IDLE` — and `block` never rings at all.
+            # an explicit holdback — and `block` never rings at all.
             store.log_event(self.db, kind=RING_HELD_BACK, agent=who)
             return False
         if answer:
