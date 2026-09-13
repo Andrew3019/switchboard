@@ -312,6 +312,12 @@ CREATE TABLE messages (
                                       -- whoever later looks for one still unanswered. 0
                                       -- for rows predating the column, which is what they
                                       -- have always meant: an ordinary tell.
+    no_reply      INTEGER NOT NULL DEFAULT 0,  -- 1 = the sender does not expect a reply;
+                                      -- the recipient should reply only if something is
+                                      -- wrong or blocking (`sb tell --no-reply`). Stored
+                                      -- separately so the message body remains exactly
+                                      -- what the sender typed and the line survives a
+                                      -- deferred or inbox delivery.
     created_at    INTEGER NOT NULL,
     read_at       INTEGER,
     delivered_at  INTEGER,
@@ -2408,6 +2414,7 @@ def put_message(
     body: str,
     reply_to: Optional[int] = None,
     needs_reply: bool = False,
+    no_reply: bool = False,
     commit: bool = True,
 ) -> int:
     # `failed` is the one kind no agent writes: `status._record_gone` writes it about an
@@ -2428,11 +2435,19 @@ def put_message(
     # mutation and the message it owes land together or not at all.
     if kind not in ("ask", "tell", "done", "failed", "signal"):
         raise ValueError(f"bad message kind: {kind}")
+    # A live fleet may briefly run this code against a store from before this additive
+    # column was introduced. `connect()` normally migrates it in place; retaining the old
+    # INSERT shape here keeps ordinary callers usable during a degraded read/write window.
+    fields = "from_agent, to_agent, kind, body, reply_to, needs_reply"
+    values = [from_agent, to_agent, kind, body, reply_to, 1 if needs_reply else 0]
+    if "no_reply" in _columns(db, "messages"):
+        fields += ", no_reply"
+        values.append(1 if no_reply else 0)
+    fields += ", created_at"
+    values.append(now())
     cur = db.execute(
-        """INSERT INTO messages
-              (from_agent, to_agent, kind, body, reply_to, needs_reply, created_at)
-           VALUES (?,?,?,?,?,?,?)""",
-        (from_agent, to_agent, kind, body, reply_to, 1 if needs_reply else 0, now()),
+        f"INSERT INTO messages ({fields}) VALUES ({','.join('?' for _ in values)})",
+        values,
     )
     # Somebody has now given this agent something, which is the whole of what
     # `agents.awaiting_task` records. Cleared HERE rather than in `Broker.tell`, because

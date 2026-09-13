@@ -314,8 +314,10 @@ An instruction in your inbox from your parent or from the human carries the same
 authority as your original task: act on it, do not stop to ask whether it counts.
 `sb tell <who> "<msg>"` sends a message (<who> is `parent` or an agent name). It
 reaches them at their next step without stopping what they are doing, and you never
-wait; `--when-idle` holds it until they have finished instead, and `--interrupt`
-cancels what they are doing, which is for changing course and nothing else.
+wait. There are two delivery modes: NORMAL (the default, and the compatibility
+meaning of `--when-idle`) and `--interrupt`, which cancels what they are doing for a
+genuine change of course. `sb tell --no-reply` says no response is expected unless
+something is actually wrong or blocking.
 Everything sb puts in front of you is marked `[sb: from <name>]`, so a message is
 never mistaken for the human typing.
 Nothing waits for a reply: if you need one, `sb tell <who> "<question>"

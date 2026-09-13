@@ -1216,6 +1216,28 @@ class BrokerTest(unittest.TestCase):
             build_parser().parse_args(["tell", "w", "hi", "--needs-reply"]).needs_reply)
         self.assertFalse(build_parser().parse_args(["tell", "w", "hi"]).needs_reply)
 
+    def test_no_reply_is_a_distinct_tell_flag(self):
+        from switchboard.cli import build_parser
+        parser = build_parser()
+        self.assertTrue(parser.parse_args(["tell", "w", "hi", "--no-reply"]).no_reply)
+        self.assertFalse(parser.parse_args(["tell", "w", "hi"]).no_reply)
+
+    def test_no_reply_is_delivered_and_stored_without_changing_the_body(self):
+        store.create_agent(self.db, name="a", role="lead")
+        store.create_agent(self.db, name="b", role="worker", parent="a")
+        (mid,) = self.b.tell(["b"], "finished", me="a", no_reply=True)
+        row = store.get_message(self.db, mid)
+        self.assertEqual(row["body"], "finished")
+        self.assertEqual(row["no_reply"], 1)
+        self.assertIn("no reply expected", self.h.prompts[0][1])
+
+    def test_legacy_when_idle_mode_is_normal_at_a_busy_target(self):
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        self.h.states_by_name = {"w": "working"}
+        self.b.tell(["w"], "compatibility delivery", me=HUMAN, mode="when-idle")
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])
+        self.assertEqual(store.undelivered(self.db), [])
+
     def test_waiting_parses_plain_any_and_all_without_an_extra_mode(self):
         from switchboard.cli import build_parser
         parser = build_parser()
@@ -1476,16 +1498,13 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNone(store.wait_for(self.db, "lead"))
         self.assertIn("change course", self.h.prompts[-1][1])
 
-    def test_a_held_instruction_keeps_the_wait_valid_until_delivery(self):
+    def test_legacy_when_idle_instruction_wakes_a_waiting_target_as_normal(self):
         store.create_agent(self.db, name="lead", role="lead", session_id="s1")
         store.set_wait(self.db, "lead", "background")
         self.h.states_by_name = {"lead": "working"}
         self.b.tell(["lead"], "next task", me=HUMAN, mode=WHEN_IDLE)
-        self.assertIsNotNone(store.wait_for(self.db, "lead"))
-        self.h.states_by_name = {"lead": "idle"}
-        self.b._alive_cache = None
-        self.assertEqual(self.b.flush_pending(), ["lead"])
         self.assertIsNone(store.wait_for(self.db, "lead"))
+        self.assertEqual([n for n, _ in self.h.prompts], ["lead"])
 
     def test_the_reply_prompt_lands_inline_only_on_the_message_that_needs_it(self):
         store.create_agent(self.db, name="orch", role="lead")
@@ -1988,15 +2007,13 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("[sb: from orch]", doorbell)
         self.assertIn("[sb: from orch]", buf.getvalue())
 
-    def test_the_doorbell_is_held_back_while_the_target_is_mid_turn(self):
-        """WHEN IDLE only. It is no longer what an unflagged `tell` does — the default
-        rings a working agent and its own system queues the text — so this pins the mode
-        that still waits, which is what `sb done` uses."""
+    def test_the_legacy_when_idle_alias_rings_a_target_mid_turn(self):
+        """The removed hold-until-idle mode remains accepted as NORMAL."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
         self.b.tell(["w"], "not urgent", me=HUMAN, mode=WHEN_IDLE)
-        self.assertEqual(self.h.prompts, [])                       # not rung
-        self.assertEqual(len(store.undelivered(self.db)), 1)       # but not lost
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])
+        self.assertEqual(store.undelivered(self.db), [])
 
     def test_the_default_mode_rings_a_busy_agent_and_cancels_nothing(self):
         """Item 3.1's pass line. `agent prompt` queues — the text lands at the target's
@@ -2029,19 +2046,12 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual([n for n, _ in self.h.prompts], ["kid"])
 
     def test_hold_until_free_runs_on_our_own_signal_not_the_screen(self):
-        """Hold-until-free, with herdr reading exactly as it does today: idle for a pane
-        that is mid-tool-call. That reading alone delivered held mail into a running
-        turn; `agents.turn` is the fact that stops it, and the
-        ring is released by the turn's own end rather than by anything on screen."""
+        """NORMAL does not consult the old hold-until-free path."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "idle"}              # herdr's broken reading
         store.set_turn(self.db, "w", store.TURN_WORKING)   # what the hooks recorded
         self.b.tell(["w"], "not urgent", me=HUMAN, mode=WHEN_IDLE)
-        self.assertEqual(self.h.prompts, [])
-        self.assertEqual(len(store.undelivered(self.db)), 1)
-
-        store.set_turn(self.db, "w", store.TURN_IDLE)      # its `Stop` hook fired
-        self.assertEqual(self.b.flush_pending(), ["w"])
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])
         self.assertEqual(store.undelivered(self.db), [])
 
     def test_reviving_a_hookless_agent_does_not_manufacture_a_turn_it_cannot_close(self):
@@ -2068,31 +2078,20 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual([n for n, _ in self.h.prompts], ["top"])
         self.assertEqual(store.undelivered(self.db), [])
 
-    def test_pending_mail_is_rung_once_the_target_goes_idle(self):
+    def test_legacy_when_idle_mail_is_not_left_pending_until_idle(self):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
         self.b.tell(["w"], "later", me=HUMAN, mode=WHEN_IDLE)
-        self.h.states_by_name = {"w": "idle"}
-        self.b._alive_cache = None
-        self.assertEqual(self.b.flush_pending(), ["w"])
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])
         self.assertEqual(store.undelivered(self.db), [])
 
-    def test_a_parent_that_was_mid_turn_is_woken_by_the_next_flush(self):
-        """The report that goes missing: a parent in a long turn when its last child
-        finishes. `done` rings it, the ring is held back because it is working, and until
-        the collector ran this on a timer the only thing that re-rang it was the next `sb`
-        command a person happened to type (`2026-08-09-035933`).
-        """
+    def test_a_parent_that_was_mid_turn_is_woken_at_the_next_boundary(self):
+        """NORMAL delivery queues a child's report for the parent's next boundary."""
         store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
         store.create_agent(self.db, name="kid", role="worker", parent="lead",
                            pane_id="w1:p2")
         self.h.states_by_name = {"lead": "working", "kid": "working"}
         self.b.done("shipped it", me="kid")
-        self.assertEqual(self.h.prompts, [])                       # held: mid-turn
-
-        self.h.states_by_name = {"lead": "idle"}                   # the turn ends
-        self.b._alive_cache = None
-        self.assertEqual(self.b.flush_pending(), ["lead"])
         self.assertEqual([n for n, _ in self.h.prompts], ["lead"])
         self.assertIn("[done] shipped it", self.h.prompts[-1][1])
 
@@ -2215,13 +2214,13 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
         self.b.tell(["w"], "review the PR", me=HUMAN, mode=WHEN_IDLE)
-        self.assertEqual(self.h.prompts, [])                       # held back, mid-turn
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])
         self.assertEqual([m["body"] for m in self.b.inbox(me="w")], ["review the PR"])
         self.h.states_by_name = {"w": "idle"}
         self.b._alive_cache = None
         self.assertEqual(self.b.flush_pending(), [])               # nothing to announce
-        self.assertEqual(self.h.prompts, [])
-        self.assertEqual(len(store.undelivered(self.db)), 1)       # still never announced
+        self.assertEqual([n for n, _ in self.h.prompts], ["w"])
+        self.assertEqual(len(store.undelivered(self.db)), 0)
         self.assertEqual(store.unseen(self.db), [])                # but the agent knows
 
     def test_a_stale_doorbell_does_not_cancel_a_block(self):
