@@ -274,6 +274,19 @@ class PlansSandbox(ShippedSandbox):
         doc["plans"] = [json.loads(f.read_text()) for f in self._files()]
         return doc
 
+    def ok(self, *argv) -> str:
+        """Keep legacy renderer assertions explicit now that show defaults compact.
+
+        The pre-v2 tests inspect every plan field through the human view. Requesting
+        ``--full`` here preserves that coverage while the level-specific tests below use
+        the plain command to pin the new default.
+        """
+        words = list(argv)
+        if (words[:3] == ["plugin", "plans", "show"]
+                and not any(flag in words for flag in ("--json", "--full", "--markdown"))):
+            words.append("--full")
+        return super().ok(*words)
+
     def edit_step(self, sid: str, **fields) -> None:
         """A hand-edit of one step's fields, which is how a lead shapes a plan now.
 
@@ -319,6 +332,23 @@ class PlansSandbox(ShippedSandbox):
 
 
 class PlansTest(PlansSandbox):
+
+    def test_show_has_compact_default_json_summary_and_full_detail_levels(self):
+        self.data("plugin", "plans", "create", "a long output plan",
+                  "--display", "board: a long output plan")
+        doc = self._doc()
+        doc["plans"][0]["notes"] = ["n" * 1200]
+        self._save(doc)
+
+        code, compact, err = self.sb("plugin", "plans", "show", "p-1")
+        self.assertEqual(code, 0, err)
+        code, full, err = self.sb("plugin", "plans", "show", "p-1", "--full")
+        self.assertEqual(code, 0, err)
+        machine = self.data("plugin", "plans", "show", "p-1")
+        self.assertIn("notes       1", compact)
+        self.assertNotIn("n" * 1200, compact)
+        self.assertIn("n" * 1200, full)
+        self.assertLessEqual(len(machine["notes"][0]), 600)
 
     def test_a_plan_round_trips_empty_and_with_steps(self):
         """`create` with nothing makes a plan; `create` with steps makes the same plan with

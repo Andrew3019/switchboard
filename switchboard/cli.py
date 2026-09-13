@@ -6,10 +6,10 @@ few more for the human (`init`, `doctor`, `cleanup`, `restore`, `inspect`,
 than a verb: `sb plugin <name> <verb>` is whatever a plugin declared, and `sb plugin list`
 says what this repo has.
 
-Every command takes `--json`, on either side of the subcommand, so wrapping this in an MCP
-server later is mechanical (C13). It was global-only for a while, which cost a QA run its
-first three spawn attempts; `tests/test_status.py` now builds the check from the parser's
-own subcommand list so a verb added later cannot quietly miss it.
+Every command takes `--json` and `--full`, on either side of the subcommand, so wrapping
+this in an MCP server later is mechanical (C13). It was global-only for a while, which
+cost a QA run its first three spawn attempts; `tests/test_status.py` now builds the check
+from the parser's own subcommand list so a verb added later cannot quietly miss it.
 
 Arguments are checked here and nowhere else (see `_validate` and validate.py). This is
 the last point where an error can name the flag the caller typed: below it, a bad value
@@ -111,6 +111,7 @@ def _role_help() -> str:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sb", description="switchboard")
     p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--full", action="store_true", help="complete detail")
 
     # `sb <cmd> --json` is what anyone actually types — `sb --json <cmd>` requires knowing
     # that argparse cares which side of the subcommand a global flag sits, which nobody
@@ -123,6 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                         help="machine-readable output")
+    common.add_argument("--full", action="store_true", default=argparse.SUPPRESS,
+                        help="complete detail")
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -399,6 +402,9 @@ def build_parser() -> argparse.ArgumentParser:
     ss.add_argument("--archived", action="store_true",
                     help="draw archived agents individually instead of collapsing them "
                          "(the default is display.show_archived)")
+
+    cmd("context", help="show your current Switchboard context")
+    cmd("whoami", hidden=True)
     # Naming one prints it. A preset is not always a disposition stapled onto a spawn —
     # some are procedures an agent is TOLD to go and follow, and without a way to read one
     # on demand the only way to reach a procedure was to be spawned with it already
@@ -789,7 +795,6 @@ def _validate(args) -> None:
     elif cmd == "plugin":
         _validate_plugin(args)
 
-
 def _plugins_file() -> str:
     """Where enablement is written, spelled the way the config says. See `_preset_dir_help`."""
     return "{}/{}".format(config.setting("paths.repo_dir"),
@@ -817,7 +822,10 @@ def _validate_plugin(args) -> None:
         lp = argparse.ArgumentParser(prog="sb plugin list",
                                      description="what this repo has, and its state")
         lp.add_argument("--json", action="store_true", help="machine-readable output")
-        args.json = lp.parse_args(args.rest).json or args.json
+        lp.add_argument("--full", action="store_true", help="complete detail")
+        parsed = lp.parse_args(args.rest)
+        args.json = parsed.json or args.json
+        args.full = parsed.full or args.full
         return
 
     try:
@@ -851,6 +859,7 @@ def _validate_plugin(args) -> None:
     args.command = p.commands[ns._command]
     args.pargs = ns
     args.json = getattr(ns, "json", False) or args.json
+    args.full = getattr(ns, "full", False) or args.full
 
 
 # The only verbs refused while the store is degraded — see `store.schema_deficit`. All
@@ -1103,6 +1112,105 @@ def _degraded(deficit: list[str], cmd: str) -> str:
               "    sb inbox all still work, and the store rebuilds itself as soon as the\n"
               "    last agent finishes. To rebuild NOW and lose their state:\n"
               "      sb doctor --reset-store --force")
+
+
+def _context_data(b: Broker, db, me: str, *, full: bool = False) -> dict:
+    """Build the low-cost, authoritative context snapshot used by ``sb context``.
+
+    Context deliberately reads Switchboard's store rather than collecting Herdr or
+    importing plugins. The default is the universal/assignment layer; ``--full`` adds
+    placement and runtime identifiers for deliberate debugging.
+    """
+    if me == HUMAN:
+        data = {
+            "agent": HUMAN,
+            "role": None,
+            "task": None,
+            "assignment": None,
+            "plan": None,
+            "parent": None,
+            "workspace": None,
+            "pending_messages": 0,
+            "pending_questions": 0,
+            "status": "human",
+        }
+        if full:
+            data.update(children=[], session_id=None, cwd=None, branch=None,
+                        pane_id=None, turn=None, tier=None)
+        return data
+
+    row = store.get_agent(db, me)
+    if row is None:
+        # ``whoami`` can resolve a caller while a store is being migrated. Keep the
+        # context command useful without inventing a role or assignment.
+        data = {
+            "agent": me, "role": None, "task": None, "assignment": None,
+            "plan": None,
+            "parent": None, "workspace": None, "pending_messages": 0,
+            "pending_questions": 0, "status": "unknown",
+        }
+        return data
+
+    unread = store.unread_for(db, me, mark=False)
+    pending_questions = sum(
+        1 for message in unread if bool(store._value(message, "needs_reply"))
+    )
+    task = store._value(row, "task")
+    if not full and isinstance(task, str):
+        task = status_mod.clip(task, 240)
+    data = {
+        "agent": me,
+        "role": row["role"],
+        "task": task,
+        "assignment": task,
+        "plan": None,
+        "parent": store._value(row, "parent"),
+        "workspace": store._value(row, "workspace"),
+        "pending_messages": len(unread),
+        "pending_questions": pending_questions,
+        "status": store._value(row, "state") or "unknown",
+    }
+    if full:
+        data.update(
+            children=[child["name"] for child in store.children_of(db, me)],
+            session_id=store._value(row, "session_id"),
+            cwd=store._value(row, "cwd"),
+            branch=store._value(row, "branch"),
+            pane_id=store._value(row, "pane_id"),
+            turn=store._value(row, "turn"),
+            tier=store._value(row, "tier"),
+        )
+    return data
+
+
+def _context_text(data: dict) -> str:
+    """Render context vertically so it remains skimmable in a narrow pane."""
+    def shown(value) -> str:
+        return str(value) if value not in (None, "") else "none"
+
+    lines = [
+        f"Agent: {shown(data.get('agent'))}",
+        f"Role: {shown(data.get('role'))}",
+        f"Task: {shown(data.get('task'))}",
+        f"Plan: {shown(data.get('plan'))}",
+        f"Assignment: {shown(data.get('assignment'))}",
+        f"Parent: {shown(data.get('parent'))}",
+        f"Workspace: {shown(data.get('workspace'))}",
+        f"Pending questions: {data.get('pending_questions', 0)}",
+        f"Pending messages: {data.get('pending_messages', 0)}",
+        f"Status: {shown(data.get('status'))}",
+    ]
+    if "children" in data:
+        lines.extend([
+            f"Children: {', '.join(data['children']) if data['children'] else 'none'}",
+            f"Branch: {shown(data.get('branch'))}",
+            f"Cwd: {shown(data.get('cwd'))}",
+            f"Pane: {shown(data.get('pane_id'))}",
+            f"Session: {shown(data.get('session_id'))}",
+            f"Turn: {shown(data.get('turn'))}",
+            f"Tier: {shown(data.get('tier'))}",
+        ])
+    return "\n".join(lines)
 
 
 # Commands the usage log deliberately skips. `board` is the interactive TUI: it is
@@ -1567,8 +1675,22 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # and the actions this would otherwise provoke — respawn, force-close — are the
         # expensive ones. See `Broker._took_a_turn`.
         note = b.delivery_note
-        _emit(args, f"delegated to {name}{where}" + (f" — {note}" if note else ""),
-              {"name": name, "workspace": join.get("workspace"), "unconfirmed": note})
+        receipt = {"name": name, "workspace": join.get("workspace"),
+                   "unconfirmed": note}
+        human = f"delegated to {name}{where}" + (f" — {note}" if note else "")
+        if getattr(args, "full", False):
+            row = store.get_agent(db, name)
+            if row is not None:
+                agent = {key: store._value(row, key) for key in (
+                    "name", "role", "task", "state", "parent", "workspace", "branch",
+                    "cwd", "pane_id", "session_id", "tier")}
+                receipt["agent"] = agent
+                human += (f"\n  role      {agent['role']}\n"
+                          f"  task      {agent['task'] or '(none)'}\n"
+                          f"  workspace {agent['workspace'] or '(none)'}\n"
+                          f"  branch    {agent['branch'] or '(none)'}\n"
+                          f"  state     {agent['state']}")
+        _emit(args, human, receipt)
         return 0
 
     if cmd == "grant":
@@ -1688,23 +1810,28 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         if not msgs:
             _emit(args, "(no new messages)", {"messages": []})
             return 0
-        # A `--needs-reply` message reads exactly like any other until this line: the flag
-        # is a claim on the reader, and the reader only ever meets it here. Appended as its
-        # own line under the message rather than folded into the body, so the body stays
-        # what the sender typed.
+        full = getattr(args, "full", False)
         lines = []
+        payload = []
         for m in msgs:
-            # `broker.tag`, not a second spelling of it: this line and the doorbell that
-            # sent the reader here are the same claim about the same message, and they used
-            # to disagree — `[3] from w1:` here, no sender at all there.
-            lines.append(f"[{m['id']}] {broker_mod.tag(m['from_agent'])} {m['body']}")
+            item = dict(m)
+            if not full and isinstance(item.get("body"), str):
+                item["body"] = status_mod.clip(item["body"], 240)
+            payload.append(item)
+            if full:
+                # Full preserves the pre-v2 multiline inbox rendering.
+                lines.append(f"[{m['id']}] {broker_mod.tag(m['from_agent'])} {m['body']}")
+                if _no_reply(m):
+                    lines.append("    " + config.prompt("notify.no_reply", b.repo))
+            else:
+                lines.append(f"[{m['id']}] {broker_mod.tag(m['from_agent'])} "
+                             f"{status_mod.clip(m['body'], 240)}")
+                if _no_reply(m):
+                    lines.append("    " + config.prompt("notify.no_reply", b.repo))
             if _needs_reply(m):
                 lines.append("    " + config.prompt("notify.needs_reply", b.repo,
                                                     who=m["from_agent"]))
-            if _no_reply(m):
-                lines.append("    " + config.prompt("notify.no_reply", b.repo))
-        _emit(args, "\n".join(lines),
-              {"messages": [dict(m) for m in msgs]})
+        _emit(args, "\n".join(lines), {"messages": payload})
         return 0
 
     if cmd == "waiting":
@@ -1815,8 +1942,18 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                                   repo=b.repo, **_scope(b, me, args.mine))
         # None, not False: the flag can only ever turn collapse OFF, so with no flag the
         # answer comes from `display.show_archived` rather than from here.
-        _emit(args, status_mod.render(snap, show_archived=True if args.archived else None),
-              snap.as_dict())
+        if getattr(args, "full", False):
+            human = status_mod.render(snap, show_archived=True if args.archived else None)
+        else:
+            human = status_mod.render_compact(
+                snap, show_archived=True if args.archived else None)
+        data = snap.as_dict() if getattr(args, "full", False) else status_mod.compact_dict(snap)
+        _emit(args, human, data)
+        return 0
+
+    if cmd in ("context", "whoami"):
+        context = _context_data(b, db, me, full=getattr(args, "full", False))
+        _emit(args, _context_text(context), context)
         return 0
 
     if cmd == "presets":
@@ -2148,7 +2285,9 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         b.require_same_tree(me, args.name)
         d = status_mod.inspect(db, h, args.name, lines=args.n, events=args.events,
                                repo=b.repo)
-        _emit(args, status_mod.render_detail(d), d.as_dict())
+        full = getattr(args, "full", False)
+        _emit(args, status_mod.render_detail(d) if full else status_mod.render_compact_detail(d),
+              d.as_dict() if full else status_mod.compact_detail_dict(d))
         return 0
 
     if cmd == "log":
@@ -2431,7 +2570,11 @@ def _plugin_run(args, b: Broker, db, me: str) -> int:
     # need one to show up in `sb log` beside agent activity.
     _log_plugin(db, agent, p.name, c.name, ok=r.ok)
 
-    payload = {"ok": r.ok, "plugin": p.name, "command": c.name, "data": r.data}
+    plugin_data = r.data
+    if args.json and not getattr(args, "full", False) and p.name == "plans" \
+            and c.name in {"show", "list"}:
+        plugin_data = plugins_mod.compact_json(plugin_data)
+    payload = {"ok": r.ok, "plugin": p.name, "command": c.name, "data": plugin_data}
     if r.ok:
         _emit(args, r.human, payload)
     elif args.json:

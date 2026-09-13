@@ -718,14 +718,14 @@ def register(reg):
     reg.command(
         "list", ls, audience="both",
         help="the plans on this worktree; --all is a repo-wide human view, not an agent's "
-             "next-step list",
+             "next-step list; --full expands each plan",
         args=[reg.arg("--all", flag=True,
                       help="every plan, on every workspace (human repo-wide view; agents "
                            "should omit this)")])
     reg.command(
         "show", show, audience="both",
-        help="one plan in full — steps, deps, changelog; or one STEP in full, with the "
-             "instructions for doing it",
+        help="one plan compactly by default, or --full for steps, deps, changelog; one "
+             "STEP follows the same levels",
         args=[reg.arg("id", help="a plan id (p-1), or a step id (step-2, p-1/step-2) for "
                                  "that one step and how it is done"),
               reg.arg("--markdown", flag=True,
@@ -2038,8 +2038,13 @@ def ls(ctx, args) -> Result:
     # per row.
     live = _Live(ctx)
     views = [_viewed(_shown(p, lib), live) for p in plans]
-    return Result(human="\n".join(_broke(doc) + [_line(p, workspace=args.all)
-                                                 for p in views]), data=views)
+    if getattr(args, "full", False):
+        human = "\n\n".join(_full(p) for p in views)
+        prefix = _broke(doc)
+        human = "\n".join(prefix + ([human] if human else []))
+    else:
+        human = "\n".join(_broke(doc) + [_line(p, workspace=args.all) for p in views])
+    return Result(human=human, data=views)
 
 
 def _broke(doc: dict) -> str:
@@ -2077,7 +2082,8 @@ def show(ctx, args) -> Result:
     """
     given = str(args.id or "").strip()
     if "/" in given or (given[:1].lower() == "s" and _num(_STEP_ID, given) is not None):
-        return _one_step(ctx, given, markdown=bool(getattr(args, "markdown", False)))
+        return _one_step(ctx, given, markdown=bool(getattr(args, "markdown", False)),
+                         full=bool(getattr(args, "full", False)))
     doc, seal = _read(ctx.state_dir)
     plan = _find(doc, args.id)
     if plan is None:
@@ -2089,7 +2095,8 @@ def show(ctx, args) -> Result:
     if bad:
         return bad
     md = bool(getattr(args, "markdown", False))
-    return _plan_result(_viewed(_shown(plan, lib), _Live(ctx), tokens=md), markdown=md)
+    return _plan_result(_viewed(_shown(plan, lib), _Live(ctx), tokens=md), markdown=md,
+                        full=bool(getattr(args, "full", False)))
 
 
 # WHAT OPENING A PR WAITS ON, in the order `create-pr`'s own definition names them: the key
@@ -2755,7 +2762,7 @@ def _github(ctx, argv: list[str], *, body: Optional[str] = None,
     return got, None
 
 
-def _one_step(ctx, given: str, *, markdown: bool = False) -> Result:
+def _one_step(ctx, given: str, *, markdown: bool = False, full: bool = False) -> Result:
     """One step, drawn as `show` draws a plan's rows — plus how it is done.
 
     The `about` is the whole reason this exists, and it is why the same text is NOT on
@@ -2782,8 +2789,14 @@ def _one_step(ctx, given: str, *, markdown: bool = False) -> Result:
         return Result(human=_markdown({k: v for k, v in data.items()
                                        if k not in _MACHINERY}), data=data)
     lines = [f"{plan['id']}  {_flat(plan.get('title') or '(untitled)')}"]
-    lines.extend(f"  {ln}" for ln in _step_lines([shown]))
-    lines.extend(f"  {ln}" for ln in _how(step, lib))
+    if full:
+        lines.extend(f"  {ln}" for ln in _step_lines([shown]))
+        lines.extend(f"  {ln}" for ln in _how(step, lib))
+    else:
+        lines.append(f"  {_compact_step(shown)}")
+        about = _how(step, lib)
+        if about:
+            lines.append(f"  instruction  {_flat(about[0])}")
     return Result(human="\n".join(lines), data=data)
 
 
@@ -4733,8 +4746,76 @@ def _defects(plan: dict) -> list[str]:
     return out
 
 
+def _compact_step(step: dict) -> str:
+    """One decision-bearing step line for default plan output."""
+    progress = str(step.get("progress") or "open")
+    marker = {DONE: "✓", SKIPPED: "–"}.get(progress, "→")
+    label = _flat(step.get("display") or step.get("name") or step.get("id") or "?")
+    bits = [f"{marker} {label}"]
+    owner = step.get("owner")
+    if owner:
+        status = step.get("owner_status")
+        bits.append(f"owner {owner}{f' ({status})' if status else ''}")
+    if step.get("tries") and int(step.get("tries") or 0) > 1:
+        bits.append(f"try {step['tries']}")
+    if _some(step.get("why")):
+        bits.append(_flat(step["why"]))
+    if _some(step.get("gate")):
+        bits.append("gate")
+    refs = []
+    for checkpoint in step.get("checkpoints") or ():
+        ref = checkpoint.get("ref") if isinstance(checkpoint, dict) else checkpoint
+        if _some(ref):
+            refs.append(_flat(ref))
+    if refs:
+        bits.append("refs " + ", ".join(refs[:2]))
+    if _some(step.get("output")):
+        bits.append(_flat(step["output"])[:160])
+    if step.get("obliged_by"):
+        bits.append(f"obliged by {_flat(step['obliged_by'])}")
+    deps = step.get("deps") or ()
+    if isinstance(deps, str):
+        deps = [deps]
+    if deps:
+        bits.append("after " + ", ".join(_flat(d) for d in deps[:3]))
+    return " · ".join(bits)
+
+
+def _compact_plan(p: dict) -> str:
+    """A compact plan summary; ``_full`` remains the explicit detail level."""
+    title = _flat(p.get("display") or p.get("title") or "(untitled)")
+    lines = [f"{p.get('id', '?')}  {title}"]
+    lines.append(f"  workspace   {_where(p)}")
+    if p.get("condition"):
+        lines.append(f"  condition   {_condition(p)}")
+    change = p.get("change")
+    if isinstance(change, dict) and _change_told(p):
+        path = _flat(change.get("path") or "—")
+        phase = _flat(change.get("phase") or "")
+        lines.append(f"  change      {path}{f' · {phase}' if phase else ''}")
+        for key in ("request", "solution", "cause"):
+            if _some(change.get(key)):
+                lines.append(f"  {key:<11} {_flat(change[key])[:200]}")
+                break
+    steps = p.get("steps") or []
+    if steps:
+        lines.append(f"  steps       {len(steps)}")
+        lines.extend(f"    {_compact_step(step)}" for step in steps)
+    else:
+        lines.append("  steps       none")
+    if p.get("notes"):
+        lines.append(f"  notes       {len(p['notes'])}")
+    if p.get("changelog"):
+        lines.append(f"  history     {len(p['changelog'])} entries (use --full for detail)")
+    defects = _defects(p)
+    if defects:
+        lines.append("  warnings")
+        lines.extend(f"    {_flat(line)[:240]}" for line in defects)
+    return "\n".join(lines)
+
+
 def _plan_result(shown: dict, markdown: bool = False,
-                 path: Optional[str] = None) -> Result:
+                 path: Optional[str] = None, full: bool = True) -> Result:
     """A whole plan, printed, with anything incomplete about it said underneath.
 
     `path` is the file the plan was just filed in, and only the two verbs that MAKE a plan
@@ -4769,7 +4850,8 @@ def _plan_result(shown: dict, markdown: bool = False,
     if markdown:
         return Result(human=_markdown(_dumped(doc)), data=doc)
     reminder = _pr_comment_text(shown) if _pr_comment_pending(shown) else ""
-    human = (_full(shown) + ("\n\n" + "\n".join(lines) if lines else "")
+    rendered = _full(shown) if full else _compact_plan(shown)
+    human = (rendered + ("\n\n" + "\n".join(lines) if lines else "")
              + (f"\n\n{reminder}" if reminder else ""))
     if path:
         human += f"\n\nthe plan is {path} — edit it there, then `sb plugin plans validate`"

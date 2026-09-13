@@ -377,6 +377,9 @@ review or a piece of work spawned that way is invisible to everyone but you.
 ones beneath you, plus any whose turn switchboard gave up on — closing costs
 only the pane: session, summary, messages and transcript survive, and
 `sb restore` brings an agent back.
+`sb context` (also `sb whoami`) is the cheap authoritative re-orientation readout for
+your identity, assignment, parent, workspace and pending messages; use `--full` for
+runtime identifiers and child details.
 Some ways of working are written down rather than left to you: `sb presets` lists
 them, `sb presets <name>` prints one, and `sb presets <name> --apply` pastes it into
 your own session to work from. Read one before improvising something similar.

@@ -155,6 +155,30 @@ class Result:
     code: int = 0
 
 
+def compact_json(value: Any, *, limit: int = 600) -> Any:
+    """Bound free-text values in a structured response without changing its keys.
+
+    Plugin schemas are intentionally open, so sb cannot know every large field by name.
+    Recursive clipping preserves stable structure while keeping default JSON useful for
+    agent decisions. A conventional artifact object is reduced to its identity and
+    summary, as required by the v2 output contract.
+    """
+    if isinstance(value, str):
+        if len(value) <= limit:
+            return value
+        return value[:max(0, limit - 1)] + "…"
+    if isinstance(value, list):
+        return [compact_json(item, limit=limit) for item in value]
+    if isinstance(value, dict):
+        if ("id" in value and "type" in value
+                and ("summary" in value or any(
+                    key in value for key in ("content", "body", "data", "text", "path")))):
+            return {key: compact_json(value[key], limit=limit)
+                    for key in ("id", "type", "summary") if key in value}
+        return {key: compact_json(item, limit=limit) for key, item in value.items()}
+    return value
+
+
 # -- registration --------------------------------------------------------------
 
 
@@ -533,6 +557,8 @@ def build_parser(p: Loaded) -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                         help="machine-readable output")
+    common.add_argument("--full", action="store_true", default=argparse.SUPPRESS,
+                        help="complete detail")
 
     root = argparse.ArgumentParser(prog=f"sb plugin {p.name}",
                                    description=p.help or None, parents=[common])

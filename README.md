@@ -53,6 +53,9 @@ A question is `sb tell --needs-reply`, which asks someone to answer at some poin
 returns straight away. `sb tell --no-reply` asks for no response unless something is
 actually wrong or blocking.
 
+`sb context` (also `sb whoami`) gives an agent a cheap authoritative re-orientation
+readout; `--full` includes runtime identifiers and child details.
+
 **Work is reported upward as a summary, not a transcript.** `sb done` is how an agent
 finishes: it commits, then writes one or two lines saying what it was asked, what it did,
 and what that means. That summary is the entire thing its parent ever receives — no parent

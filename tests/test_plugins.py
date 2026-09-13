@@ -1026,7 +1026,7 @@ class IsolationTest(Sandbox):
     # Every level-0 verb of §4.2, with a minimal legal argv. `--timeout 1` where a verb
     # would otherwise block: what is being tested is that it runs, not how long it waits.
     LEVEL_0 = {
-        "status": [], "done": ["finished"],
+        "status": [], "context": [], "whoami": [], "done": ["finished"],
         "tell": ["w1", "hi"], "inbox": [], "waiting": [],
         "block": ["why"], "log": [], "usage": [], "cleanup": [],
         # An agent closing its OWN pane — one store write on its own row and a pane

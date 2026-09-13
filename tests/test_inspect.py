@@ -381,6 +381,20 @@ class InspectTest(Base):
         self.assertEqual(d["output"]["source"], PANE)
         self.assertIn("on screen", d["output"]["text"])
 
+    def test_inspect_output_levels_are_compact_by_default_and_full_on_request(self):
+        self.agent(task="x" * 500)
+        store.log_event(self.db, kind="detail", agent="w1", payload="y" * 500)
+        d = self.inspect(h=FakeHerdr([alive("w1")], pane_text="terminal\n"))
+        compact = status.render_compact_detail(d)
+        full = status.render_detail(d)
+        self.assertLess(len(compact), len(full))
+        self.assertIn("w1 (worker)", compact)
+        self.assertNotIn("RECENT EVENTS", compact)
+        self.assertIn("RECENT EVENTS", full)
+        payload = status.compact_detail_dict(d)
+        self.assertLessEqual(len(payload["task"]), 240)
+        self.assertLessEqual(len(payload["events"][0]["payload"]), 240)
+
     # -- render ------------------------------------------------------------
 
     def test_render_shows_every_field_somebody_would_have_dug_out_by_hand(self):

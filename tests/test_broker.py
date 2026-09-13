@@ -2007,6 +2007,67 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("[sb: from orch]", doorbell)
         self.assertIn("[sb: from orch]", buf.getvalue())
 
+    def test_cli_inbox_compacts_long_bodies_but_full_keeps_multiline_no_reply_mail(self):
+        """The presentation-level split, including the #340 courtesy line."""
+        import argparse
+        from switchboard import cli
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="w", role="worker", parent="orch")
+        body = "first line\nsecond line\n" + ("x" * 500)
+        store.put_message(self.db, from_agent="orch", to_agent="w", kind="tell",
+                          body=body, no_reply=True)
+
+        def run(full):
+            args = argparse.Namespace(cmd="inbox", json=False, peek=True, full=full)
+            buf = io.StringIO()
+            with mock.patch.object(self.b, "whoami", return_value="w"), \
+                    contextlib.redirect_stdout(buf):
+                self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
+            return buf.getvalue()
+
+        compact = run(False)
+        full = run(True)
+        self.assertIn("[no reply expected]", compact)
+        self.assertIn("[no reply expected]", full)
+        self.assertNotIn(body, compact)
+        self.assertIn(body, full)
+        self.assertIn("…", compact)
+
+    def test_cli_delegate_full_adds_agent_details_to_the_compact_receipt(self):
+        """The default is a one-line receipt; --full exposes the spawned row."""
+        import argparse
+        from switchboard import cli
+        calls = []
+
+        def fake_delegate(*args, **kwargs):
+            calls.append(kwargs)
+            name = "worker-levels" if len(calls) == 1 else "worker-levels-full"
+            store.create_agent(self.db, name=name, role="worker",
+                               parent="orch", task="do the thing", workspace="orch",
+                               branch="orch", cwd=str(self.repo))
+            self.b.delivery_note = None
+            return name
+
+        def run(full):
+            args = argparse.Namespace(
+                cmd="delegate", task="do the thing", role="worker", as_prompt=None,
+                with_=[], name="levels", workspace=None, isolation="shared", model=None,
+                json=False, full=full)
+            buf = io.StringIO()
+            with mock.patch.object(self.b, "whoami", return_value="orch"), \
+                    mock.patch.object(self.b, "delegate", side_effect=fake_delegate), \
+                    contextlib.redirect_stdout(buf):
+                self.assertEqual(cli._dispatch(args, self.b, self.db, self.h), 0)
+            return buf.getvalue()
+
+        compact = run(False)
+        full = run(True)
+        self.assertIn("delegated to worker-levels", compact)
+        self.assertNotIn("role", compact)
+        self.assertIn("role      worker", full)
+        self.assertIn("task      do the thing", full)
+        self.assertEqual(len(calls), 2)
+
     def test_the_legacy_when_idle_alias_rings_a_target_mid_turn(self):
         """The removed hold-until-idle mode remains accepted as NORMAL."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
