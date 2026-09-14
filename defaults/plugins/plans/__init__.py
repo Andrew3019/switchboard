@@ -23,7 +23,8 @@ The records
 -----------
 
     plan   {"id": "p-1", "kind": "plan", "workspace": "task-guardrails-build",
-            "workspace_from": "agent", "checkout": "/…/…", "title": "…", "display": "…",
+            "workspace_from": "agent", "checkout": "/…/…", "branch": "task-guardrails-build",
+            "branch_from": "create", "title": "…", "display": "…",
             "next_step": 4, "steps": [...], "changelog": [...], "notes": [...],
             "change": {...}, "created_by": "lead", "created_at": 1754570000}
 
@@ -32,7 +33,8 @@ The records
             "output": null, "owner": null, "tries": 1, "notes": [], "deps": [],
             "root": false, "checkpoints": []}
 
-    record {"id": "p-2", "kind": "record", "workspace": "…", "checkout": "…", "title": "…",
+    record {"id": "p-2", "kind": "record", "workspace": "…", "checkout": "…", "branch": "…",
+            "branch_from": "create", "title": "…",
             "display": "…", "changelog": [...], "notes": [...], "change": {...},
             "created_by": "w1", "created_at": …}
 
@@ -339,6 +341,18 @@ recording that it had. The checkout PATH is what does not move, so it is stored 
 name and is what "on this worktree" matches on — no subprocess on the read path, and a plan
 found from the directory it belongs to even after a rename.
 
+`branch` IS STORED TOO, and that does not undo the paragraph above. The checkout stays the
+identity: it is what "on this worktree" matches on and what nothing re-keys. `branch` is
+additional recorded state beside it — the plan's PRIMARY branch, the binding the
+branch-dependent rules read (review independence tests authorship against it, the completion
+guard tests whether it carries commits, `Open PR` asserts the PR head is it). Nothing looks a
+plan up by it, and a later `git checkout -b` neither moves the plan nor rewrites the binding.
+It is resolved by asking git in the checkout (`_branch`) at `create`, and `branch_from` says
+when: `create`, or `inferred` for a plan made before the field existed and bound once, lazily,
+from its checkout's branch at that read (`_repair_branches`). A detached HEAD or a checkout
+that is no repo is a said `null`; git not answering at all is `unavailable`, retried on read
+exactly like a workspace.
+
 A checkout that is no workspace sb knows has no name to store, and that is written down as
 `null` and rendered as itself rather than filed under a plausible-looking wrong key. A plan
 under a key no workspace has would read, to the PR that derives records, as a worktree that
@@ -531,6 +545,11 @@ CLOSING = ("tick", "skip", DERIVED)
 # is like, and the PR that derives records has to be able to switch on it. The two that
 # matter are the two that both leave `workspace` null — see `_workspace`.
 BY_AGENT, BY_LIST, NONE, UNAVAILABLE = "agent", "workspace-list", "none", "unavailable"
+
+# When a plan's primary branch was bound, stored as `branch_from`: at `create`, or `inferred`
+# once for a plan that predates the field. `UNAVAILABLE` (git could not be asked) is the
+# third value and the only one retried — see `_branch`.
+AT_CREATE, INFERRED = "create", "inferred"
 
 # What a plan READS as when it is displayed. Derived every time and stored never — see the
 # module docstring for why there is no other honest option. `UNSURE` is not a failure: it
@@ -1890,9 +1909,11 @@ def create(ctx, args) -> Result:
         doc, seal = _read_logged(ctx)
         who = ctx.agent or "human"
         where, how = _workspace(ctx)
+        branch, branch_from = _bound(_here(ctx))
         plan = {"id": f"p-{doc['next_plan']}", "kind": KIND_PLAN,
                 "workspace": where, "workspace_from": how,
-                "checkout": str(_here(ctx)), "title": title, "display": display,
+                "checkout": str(_here(ctx)), "branch": branch, "branch_from": branch_from,
+                "title": title, "display": display,
                 "next_step": 1, "steps": [], "changelog": [],
                 "notes": [_note(n, who) for n in notes],
                 # A created plan IS a shaped change: `create` is shaping entry, so the change
@@ -2004,9 +2025,11 @@ def record(ctx, args) -> Result:
         doc, seal = _read_logged(ctx)
         who = ctx.agent or "human"
         where, how = _workspace(ctx)
+        branch, branch_from = _bound(_here(ctx))
         rec = {"id": f"p-{doc['next_plan']}", "kind": KIND_RECORD,
                "workspace": where, "workspace_from": how,
-               "checkout": str(_here(ctx)), "title": title, "display": display,
+               "checkout": str(_here(ctx)), "branch": branch, "branch_from": branch_from,
+               "title": title, "display": display,
                "next_step": 1, "steps": [],
                "changelog": [], "notes": [_note(n, who) for n in notes],
                "change": _change(DIRECT),
@@ -2050,6 +2073,7 @@ def ls(ctx, args) -> Result:
     if not args.all:
         plans = [p for p in plans if _same(p.get("checkout"), here)]
     _repair_workspaces(ctx.state_dir, doc, seal, plans)
+    _repair_branches(ctx.state_dir, doc, seal, plans)
     if not plans:
         return Result(human="\n".join(_broke(doc) + ["(no plans on this worktree)"
                                                      if not args.all
@@ -2123,6 +2147,7 @@ def show(ctx, args) -> Result:
     if plan is None:
         return _missing(doc, args.id)
     _repair_workspaces(ctx.state_dir, doc, seal, [plan])
+    _repair_branches(ctx.state_dir, doc, seal, [plan])
     # Resolved HERE and never in the file: this is the moment a link becomes text, which is
     # why an edit to a definition reaches a plan that was made last week and is running now.
     lib, bad = _lib([plan])
@@ -3283,9 +3308,11 @@ def template(ctx, args) -> Result:
         doc, seal = _read_logged(ctx)
         who = ctx.agent or "human"
         where, how = _workspace(ctx)
+        branch, branch_from = _bound(_here(ctx))
         plan = {"id": f"p-{doc['next_plan']}", "kind": KIND_PLAN,
                 "workspace": where, "workspace_from": how,
-                "checkout": str(_here(ctx)), "title": title, "display": display,
+                "checkout": str(_here(ctx)), "branch": branch, "branch_from": branch_from,
+                "title": title, "display": display,
                 "next_step": 1, "steps": [], "changelog": [],
                 "notes": [_note(str(n).strip(), who) for n in (spec.get("notes") or ())
                           if str(n).strip()],
@@ -4971,6 +4998,8 @@ def _compact_plan(p: dict) -> str:
     title = _flat(p.get("display") or p.get("title") or "(untitled)")
     lines = [f"{p.get('id', '?')}  {title}"]
     lines.append(f"  workspace   {_where(p)}")
+    if p.get("branch"):
+        lines.append(f"  branch      {_flat(p['branch'])}")
     if p.get("condition"):
         lines.append(f"  condition   {_condition(p)}")
     change = p.get("change")
@@ -5640,6 +5669,12 @@ def _check(f: Path, plan: dict) -> None:
     for key in ("changelog", "notes"):
         if not isinstance(plan.get(key, []), list):
             raise _refuse(f, f"has a p-{n} whose {key} is not a list")
+    # The primary branch is what the branch-dependent rules compare a PR head and a commit's
+    # authorship against, so a non-string there would be compared rather than merely drawn.
+    # Null is fine: a detached HEAD, no repo, or a plan from before the field.
+    for key in ("branch", "branch_from"):
+        if plan.get(key) is not None and not isinstance(plan.get(key), str):
+            raise _refuse(f, f"has a p-{n} whose {key} is not a name")
 
 
 def _counter(given: Any) -> int:
@@ -5924,6 +5959,75 @@ def _repair_workspaces(d: Path, doc: dict, seal: dict, plans: list[dict]) -> Non
     except Exception:                       # noqa: BLE001 — metadata repair, never the read
         for plan, where, how in changed:
             plan["workspace"], plan["workspace_from"] = where, how
+
+
+def _branch(checkout: Any, *, clock: "_Budget") -> tuple[Optional[str], bool]:
+    """The branch checked out in `checkout`, and whether git answered at all.
+
+    `symbolic-ref` rather than `rev-parse --abbrev-ref`: it names the branch of a repo with
+    no commits yet (a plan made before its first commit), and it FAILS on a detached HEAD
+    rather than answering the literal `HEAD`. Both failures git reports — detached, or no
+    repo there, a gone worktree included — are an answer of no branch; only git not running
+    or not returning in time is no answer, which the caller keeps as `unavailable`.
+
+    Timed on a shared `_Budget`, as `_ask` is, so a read that backfills a whole store past a
+    few hung checkouts costs that one budget and not five seconds per plan; whatever the
+    budget did not reach is left pending for the next read.
+    """
+    if not checkout:
+        return None, True
+    seconds = clock.left()
+    if seconds <= 0:
+        return None, False
+    try:
+        out = subprocess.run(["git", "-C", str(checkout),
+                              "symbolic-ref", "--short", "-q", "HEAD"],
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                             timeout=seconds)
+    except (OSError, subprocess.SubprocessError):
+        return None, False
+    name = out.stdout.strip() if out.returncode == 0 else ""
+    return (name or None), True
+
+
+def _bound(checkout: Any) -> tuple[Optional[str], str]:
+    """A new plan's primary branch and its `branch_from`, as `create` and `record` store it."""
+    name, answered = _branch(checkout, clock=_Budget())
+    return name, (AT_CREATE if answered else UNAVAILABLE)
+
+
+def _repair_branches(d: Path, doc: dict, seal: dict, plans: list[dict]) -> None:
+    """Bind a primary branch, once, to plans that have none recorded, and persist it.
+
+    Two cases, both read from the plan's STORED checkout and never the reader's: a plan
+    from before `branch` existed (no `branch_from` at all) is bound to whatever its checkout
+    has out now, which is the only evidence left, and says `inferred`; a plan whose git did
+    not answer at creation is retried. Any answer git gives, a null included, is final — a
+    binding that re-read the branch every time would be the drifting key the module
+    docstring rejects, not a binding. Best-effort like `_repair_workspaces`: a write that
+    cannot land leaves the plan as it was and never fails the read.
+    """
+    # A plan with no stored checkout — one written by hand — has nothing to infer from, and
+    # is left exactly as it is rather than rewritten on a read to say so.
+    pending = [p for p in plans if p.get("checkout")
+               and p.get("branch_from") in (None, UNAVAILABLE) and not p.get("branch")]
+    clock = _Budget()
+    changed: list[tuple[dict, dict]] = []
+    for plan in pending:
+        name, answered = _branch(plan.get("checkout"), clock=clock)
+        if not answered:
+            continue
+        changed.append((plan, {k: plan[k] for k in ("branch", "branch_from") if k in plan}))
+        plan["branch"], plan["branch_from"] = name, INFERRED
+    if not changed:
+        return
+    try:
+        _write(d, doc, seal)
+    except Exception:                       # noqa: BLE001 — metadata repair, never the read
+        for plan, was in changed:
+            plan.pop("branch", None)
+            plan.pop("branch_from", None)
+            plan.update(was)
 
 
 # How long resolving a workspace may cost, in total and for any one question. Measured, not
@@ -6602,6 +6706,8 @@ def _full(p: dict) -> str:
         lines.append(f"  board       {_flat(p['display'])}")
     lines += [f"  workspace   {_where(p)}",
               f"  checkout    {_flat(p.get('checkout') or '—')}"]
+    if p.get("branch"):
+        lines.append(f"  branch      {_flat(p['branch'])}")
     if p.get("planner"):
         # WHO MAY RESHAPE THIS PLAN, on the plan and not buried in `--json`: with a planner
         # the shape belongs to that agent instead of to the worktree's owner, and an agent

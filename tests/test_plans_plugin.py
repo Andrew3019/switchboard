@@ -531,6 +531,86 @@ class PlansTest(PlansSandbox):
                              "unavailable")
         self.assertEqual(self._doc()["plans"][0]["workspace_from"], "unavailable")
 
+    def _git(self, *argv) -> None:
+        subprocess.run(["git", *argv], cwd=self.repo, check=True, capture_output=True)
+
+    def test_create_and_record_bind_the_checkouts_primary_branch(self):
+        """#315: a plan and a change record carry their checkout's branch as system-held
+        state from `create`. A BINDING and not a key: a later `git checkout -b` neither
+        moves the plan (the checkout still is its identity) nor rewrites the branch."""
+        plan = self.data("plugin", "plans", "create", "a job", "--display", "board: a job")
+        rec = self.data("plugin", "plans", "record", "a fix", "--display", "board: a fix")
+        self.assertEqual((plan["branch"], plan["branch_from"]), ("main", "create"))
+        self.assertEqual((rec["branch"], rec["branch_from"]), ("main", "create"))
+
+        self._git("checkout", "-q", "-b", "fixups")
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")["branch"], "main")
+        self.assertIn("branch      main", self.ok("plugin", "plans", "show", "p-1"))
+        self.assertEqual([p["id"] for p in self.data("plugin", "plans", "list")],
+                         ["p-1", "p-2"])
+
+    def test_a_plan_from_before_the_binding_is_inferred_once_and_persisted(self):
+        """Existing plans have no `branch`. The first read binds one from the stored
+        checkout's branch at that moment and writes it down; later reads keep it rather
+        than re-reading a branch that moved, which would be a drifting key again."""
+        self.data("plugin", "plans", "create", "old job", "--display", "board: old job")
+        doc = self._doc()
+        for key in ("branch", "branch_from"):
+            doc["plans"][0].pop(key)
+        self._save(doc)
+        self._git("checkout", "-q", "-b", "later")
+
+        shown = self.data("plugin", "plans", "show", "p-1")
+        self.assertEqual((shown["branch"], shown["branch_from"]), ("later", "inferred"))
+        stored = self._doc()["plans"][0]
+        self.assertEqual((stored["branch"], stored["branch_from"]), ("later", "inferred"))
+
+        self._git("checkout", "-q", "-b", "moved-on")
+        self.assertEqual(self.data("plugin", "plans", "list")[0]["branch"], "later")
+
+    def test_no_branch_to_bind_is_a_said_null_not_a_crash(self):
+        """A detached HEAD at `create`, or a stored checkout that is no repo at backfill, is
+        git ANSWERING that there is no branch: recorded as null and final, and the plan
+        still reads."""
+        self._git("checkout", "-q", "--detach")
+        made = self.data("plugin", "plans", "create", "detached", "--display", "board: d")
+        self.assertEqual((made["branch"], made["branch_from"]), (None, "create"))
+
+        self.data("plugin", "plans", "create", "elsewhere", "--display", "board: e")
+        nowhere = Path(self.tmp.name) / "not-a-repo"
+        nowhere.mkdir()
+        doc = self._doc()
+        doc["plans"][1]["checkout"] = str(nowhere)
+        for key in ("branch", "branch_from"):
+            doc["plans"][1].pop(key)
+        self._save(doc)
+        shown = self.data("plugin", "plans", "show", "p-2")
+        self.assertEqual((shown["branch"], shown["branch_from"]), (None, "inferred"))
+        self.assertNotIn("branch ", self.ok("plugin", "plans", "show", "p-2"))
+
+    def test_git_not_answering_is_unavailable_and_retried_on_read(self):
+        """git failing to RUN is not git saying there is no branch: `unavailable`, not a
+        final null. A read while it still fails stays readable and leaves the marker; the
+        first read git answers binds the branch and persists it."""
+        real_run = subprocess.run
+
+        def no_git(argv, *a, **kwargs):
+            if not isinstance(argv, (str, bytes)) and list(argv)[:1] == ["git"] \
+                    and "symbolic-ref" in argv:
+                raise FileNotFoundError("git")
+            return real_run(argv, *a, **kwargs)
+
+        with mock.patch("subprocess.run", no_git):
+            made = self.data("plugin", "plans", "create", "no git", "--display", "board: n")
+            self.assertEqual((made["branch"], made["branch_from"]), (None, "unavailable"))
+            self.assertIn("p-1", self.ok("plugin", "plans", "show", "p-1"))
+        self.assertEqual(self._doc()["plans"][0]["branch_from"], "unavailable")
+
+        shown = self.data("plugin", "plans", "show", "p-1")
+        self.assertEqual((shown["branch"], shown["branch_from"]), ("main", "inferred"))
+        stored = self._doc()["plans"][0]
+        self.assertEqual((stored["branch"], stored["branch_from"]), ("main", "inferred"))
+
     def test_ids_are_monotonic_and_never_reused(self):
         """PLAN ids are monotonic across the store and never reused — a hand-deleted plan
         must not free its number, because a changelog entry citing it stays true for the
