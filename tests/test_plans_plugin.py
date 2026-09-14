@@ -2061,6 +2061,27 @@ class StepsTest(PlansSandbox):
         self.assertIn("kind", data["error"])
         self.assertEqual(self.step("step-1")["kind"], "implement")
 
+    def test_edit_cannot_forge_the_change_records_evidence(self):
+        """The change record's evidence and identity — approval, verification, review, PR,
+        landing — are what `comment` and `merge` trust, so the sanctioned edit refuses to set
+        them. Authored keys like `human_checks` still edit, merged key by key."""
+        self.plan("write it")
+        doc = self.read_full()
+        doc["change"] = dict(doc["change"], approval={"plan_revision": "x", "by": "me"},
+                             verification={"commit": "fake", "result": "pass"})
+        code, data = self.edit_with("p-1", doc, doc["version"])
+        self.assertEqual(code, 1)
+        self.assertEqual(sorted(data["keys"]), ["approval", "verification"])
+        self.assertIsNone(self._doc()["plans"][0]["change"]["approval"])
+
+        doc = self.read_full()
+        doc["change"] = {"human_checks": ["click through the board"]}
+        code, data = self.edit_with("p-1", doc, doc["version"])
+        self.assertEqual(code, 0, data)
+        change = self._doc()["plans"][0]["change"]
+        self.assertEqual(change["human_checks"], ["click through the board"])
+        self.assertEqual(change["path"], "shaped")          # omitted keys are kept
+
     def test_structural_validation_refuses_the_shapes_an_edit_may_not_make(self):
         """Refused with a reason, before anything is written: deleting a complete system
         step, a second `merge`, a `merge` ahead of its `open_pr`, and a plan with no steps.
@@ -2088,6 +2109,15 @@ class StepsTest(PlansSandbox):
             self.data(*_create("other job", "do it"))
             refused("Implement,Merge:merge,Open PR:open_pr", "comes before", plan="p-2")
         self.assertNotIn("edit", self.actions("p-1") + self.actions("p-2"))
+
+        # The pairing rules judge the edit, not the plan: `name-step create-pr` alone leaves a
+        # PR step with no merge, and an edit that leaves that step alone still applies.
+        self.data(*_create("third job", "do it"))
+        self.data("plugin", "plans", "name-step", "p-3", "create-pr")
+        version = self.read_full("p-3")["version"]
+        kept = ",".join(s["id"] for s in self.steps("p-3")).replace("step-1", "step-1=done it", 1)
+        self.ok("plugin", "plans", "edit", "p-3", "--version", version, "--steps", kept)
+        self.assertEqual(self.steps("p-3")[0]["display"], "done it")
 
         version = self.read_full("p-2")["version"]
         self.ok("plugin", "plans", "edit", "p-2", "--version", version,

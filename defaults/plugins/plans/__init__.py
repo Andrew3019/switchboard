@@ -3526,8 +3526,15 @@ _VIEW_STEP = frozenset({"owner_status"})
 # `kind` and `def` on a step are not in here because a CHANGE to either is refused rather than
 # ignored (`_FIXED_STEP`): kind is immutable, and `def` is the declared type it came from.
 _HELD_PLAN = frozenset({"id", "kind", "steps", "workspace", "workspace_from", "checkout",
-                        "next_step", "changelog", "created_by", "created_at",
-                        "pr_comment_nonce"})
+                        "branch", "branch_from", "next_step", "changelog", "created_by",
+                        "created_at", "pr_comment_nonce"})
+# The change record merges KEY BY KEY, and its evidence and identity keys are fixed: the
+# approval, verification, review, PR head and landing are what `comment` and `merge` trust as
+# the record of what happened, so a sanctioned edit that could set them would be a way to
+# forge that record. A document carrying them back unchanged is fine; changing one is refused.
+# The rest — the request, the contract, `human_checks` the PR flow asks an agent to write —
+# is authored content and edits like any other field.
+_HELD_CHANGE = ("path", "approval", "verification", "review", "pr", "landing", "handoff")
 _HELD_STEP = frozenset({"id", "progress", "why", "owner"})
 _FIXED_STEP = ("kind", "def")
 # The fields a linked step resolves from its definition on read (`_resolve`). Handed back
@@ -3890,6 +3897,14 @@ def _structure(old: list, new: list) -> Optional[Result]:
             return refuse(f"{s['id']} is not complete and this edit puts it ahead of "
                           f"{later['id']}, which is — finished work stays ahead of unfinished "
                           f"work. Put {s['id']} after it.")
+    # The open_pr/merge rules judge what the EDIT does to those steps. A plan can already sit
+    # with a PR step and no merge yet — `name-step p-1 create-pr` alone makes one — and an edit
+    # that leaves those steps exactly as they were (same ids, same order) is not the edit that
+    # made it so, and is not refused for it.
+    system = lambda steps: [(num(s), _kind_of(s)) for s in steps  # noqa: E731
+                            if _kind_of(s) in _KIND_SYSTEM]
+    if system(new) == system(old):
+        return None
     kinds = [_kind_of(s) for s in new]
     for kind in _KIND_SYSTEM:
         holders = [s["id"] for s in new if _kind_of(s) == kind]
@@ -3923,6 +3938,29 @@ def _merged_fields(plan: dict, given: dict) -> tuple[list[str], Optional[Result]
     changed = []
     for key, value in given.items():
         if key in _HELD_PLAN or key in _VIEW_PLAN:
+            continue
+        if key == "change":
+            stored = plan.get("change") if isinstance(plan.get("change"), dict) else {}
+            if value == stored:
+                continue
+            if not isinstance(value, dict):
+                why = ("the document's `change` is not an object — the change record merges "
+                       "key by key, so hand back the keys you mean to change")
+                return [], Result(ok=False, human=why, data={"error": why, "field": "change"})
+            forged = [k for k in _HELD_CHANGE if k in value and value[k] != stored.get(k)]
+            if forged:
+                why = (f"the document changes change.{', change.'.join(forged)} — the change "
+                       f"record's evidence and identity ({', '.join(_HELD_CHANGE)}) are "
+                       f"written by the steps that establish them, never by an edit. Hand "
+                       f"them back as you read them; edit the authored keys (request, "
+                       f"contract, human_checks, …) freely.")
+                return [], Result(ok=False, human=why,
+                                  data={"error": why, "field": "change", "keys": forged})
+            merged = dict(stored)
+            merged.update({k: v for k, v in value.items() if k not in _HELD_CHANGE})
+            if merged != stored:
+                plan["change"] = merged
+                changed.append("change")
             continue
         if key not in plan or plan[key] != value:
             plan[key] = value
