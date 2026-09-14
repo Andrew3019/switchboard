@@ -2360,6 +2360,19 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("agent_not_found", self.b.unreachable("w"))
         self.assertEqual([m["to_agent"] for m in store.undelivered(self.db)], ["w"])
 
+    def test_the_agents_own_messages_do_not_hide_a_lost_binding(self):
+        """Every message is in the one event log under its sender. An agent that sends a
+        lot after its binding was lost must still read as unreachable."""
+        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="lead", role="lead")
+        self.h.states_by_name = {"w": "idle"}
+        self.h.unreachable.add("w")
+        self.b.tell(["w"], "you have mail", me=HUMAN)
+        for i in range(broker_mod.EVENT_SCAN + 50):
+            store.put_message(self.db, from_agent="w", to_agent="lead", kind="tell",
+                              body=f"note {i}")
+        self.assertIn("agent_not_found", self.b.unreachable("w"))
+
     def test_an_agent_herdr_has_dropped_is_not_called_a_lost_binding(self):
         """It is the pair that means something: refused BY NAME while still listed. An
         agent herdr no longer lists is simply gone, and saying "go look at its pane" about

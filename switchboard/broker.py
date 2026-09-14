@@ -10069,7 +10069,13 @@ class Broker:
         if self._finished_and_unreachable(who):
             return "it reported done and herdr no longer answers to its name"
         failed = None
-        for row in store.recent_events(self.db, agent=who, limit=EVENT_SCAN):
+        # `message` rows are left out of the window: every message the agent sends is in
+        # the event log under its name, and a chatty agent would otherwise push its own
+        # `ring_failed` out of the last EVENT_SCAN rows and read as reachable again.
+        for row in self.db.execute(
+                "SELECT kind, payload, created_at FROM events "
+                "WHERE agent=? AND kind != 'message' ORDER BY id DESC LIMIT ?",
+                (who, EVENT_SCAN)):
             if row["kind"] != "ring_failed":
                 continue
             payload = json.loads(row["payload"]) if row["payload"] else {}
