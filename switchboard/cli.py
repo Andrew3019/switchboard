@@ -575,8 +575,12 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--events", type=int, default=status_mod.DEFAULT_EVENTS,
                      help="how many recent events to include")
 
-    lg = cmd("log", help="recent events (debugging)")
+    lg = cmd("log", help="recent events: the one event log, or one agent's, Task's, "
+                         "Plan's or Step's history")
     lg.add_argument("--agent")
+    lg.add_argument("--task", help="only events about this Task")
+    lg.add_argument("--plan", help="only events about this Plan")
+    lg.add_argument("--step", help="only events about this Step")
     lg.add_argument("-n", type=int, default=config.setting("display.log_events"))
 
     us = cmd("usage", help="cross-repository sb call counts, outcomes, latency, and output")
@@ -2293,7 +2297,12 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     if cmd == "log":
         if args.agent:
             b.require_same_tree(me, args.agent)
-        rows = store.recent_events(db, agent=args.agent, limit=args.n)[::-1]
+        # Every history is a filter over the one log (`store.history`); with no subject
+        # this is the same tail it has always been.
+        rows = store.history(db, agent=args.agent, task_id=getattr(args, "task", None),
+                             plan_id=getattr(args, "plan", None),
+                             step_id=getattr(args, "step", None),
+                             limit=args.n, newest_first=True)[::-1]
         if me != HUMAN:
             # The unfiltered log is every tree's. An event with no agent belongs to the
             # machine rather than to anybody's tree, so it stays: hiding it would say a
@@ -2556,7 +2565,8 @@ def _plugin_run(args, b: Broker, db, me: str) -> int:
     d = plugins_mod.state_dir(p, b.repo)
     ctx = plugins_mod.Context(
         api=plugins_mod.API, name=p.name, state_dir=d, repo=store.repo_root(b.repo),
-        worktree=b.repo, agent=agent, json=bool(args.json))
+        worktree=b.repo, agent=agent, json=bool(args.json),
+        events=plugins_mod.EventLog.bind(db, agent, p.name))
     try:
         # sb holds the lock, so a plugin doing read-modify-write on a JSON file is correct
         # without its author knowing the word "lock". Around the handler and nothing else.

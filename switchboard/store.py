@@ -20,7 +20,7 @@ import subprocess
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 from . import config
 
@@ -337,14 +337,28 @@ CREATE INDEX idx_msgs_inbox ON messages(to_agent, read_at);
 CREATE INDEX idx_msgs_undelivered ON messages(to_agent, delivered_at);
 CREATE INDEX idx_msgs_reply ON messages(reply_to);
 
+-- THE ONE EVENT LOG (v2 §13). Switchboard keeps mutable current state in the other tables
+-- and this single append-only history beside them. Task, Plan, Step and Agent history are
+-- filtered views of it (`history`), never logs of their own. Transcripts are not copied:
+-- an agent's `session_id` and `cwd` are what locate them. Retained indefinitely — `_reset`
+-- carries these rows across a rebuild.
 CREATE TABLE events (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     agent         TEXT,
     kind          TEXT NOT NULL,
     payload       TEXT,               -- JSON
-    created_at    INTEGER NOT NULL
+    created_at    INTEGER NOT NULL,
+    task_id       TEXT,               -- the Task this event is about, if any. NULL for
+                                      -- every row predating the column, which is what
+                                      -- they always meant: about no Task in particular.
+    plan_id       TEXT,               -- the Plan this event is about, if any (same rule)
+    step_id       TEXT                -- the Step this event is about, if any (same rule)
 );
 CREATE INDEX idx_events_agent ON events(agent, id);
+-- The Task and Plan/Step history views. Added to an EXISTING table, so `_reconcile`
+-- ensures them the same way as the two indexes below.
+CREATE INDEX idx_events_task ON events(task_id, id);
+CREATE INDEX idx_events_plan ON events(plan_id, step_id, id);
 -- The board's per-agent aggregates over ALL history. `idx_events_agent` orders a group-by
 -- but still fetches every row (its key is `agent` alone), so on a large events table the
 -- collector's tick paid three full scans — `_block_reasons` and `_last_summaries` reading
@@ -1224,9 +1238,36 @@ def _reset(db: sqlite3.Connection, *, force: bool = False) -> None:
     # recreated and empty with the error escaping `connect()`, one declared before it leaves
     # the store holding nothing but that table and every later `sb` failing identically.
     # Nobody adding a table should have to notice which half of that they are in.
+    #
+    # EXCEPT THE HISTORY. `events` is the one event log (v2 §13), retained indefinitely:
+    # a rebuild resets current state, never what happened. Its rows are carried across,
+    # every column both shapes share, ids included so nothing that cites one moves.
+    kept = _history_rows(db)
     for t in _wanted():
         db.execute(f"DROP TABLE IF EXISTS {t}")
     _create(db)
+    if kept:
+        cols, rows = kept
+        db.executemany(f"INSERT INTO events ({', '.join(cols)}) "
+                       f"VALUES ({', '.join('?' * len(cols))})", rows)
+        db.commit()
+
+
+def _history_rows(db: sqlite3.Connection) -> Optional[tuple[list, list]]:
+    """Every row of the event log, over the columns the rebuilt table will also have.
+
+    None when there is no log to keep — a store with no `events` table, or one whose
+    table shares no usable shape with the declared one (no `kind`, which is NOT NULL).
+    """
+    try:
+        have = _columns(db, "events")
+    except sqlite3.OperationalError:
+        return None
+    cols = [c for c in _wanted()["events"] if c in have]
+    if "kind" not in cols or "created_at" not in cols:
+        return None
+    rows = [tuple(r) for r in db.execute(f"SELECT {', '.join(cols)} FROM events")]
+    return (cols, rows) if rows else None
 
 
 def _herdr_alive() -> Optional[set]:
@@ -2462,9 +2503,17 @@ def put_message(
     # as stalled.
     if kind != "signal":
         db.execute("UPDATE agents SET awaiting_task=0 WHERE name=?", (to_agent,))
+    mid = int(cur.lastrowid)
+    # Into the one event log too, whole: the message row is current state (read, delivered,
+    # undeliverable) and this is the history — who told whom what, and how (v2 §13). Under
+    # the SENDER, who is the one acting; the messages half of `status._last_activity`
+    # already counts every row it sends, at this same timestamp.
+    log_event(db, kind="message", agent=from_agent, commit=False, id=mid, to=to_agent,
+              message_kind=kind, body=body, reply_to=reply_to,
+              needs_reply=bool(needs_reply), no_reply=bool(no_reply))
     if commit:
         db.commit()
-    return int(cur.lastrowid)
+    return mid
 
 
 def unread_for(db: sqlite3.Connection, name: str, *, mark: bool = True) -> list[sqlite3.Row]:
@@ -2739,15 +2788,22 @@ def get_message(db: sqlite3.Connection, mid: int) -> Optional[sqlite3.Row]:
 
 
 # ---------------------------------------------------------------------------
-# Events  (the debug log)
+# Events  (the one event log)
 # ---------------------------------------------------------------------------
 
 
 def log_event(
     db: sqlite3.Connection, *, kind: str, agent: Optional[str] = None,
-    commit: bool = True, **payload: Any
-) -> None:
-    """Append-only. Every `sb` invocation lands here, including failures.
+    task_id: Optional[str] = None, plan_id: Optional[str] = None,
+    step_id: Optional[str] = None, commit: bool = True, **payload: Any
+) -> Optional[int]:
+    """Append-only. Every `sb` invocation lands here, including failures. -> the row id.
+
+    THE ONE LOG (v2 §13). Anything with a history — an agent, a Task, a Plan, a Step —
+    writes it here, naming what the row is about in `task_id` / `plan_id` / `step_id`, and
+    reads it back through `history`. Nothing keeps a second log of its own. Store raw,
+    structured facts in `payload` — full message text included — so metrics can be derived
+    later; nothing here aggregates.
 
     Never swallow an adapter error — a discarded stderr is why we still cannot say what
     caused one spawn failure during validation. What IS swallowed is the log's own failure
@@ -2758,27 +2814,87 @@ def log_event(
     `commit=False` is for a caller inside `mutation()`: the event is part of that
     transaction and is committed — or rolled back — with the mutation it records. It is
     NOT a payload key, so nothing that logs `commit=...` as a fact can reach it by
-    accident; `**payload` sees only what is left.
+    accident; `**payload` sees only what is left. The subject ids are not payload keys
+    either, for the same reason.
+
+    A row with no subject is written in exactly the shape it always was. A row WITH one,
+    on a degraded store that has not taken the subject columns yet, is still written — its
+    subjects go into the payload instead — because dropping a Plan's history on the floor
+    for the length of a fleet's drain is the one outcome worse than a row a column filter
+    cannot find.
     """
+    subjects = {k: v for k, v in (("task_id", task_id), ("plan_id", plan_id),
+                                  ("step_id", step_id)) if v is not None}
     try:
-        db.execute(
-            "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
-            (agent, kind, json.dumps(payload, default=str) if payload else None, now()),
-        )
+        if subjects:
+            try:
+                cur = db.execute(
+                    "INSERT INTO events (agent, kind, payload, created_at, task_id, plan_id, "
+                    "step_id) VALUES (?,?,?,?,?,?,?)",
+                    (agent, kind, json.dumps(payload, default=str) if payload else None,
+                     now(), task_id, plan_id, step_id),
+                )
+            except sqlite3.OperationalError:
+                payload = {**payload, **subjects}
+                cur = db.execute(
+                    "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
+                    (agent, kind, json.dumps(payload, default=str), now()),
+                )
+        else:
+            cur = db.execute(
+                "INSERT INTO events (agent, kind, payload, created_at) VALUES (?,?,?,?)",
+                (agent, kind, json.dumps(payload, default=str) if payload else None, now()),
+            )
         if commit:
             db.commit()
+        return int(cur.lastrowid)
     except sqlite3.OperationalError:
-        pass
+        return None
+
+
+def history(
+    db: sqlite3.Connection, *, agent: Optional[str] = None, task_id: Optional[str] = None,
+    plan_id: Optional[str] = None, step_id: Optional[str] = None,
+    kinds: Sequence[str] = (), limit: Optional[int] = None, newest_first: bool = False,
+) -> list[sqlite3.Row]:
+    """A filtered VIEW of the one event log. The only way any history is read.
+
+    Agent, Task, Plan and Step history are all this function with a different filter —
+    never a log of their own (v2 §13). Filters AND together; none at all is the whole log.
+    Oldest first unless `newest_first`, which is what a tail (`limit`) usually wants.
+
+    Asking for a subject on a store too old to have the subject columns answers empty
+    rather than raising: nothing on such a store was ever written about one.
+    """
+    where, params = [], []
+    for col, val in (("agent", agent), ("task_id", task_id), ("plan_id", plan_id),
+                     ("step_id", step_id)):
+        if val:
+            where.append(f"{col}=?")
+            params.append(val)
+    if kinds:
+        where.append(f"kind IN ({','.join('?' * len(kinds))})")
+        params.extend(kinds)
+    sql = "SELECT * FROM events"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id " + ("DESC" if newest_first else "ASC")
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    try:
+        return db.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        if task_id or plan_id or step_id:
+            return []
+        raise
 
 
 def recent_events(
     db: sqlite3.Connection, *, agent: Optional[str] = None, limit: int = 50
 ) -> list[sqlite3.Row]:
-    if agent:
-        return db.execute(
-            "SELECT * FROM events WHERE agent=? ORDER BY id DESC LIMIT ?", (agent, limit)
-        ).fetchall()
-    return db.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    """The newest `limit` rows, newest first — the log's tail, or one agent's history."""
+    return history(db, agent=agent, limit=limit, newest_first=True)
 
 
 # ---------------------------------------------------------------------------

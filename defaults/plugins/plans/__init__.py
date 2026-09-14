@@ -1858,7 +1858,7 @@ def create(ctx, args) -> Result:
     # THE ONE LOCK LEFT, and it is held over this and nothing else: minting. See
     # `_minting` for why the other verbs need none and what is left unguarded.
     with _minting(ctx.state_dir):
-        doc, seal = _read(ctx.state_dir)
+        doc, seal = _read_logged(ctx)
         who = ctx.agent or "human"
         where, how = _workspace(ctx)
         plan = {"id": f"p-{doc['next_plan']}", "kind": KIND_PLAN,
@@ -1915,7 +1915,7 @@ def create(ctx, args) -> Result:
             # thing about a plan that was never true of the job and cannot be re-derived
             # later: sb was not reachable at the moment this plan was made.
             detail += "; workspace unresolved — sb did not answer"
-        _log(plan, who, "create", args.reason, detail)
+        _log(ctx, plan, who, "create", args.reason, detail)
         # The file, claimed with `O_EXCL` before it is filled: the second lock on the id,
         # and the only one that holds where `flock` does not. See `_reserve`.
         _reserve(ctx.state_dir, doc, plan)
@@ -1972,7 +1972,7 @@ def record(ctx, args) -> Result:
     if bad:
         return bad
     with _minting(ctx.state_dir):
-        doc, seal = _read(ctx.state_dir)
+        doc, seal = _read_logged(ctx)
         who = ctx.agent or "human"
         where, how = _workspace(ctx)
         rec = {"id": f"p-{doc['next_plan']}", "kind": KIND_RECORD,
@@ -1994,7 +1994,7 @@ def record(ctx, args) -> Result:
         detail = f"direct change record; {_count(rec['steps'])} skeleton"
         if how == UNAVAILABLE:
             detail += "; workspace unresolved — sb did not answer"
-        _log(rec, who, "record", args.reason, detail)
+        _log(ctx, rec, who, "record", args.reason, detail)
         _reserve(ctx.state_dir, doc, rec)
         doc["plans"].append(rec)
         _write(ctx.state_dir, doc, seal)
@@ -2016,7 +2016,7 @@ def ls(ctx, args) -> Result:
     if args.all and ctx.agent and ctx.json:
         print("sb: `plans list --all --json` is a repo-wide human view; "
               "agents deciding what to do next should omit `--all`.", file=sys.stderr)
-    doc, seal = _read(ctx.state_dir)
+    doc, seal = _read_logged(ctx)
     plans, here = doc["plans"], _here(ctx)
     if not args.all:
         plans = [p for p in plans if _same(p.get("checkout"), here)]
@@ -2084,7 +2084,7 @@ def show(ctx, args) -> Result:
     if "/" in given or (given[:1].lower() == "s" and _num(_STEP_ID, given) is not None):
         return _one_step(ctx, given, markdown=bool(getattr(args, "markdown", False)),
                          full=bool(getattr(args, "full", False)))
-    doc, seal = _read(ctx.state_dir)
+    doc, seal = _read_logged(ctx)
     plan = _find(doc, args.id)
     if plan is None:
         return _missing(doc, args.id)
@@ -2182,7 +2182,7 @@ def comment(ctx, args) -> Result:
     if not re.fullmatch(r"[1-9]\d*", pr):
         return _needs("--pr", "a pull request number is required, e.g. `--pr 181`")
 
-    doc, seal = _read(ctx.state_dir)
+    doc, seal = _read_logged(ctx)
     plan = _find(doc, args.plan)
     if plan is None:
         return _missing(doc, args.plan)
@@ -2383,7 +2383,7 @@ def merge(ctx, args) -> Result:
     the partial state it is and returned as a failure — a merge that happened and a comment
     that did not is not a success, and pretending the merge can be undone would be worse.
     """
-    doc, _ = _read(ctx.state_dir)
+    doc, _ = _read_logged(ctx)
     plan = _find(doc, args.plan)
     if plan is None:
         return _missing(doc, args.plan)
@@ -2680,7 +2680,7 @@ def _record_approval(ctx, plan_id: str, *, head: str, by: str, kind: str) -> Non
     like `_record_landing`, and writes only these three fields plus `at`; `outcome`/`cleanup`
     are `_record_landing`'s and are left untouched.
     """
-    doc, seal = _read(ctx.state_dir)
+    doc, seal = _read_logged(ctx)
     plan = _find(doc, plan_id)
     if plan is None:
         return
@@ -2709,7 +2709,7 @@ def _record_landing(ctx, plan_id: str, who: str, reason: Optional[str], *,
     nothing else — `phase` stays the record describing itself in the owner's own words, which
     is what the guide says it is, and no verb here promotes it.
     """
-    doc, seal = _read(ctx.state_dir)
+    doc, seal = _read_logged(ctx)
     plan = _find(doc, plan_id)
     if plan is None:
         return
@@ -2727,7 +2727,7 @@ def _record_landing(ctx, plan_id: str, who: str, reason: Optional[str], *,
         # One entry per landing attempt, stamped by the call that made it. The second write
         # of a run is the comment's result landing on an outcome already in the record, and a
         # changelog saying `merge` twice for one merge would read as two attempts.
-        _log(plan, who, "merge", reason,
+        _log(ctx, plan, who, "merge", reason,
              f"PR {outcome.get('pr')} {outcome.get('result')}")
     _write(ctx.state_dir, doc, seal)
 
@@ -2774,7 +2774,7 @@ def _one_step(ctx, given: str, *, markdown: bool = False, full: bool = False) ->
     and the instructions all come out of the library at this instant, and none of them is
     written back into the file.
     """
-    doc, _ = _read(ctx.state_dir)
+    doc, _ = _read_logged(ctx)
     plan, step = _locate(doc, given)
     if step is None:
         return _no_step(doc, given)
@@ -2802,7 +2802,7 @@ def _one_step(ctx, given: str, *, markdown: bool = False, full: bool = False) ->
 
 def changelog(ctx, args) -> Result:
     """The changelog alone, for reading a finished job cold without the current shape."""
-    doc, _ = _read(ctx.state_dir)
+    doc, _ = _read_logged(ctx)
     plan = _find(doc, args.id)
     if plan is None:
         return _missing(doc, args.id)
@@ -2830,7 +2830,7 @@ def validate(ctx, args) -> Result:
     """
     wanted = [str(w).strip() for w in (args.id or ()) if str(w).strip()]
     try:
-        doc, _ = _read(ctx.state_dir)
+        doc, _ = _read_logged(ctx)
     except ValueError as e:
         # The store itself, not one plan: a legacy single file that will not parse, or a
         # counters sidecar from a newer plugin. Reported rather than raised — see above.
@@ -3016,7 +3016,7 @@ def note(ctx, args) -> Result:
         return _on_step(ctx, args.target, "note", args.reason,
                         lambda step, who: _add_note(step, text, who))
 
-    doc, seal = _read(ctx.state_dir)
+    doc, seal = _read_logged(ctx)
     plan = _find(doc, args.target)
     if plan is None:
         return _missing(doc, args.target)
@@ -3025,7 +3025,7 @@ def note(ctx, args) -> Result:
         return bad
     who = ctx.agent or "human"
     plan.setdefault("notes", []).append(_note(text, who))
-    _log(plan, who, "note", args.reason, f"on {plan['id']}: {_clip(text)}")
+    _log(ctx, plan, who, "note", args.reason, f"on {plan['id']}: {_clip(text)}")
     _write(ctx.state_dir, doc, seal)
     return _plan_result(_shown(plan, lib))
 
@@ -3156,7 +3156,7 @@ def name_step(ctx, args) -> Result:
     # NO LOCK: the step id comes from this plan's own counter in this plan's own file, so
     # the only race left is two writers on one plan — which the design answers with one
     # writer per plan rather than with a lock. See `_minting`.
-    doc, seal = _read(ctx.state_dir)
+    doc, seal = _read_logged(ctx)
     plan = _find(doc, args.plan)
     if plan is None:
         return _missing(doc, args.plan)
@@ -3182,7 +3182,7 @@ def name_step(ctx, args) -> Result:
         # process's own copy of the store.
         return e.refusal()
     who = ctx.agent or "human"
-    _log(plan, who, "name-step", args.reason, _minted(added, lib))
+    _log(ctx, plan, who, "name-step", args.reason, _minted(added, lib))
     _write(ctx.state_dir, doc, seal)
     return _added(plan, added, lib)
 
@@ -3239,7 +3239,7 @@ def template(ctx, args) -> Result:
     # THE ONE LOCK LEFT, and it is held over this and nothing else: minting. See
     # `_minting` for why the other verbs need none and what is left unguarded.
     with _minting(ctx.state_dir):
-        doc, seal = _read(ctx.state_dir)
+        doc, seal = _read_logged(ctx)
         who = ctx.agent or "human"
         where, how = _workspace(ctx)
         plan = {"id": f"p-{doc['next_plan']}", "kind": KIND_PLAN,
@@ -3275,7 +3275,7 @@ def template(ctx, args) -> Result:
         detail = f"from {wanted}: {_minted(plan['steps'], lib) or 'empty'}"
         if how == UNAVAILABLE:
             detail += "; workspace unresolved — sb did not answer"
-        _log(plan, who, "template", args.reason, detail)
+        _log(ctx, plan, who, "template", args.reason, detail)
         _reserve(ctx.state_dir, doc, plan)          # the id, claimed; see `create`
         doc["plans"].append(plan)
         _write(ctx.state_dir, doc, seal)
@@ -3460,7 +3460,7 @@ def _on_step(ctx, given: str, action: str, reason: Optional[str], change,
     `unblocked` is what the two verbs that MOVE a step past ask for: what this move just
     released, printed under the result with its instructions in full. See `_next`.
     """
-    doc, seal = _read(ctx.state_dir)
+    doc, seal = _read_logged(ctx)
     plan, step = _locate(doc, given)
     if step is None:
         return _no_step(doc, given)
@@ -3471,7 +3471,7 @@ def _on_step(ctx, given: str, action: str, reason: Optional[str], change,
     detail = change(step, who)
     if isinstance(detail, Result):
         return detail                   # refused, and nothing has been written
-    _log(plan, who, action, reason, detail)
+    _log(ctx, plan, who, action, reason, detail, step=step.get("id"))
     _write(ctx.state_dir, doc, seal)
     return _changed(plan, step, lib, _next(plan, step) if unblocked else [])
 
@@ -3521,7 +3521,7 @@ def _derive(ctx, plan_id: str, defs: tuple, why: str) -> list[str]:
     document, exactly as `_record_landing` does and for the same reason: `comment` writes
     between that read and this one, and that write has to survive.
     """
-    doc, seal = _read(ctx.state_dir)
+    doc, seal = _read_logged(ctx)
     plan = _find(doc, plan_id)
     if plan is None:
         return []
@@ -3536,7 +3536,8 @@ def _derive(ctx, plan_id: str, defs: tuple, why: str) -> list[str]:
         if str(step.get("progress") or "") != OPEN:
             continue
         moved.append(str(step.get("id")))
-        _log(plan, who, DERIVED, why, _progress(step, DONE, None))
+        _log(ctx, plan, who, DERIVED, why, _progress(step, DONE, None),
+             step=step.get("id"))
     if moved:
         _write(ctx.state_dir, doc, seal)
     return moved
@@ -4899,17 +4900,98 @@ def _authored(given: str) -> tuple[Optional[str], str]:
     return (display or None), name
 
 
-def _log(plan: dict, who: str, action: str, reason: Optional[str], detail: str = "") -> None:
+def _log(ctx, plan: dict, who: str, action: str, reason: Optional[str], detail: str = "",
+         *, step: Optional[str] = None) -> None:
     """Append one changelog entry. The only way anything is ever added to a changelog.
 
     Every mutating command calls this, which is why it takes the reason as an argument
     rather than reading it off `args`: a verb that forgets to pass one is visible here as a
     `None` in the record, and a verb that forgets to call this at all is a diff nobody can
     miss.
+
+    THE CHANGELOG IS A VIEW OF THE ONE EVENT LOG (v2 §13): Plan and Step history are never
+    a log of their own. So the entry is appended to sb's event log, about this plan and
+    step, and what lands in the document is only the in-memory copy this command's own
+    renderers read — marked with the row id it came from, which `_stored` drops on the way
+    to disk and `_hydrate` puts back on the way in. Written into the file for real only
+    where there is no log to write to (a handler run with no store behind it, or a store
+    that refused the row): a record kept somewhere beats a record kept nowhere.
     """
-    plan.setdefault("changelog", []).append(
-        {"at": int(time.time()), "by": who, "action": action,
-         "reason": (reason or "").strip() or None, "detail": detail or None})
+    entry = {"at": int(time.time()), "by": who, "action": action,
+             "reason": (reason or "").strip() or None, "detail": detail or None}
+    events = getattr(ctx, "events", None)
+    row = None
+    if events is not None and plan.get("id"):
+        row = events.append(PLAN_EVENT, plan_id=str(plan["id"]),
+                            step_id=str(step) if step else None, **entry)
+    if row is not None:
+        entry["event"] = row
+    plan.setdefault("changelog", []).append(entry)
+
+
+# The event-log kind every changelog entry is written as. One kind; `action` says which.
+PLAN_EVENT = "plan"
+
+
+def _read_logged(ctx) -> tuple[dict, dict]:
+    """`_read`, with each plan's changelog filled in from the one event log. Every verb.
+
+    The seal is `_read`'s, taken before the fill, so it still describes the file — which
+    is what `_write` compares a `_stored` plan against.
+    """
+    doc, seal = _read(ctx.state_dir)
+    _hydrate(doc, getattr(ctx, "events", None))
+    return doc, seal
+
+
+def _hydrate(doc: dict, events) -> None:
+    """Merge each plan's log rows into its changelog, in time order. Nothing is dropped.
+
+    The file's own entries are the ones written before the log existed (or where no log
+    could take them), and they stay exactly where they are; a log row is placed by its
+    `at`, after any file entry stamped the same second. A file entry that already carries
+    an `event` id is a copy of a log row somebody wrote back by hand, and the log's own
+    row stands in for it rather than both being shown.
+    """
+    if events is None:
+        return
+    by_plan: dict[str, list] = {}
+    for r in events.history(kinds=(PLAN_EVENT,)):
+        if not r.get("plan_id"):
+            continue
+        p = r["payload"] or {}
+        by_plan.setdefault(r["plan_id"], []).append(
+            {"at": p.get("at", r["created_at"]), "by": p.get("by"), "action": p.get("action"),
+             "reason": p.get("reason"), "detail": p.get("detail"), "event": r["id"]})
+    if not by_plan:
+        return
+    for plan in doc.get("plans") or ():
+        rows = by_plan.get(str(plan.get("id")))
+        if not rows:
+            continue
+        kept = [e for e in (plan.get("changelog") or [])
+                if not (isinstance(e, dict) and "event" in e)]
+        merged, j = [], 0
+        for e in kept:
+            while j < len(rows) and _at(rows[j]) < _at(e):
+                merged.append(rows[j])
+                j += 1
+            merged.append(e)
+        plan["changelog"] = merged + rows[j:]
+
+
+def _at(entry: Any) -> float:
+    """An entry's `at` as a sort key. A hand-written one that is not a number sorts first."""
+    v = entry.get("at") if isinstance(entry, dict) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+
+def _stored(plan: dict) -> dict:
+    """The plan as it goes to disk: without the changelog entries the event log holds."""
+    log = plan.get("changelog")
+    if not isinstance(log, list) or not any(isinstance(e, dict) and "event" in e for e in log):
+        return plan
+    return {**plan, "changelog": [e for e in log if not (isinstance(e, dict) and "event" in e)]}
 
 
 # -- the file ------------------------------------------------------------------
@@ -4991,7 +5073,7 @@ def _reserve(d: Path, doc: dict, plan: dict) -> None:
             doc["next_plan"] = max(_counter(doc.get("next_plan")), n + 2)
             continue
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(_text(plan))
+            fh.write(_text(_stored(plan)))
         return
 
 
@@ -5474,6 +5556,8 @@ def _write(d: Path, doc: dict, seal: dict) -> None:
     That is `todo`'s trade taken deliberately, and the cost is one command's worth of
     changelog, not the store.
     """
+    # The event log's changelog rows never reach the file — see `_log`.
+    doc = {**doc, "plans": [_stored(p) for p in doc["plans"]]}
     here: dict[int, dict] = {}
     for plan in doc["plans"]:
         n = _num(_PLAN_ID, plan.get("id"))

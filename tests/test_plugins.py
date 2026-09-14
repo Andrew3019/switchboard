@@ -489,10 +489,17 @@ class ContextAndResultTest(unittest.TestCase):
     def test_a_context_carries_no_authority(self):
         """What is NOT in `Context` is the contract: no Broker, no store handle, no spawn
         authority. A plugin that can call `sb delegate` is a fork bomb waiting for a bad
-        loop."""
+        loop.
+
+        `events` is the one exception, and it is not a handle: the one event log's append
+        and filtered read, with the connection closed over rather than held (v2 §13)."""
         fields = set(plugins.Context.__dataclass_fields__)
         self.assertEqual(fields, {"api", "name", "state_dir", "repo", "worktree",
-                                  "agent", "json"})
+                                  "agent", "json", "events"})
+        self.assertEqual({n for n in dir(plugins.EventLog) if not n.startswith("_")},
+                         {"append", "history", "bind"})
+        self.assertFalse(hasattr(plugins.EventLog(lambda *a, **k: None, lambda **k: []),
+                                 "__dict__"))
 
 class StateTest(Sandbox):
     """sb owns the path and the lock. It creates the directory and never reads inside it."""

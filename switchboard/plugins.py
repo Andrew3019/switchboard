@@ -61,6 +61,7 @@ import contextlib
 import difflib
 import fcntl
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -135,11 +136,72 @@ class Context:
     worktree: Path                  # this worktree
     agent: Optional[str]            # resolved caller; None means a human is typing
     json: bool
+    # The one event log, when the command runs inside `sb` (always, from the CLI). None
+    # only where a handler is called with no store behind it; a plugin then keeps working
+    # exactly as it did before the log existed.
+    events: Optional["EventLog"] = None
 
     def as_dict(self) -> dict:
         return {"api": self.api, "name": self.name, "state_dir": str(self.state_dir),
                 "repo": str(self.repo), "worktree": str(self.worktree),
                 "agent": self.agent, "json": self.json}
+
+
+class EventLog:
+    """The store's one append-only event log, as a plugin command may use it. Nothing else.
+
+    A plugin still gets no database handle: it can append a row and read the filtered view
+    of rows about one Task, Plan or Step, which is what "history is a view of the one log"
+    needs and all it needs (v2 §13). The connection lives in the two closures `bind` makes
+    and on no attribute, so the object handed over is those two verbs and nothing else.
+    Every row is stamped with the calling agent and the plugin's name, so a plugin cannot
+    write history in somebody else's name.
+
+    `store` is imported inside `bind`, for `state_root`'s reason: the board imports plugin
+    packages, and a renderer must never be two lookups from `store.connect`.
+    """
+
+    __slots__ = ("_append", "_history")
+
+    def __init__(self, append: Callable[..., Optional[int]],
+                 history: Callable[..., list]):
+        self._append, self._history = append, history
+
+    @classmethod
+    def bind(cls, db, agent: Optional[str], plugin: str) -> "EventLog":
+        from . import store
+
+        def append(kind, **kw):
+            return store.log_event(db, kind=kind, agent=agent, plugin=plugin, **kw)
+
+        def history(**kw):
+            return store.history(db, **kw)
+
+        return cls(append, history)
+
+    def append(self, kind: str, *, task_id: Optional[str] = None,
+               plan_id: Optional[str] = None, step_id: Optional[str] = None,
+               **payload: Any) -> Optional[int]:
+        """Append one row. -> its id, or None when the store could not take it."""
+        payload.pop("agent", None)          # stamped by sb, never chosen by the plugin
+        payload.pop("commit", None)
+        return self._append(kind, task_id=task_id, plan_id=plan_id, step_id=step_id,
+                            **payload)
+
+    def history(self, *, task_id: Optional[str] = None, plan_id: Optional[str] = None,
+                step_id: Optional[str] = None,
+                kinds: Sequence[str] = ()) -> list[dict]:
+        """Rows about this subject, oldest first, with `payload` already decoded."""
+        out = []
+        for r in self._history(task_id=task_id, plan_id=plan_id, step_id=step_id,
+                               kinds=kinds):
+            row = dict(r)
+            try:
+                row["payload"] = json.loads(row["payload"]) if row["payload"] else {}
+            except ValueError:
+                row["payload"] = {}
+            out.append(row)
+        return out
 
 
 @dataclass
