@@ -495,8 +495,9 @@ SCOPE = "repo"
 # file or the other and never half of one, and two commands touching two different plans
 # were never in each other's way to begin with.
 #
-# What is left is `_minting` — a short lock the four verbs that ALLOCATE AN ID take, and
-# nothing else does. Ids come from counters shared by the whole store, so that one is a
+# What is left is `_minting` — a short lock the four verbs that ALLOCATE AN ID take — and
+# its sibling `_owning`, which the ownership verbs (`take`, `release`, `complete`, `reopen`)
+# take so that "exactly one accountable owner" is mechanized. Nothing else takes either. Ids come from counters shared by the whole store, so that one is a
 # real race and is the only one this file can fix. What it cannot fix, and does not
 # pretend to: two writers on the SAME plan, where the second read the file before the
 # first wrote it and its write is the one that survives. That is the design's "one writer
@@ -538,7 +539,7 @@ DERIVED = "auto-tick"
 # verbs WROTE, which is a closed list and is the only thing a timestamp can be trusted from.
 # A derived tick closes a step exactly as a typed one does — it is stamped by the call that
 # made it and would otherwise vanish from every timing the changelog is the only source for.
-CLOSING = ("tick", "skip", DERIVED)
+CLOSING = ("tick", "skip", DERIVED, "complete")
 
 # How a plan's workspace was decided, stored as `workspace_from`. Four values and no more,
 # because this one IS a closed vocabulary: it describes what this code did, not what a job
@@ -846,6 +847,32 @@ def register(reg):
                                     "required"),
               reg.arg("--reason", help="why, for the changelog; the skip's own reason is "
                                        "`--why` and is what shows on the step")])
+    reg.command(
+        "take", take, audience="both",
+        help="become the owner of an unowned step — a not-yet-eligible one too; --steal "
+             "takes an owned one and tells its previous owner",
+        args=[reg.arg("step", help="a step id (step-1, p-2/step-1) or its board name"),
+              reg.arg("--steal", flag=True,
+                      help="take it even though somebody owns it; recorded, and the "
+                           "previous owner is told unless it has already finished"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "release", release, audience="both",
+        help="stop owning a step you own — it becomes explicitly unowned",
+        args=[reg.arg("step", help="a step id (step-1, p-2/step-1) or its board name"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "complete", complete, audience="both",
+        help="as a step's owner, declare a judgment step done — refused for the steps "
+             "Switchboard completes itself (open_pr, merge)",
+        args=[reg.arg("step", help="a step id (step-1, p-2/step-1) or its board name"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "reopen", reopen, audience="both",
+        help="move a done judgment step back to open and suspend every later step — "
+             "refused once the plan's merge step is complete",
+        args=[reg.arg("step", help="a step id (step-1, p-2/step-1) or its board name"),
+              reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "library", library, audience="both",
         help="browse the step definitions a plan can name, or read one in full",
@@ -3001,23 +3028,30 @@ def tick(ctx, args) -> Result:
     bad = _cap(args.reason)
     if bad:
         return bad
+    return _on_step(ctx, args.step, "tick", args.reason,
+                    lambda step, who: _close(step, args.reason, "tick"), unblocked=True)
 
-    def _tick(step, who):
-        if str(step.get("progress") or "") == DONE:
-            return Result(human=f"{step['id']} already done — nothing to tick",
-                          data={"plan": None, "step": step.get("id"), "already_done": True})
-        if (str(step.get("def") or "") == _APPROVAL_DEF
-                and not str(step.get("output") or "").strip()):
-            why = (f"{step['id']} is a change approval and its `output` is empty — the "
-                   f"approved contract goes in `output` as the gate clears, so an empty one "
-                   f"is an approval that never happened. Put the full approved text in "
-                   f"`output`, then tick; a trivially small change skips this with a reason "
-                   f"instead.")
-            return Result(ok=False, human=why,
-                          data={"error": why, "step": step.get("id"), "missing": "output"})
-        return _progress(step, DONE, args.reason)
 
-    return _on_step(ctx, args.step, "tick", args.reason, _tick, unblocked=True)
+def _close(step: dict, reason: Optional[str], verb: str) -> Any:
+    """Move one step to done, or say why not. What `tick` and `complete` both do to a step.
+
+    Idempotent on a step already `done`, and refused for a change approval with an empty
+    `output` — see `tick`, where both rules are argued. Shared so the ownership-aware
+    `complete` cannot drift into a looser door than the verb it is the sibling of.
+    """
+    if str(step.get("progress") or "") == DONE:
+        return Result(human=f"{step['id']} already done — nothing to {verb}",
+                      data={"plan": None, "step": step.get("id"), "already_done": True})
+    if (str(step.get("def") or "") == _APPROVAL_DEF
+            and not str(step.get("output") or "").strip()):
+        why = (f"{step['id']} is a change approval and its `output` is empty — the "
+               f"approved contract goes in `output` as the gate clears, so an empty one "
+               f"is an approval that never happened. Put the full approved text in "
+               f"`output`, then {verb}; a trivially small change skips this with a reason "
+               f"instead.")
+        return Result(ok=False, human=why,
+                      data={"error": why, "step": step.get("id"), "missing": "output"})
+    return _progress(step, DONE, reason)
 
 
 def skip(ctx, args) -> Result:
@@ -3048,6 +3082,199 @@ def skip(ctx, args) -> Result:
         return bad
     return _on_step(ctx, args.step, "skip", args.reason,
                     lambda step, who: _progress(step, SKIPPED, why), unblocked=True)
+
+
+# -- ownership -----------------------------------------------------------------
+#
+# `take`, `release`, `complete`, `reopen` and `take --steal` (v2 §4, INV-38/INV-44). A step's
+# `owner` is the field it always was; these are the verbs that move it with the guards the
+# design asks for, each one serialized by `_owning` and each one a changelog event naming
+# the caller. Additive: a hand-edited `owner` still reads exactly as before.
+
+
+def _owner(step: dict) -> Optional[str]:
+    return str(step.get("owner") or "").strip() or None
+
+
+def _denied(step: dict, why: str, **data) -> Result:
+    return Result(ok=False, human=why, data={"error": why, "step": step.get("id"), **data})
+
+
+def take(ctx, args) -> Result:
+    """Own a step. An unowned one plainly; an owned one only with `--steal`.
+
+    A PENDING STEP MAY BE TAKEN. Ownership is orthogonal to eligibility, so an agent can be
+    pre-staged on the step it will pick up once its predecessors close (#314/INV-123).
+
+    `--STEAL IS NEVER SILENT`, and that — not a rule about when it may be used — is the
+    safeguard: the steal is its own changelog action, and the previous owner gets a NORMAL
+    `sb tell` naming the step and the new owner. Except when that owner has already called
+    `sb done` (Andrew): a finished agent has no turn to act on the news. The message is sent
+    after the write and outside the lock, so a slow sb never holds every other ownership verb
+    in the repo, and a message that fails to go leaves the steal standing and says so.
+    """
+    bad = _cap(args.reason)
+    if bad:
+        return bad
+    steal = bool(getattr(args, "steal", False))
+    was: dict = {}
+
+    def _take(step, who):
+        prev = _owner(step)
+        if prev == who:
+            return Result(human=f"{step['id']} is already yours — nothing to take",
+                          data={"plan": None, "step": step.get("id"), "already_owned": True})
+        if prev and not steal:
+            return _denied(step, f"{step['id']} is owned by {prev} — it is theirs to "
+                                 f"release, or take it anyway with `take {step['id']} "
+                                 f"--steal`, which tells them", owner=prev)
+        step["owner"] = who
+        was["prev"] = prev
+        return ("steal" if prev else "take"), f"{step['id']} owner {prev or 'unowned'} → {who}"
+
+    with _owning(ctx.state_dir):
+        done = _on_step(ctx, args.step, "take", args.reason, _take)
+    prev = was.get("prev")
+    if not done.ok or not prev:
+        return done
+    return _told(ctx, done, prev)
+
+
+def _told(ctx, done: Result, prev: str) -> Result:
+    """Tell a step's previous owner it was stolen, unless it has finished. Onto the result."""
+    sid = f"{done.data.get('plan')}/{(done.data.get('step') or {}).get('id')}"
+    new = ctx.agent or "human"
+    status = _Live(ctx).owner(prev)
+    if status == "done":                # it called `sb done`; nobody is there to tell
+        done.data["notified"] = None
+        done.data["notice_skipped"] = f"{prev} has already finished"
+        done.human += f"\n\n{prev} has already finished, so it was not told."
+        return done
+    sent = _ask(ctx, "tell", prev, f"step {sid} was taken from you by {new} (--steal) — it "
+                                   f"is theirs now; you no longer own it", clock=_Budget())
+    done.data["notified"] = prev if sent is not None else None
+    done.human += (f"\n\n{prev} was told." if sent is not None else
+                   f"\n\n{prev} could NOT be told — `sb tell {prev}` it yourself.")
+    return done
+
+
+def release(ctx, args) -> Result:
+    """Stop owning a step. It becomes explicitly unowned, which is what surfaces it.
+
+    Only the owner releases: taking a step from somebody else is `take --steal`, which is
+    recorded and tells them, and a release by anyone would be that steal without either.
+    """
+    bad = _cap(args.reason)
+    if bad:
+        return bad
+
+    def _release(step, who):
+        prev = _owner(step)
+        if prev is None:
+            return Result(human=f"{step['id']} has no owner — nothing to release",
+                          data={"plan": None, "step": step.get("id"), "unowned": True})
+        if prev != who:
+            return _denied(step, f"{step['id']} is owned by {prev}, not you — only its owner "
+                                 f"releases it; `take --steal` is how it changes hands "
+                                 f"otherwise", owner=prev)
+        step["owner"] = None
+        return f"{step['id']} owner {prev} → unowned"
+
+    with _owning(ctx.state_dir):
+        return _on_step(ctx, args.step, "release", args.reason, _release)
+
+
+def complete(ctx, args) -> Result:
+    """The owner declares a judgment step done. `tick`'s ownership-aware sibling.
+
+    TWO REFUSALS BEYOND `tick`'s. A system kind (`open_pr`, `merge`, or a repo kind whose
+    definition says `"completion": "system"`) is completed by Switchboard establishing the
+    fact, never by an agent declaring it — decided by the step's immutable kind, so a rename
+    cannot get past it. And only the step's owner completes it: that is what makes the owner
+    accountable for the judgment. `tick` stays as it was, for everything this does not cover.
+    """
+    bad = _cap(args.reason)
+    if bad:
+        return bad
+
+    def _complete(step, who, plan, lib):
+        if _kind_completion(step, lib) == SYSTEM:
+            return _denied(step, f"{step['id']} is a `{_kind_of(step)}` step, which "
+                                 f"Switchboard completes itself when it establishes the "
+                                 f"fact — no agent declares it done", kind=_kind_of(step))
+        owner = _owner(step)
+        if owner != who:
+            why = (f"{step['id']} has no owner — `take` it, then complete it" if owner is None
+                   else f"{step['id']} is owned by {owner}, not you — only its owner "
+                        f"completes it")
+            return _denied(step, why, owner=owner)
+        return _close(step, args.reason, "complete")
+
+    with _owning(ctx.state_dir):
+        return _on_step(ctx, args.step, "complete", args.reason, _complete, unblocked=True,
+                        whole=True)
+
+
+def reopen(ctx, args) -> Result:
+    """Move a done judgment step back to open, and suspend every later step with it.
+
+    SUSPENDED means a later step that was `done` goes back to `open`, with `why` saying which
+    reopen did it: its predecessor is no longer complete, so neither is the case for it
+    (v2 §4, INV-44). Later is `_later` — what waits on this step through the deps, and what
+    runs in a later band of the spine. A step that is already open or skipped is left alone.
+
+    REFUSED once the plan's `merge`-kind step is complete: a merged plan is terminal, and a
+    concern after the merge is a new plan. Refused for a system kind too — only a judgment
+    step is ever reopened; a system step leaves `done` by Switchboard observing its fact false.
+    Anyone may reopen (a reviewer's requested changes are the normal case); the event names
+    who did.
+    """
+    bad = _cap(args.reason)
+    if bad:
+        return bad
+
+    def _reopen(step, who, plan, lib):
+        if _kind_completion(step, lib) == SYSTEM:
+            return _denied(step, f"{step['id']} is a `{_kind_of(step)}` step — only a "
+                                 f"judgment step is reopened", kind=_kind_of(step))
+        if str(step.get("progress") or "") != DONE:
+            return _denied(step, f"{step['id']} is {step.get('progress') or 'not done'} — "
+                                 f"only a done step is reopened")
+        steps = [s for s in (plan.get("steps") or ()) if isinstance(s, dict)]
+        merged = [s for s in steps
+                  if _kind_of(s) == "merge" and str(s.get("progress") or "") == DONE]
+        if merged:
+            return _denied(step, f"{plan.get('id')} is merged ({merged[0].get('id')} is "
+                                 f"complete) — a merged plan is terminal; a concern after "
+                                 f"the merge is a new plan", merged=merged[0].get("id"))
+        detail = _progress(step, OPEN, args.reason)
+        held = [s for s in _later(plan, step, lib) if str(s.get("progress") or "") == DONE]
+        for s in held:
+            _progress(s, OPEN, f"suspended — {step['id']} was reopened")
+        return detail + (f"; suspended {', '.join(str(s['id']) for s in held)}"
+                         if held else "")
+
+    with _owning(ctx.state_dir):
+        return _on_step(ctx, args.step, "reopen", args.reason, _reopen, whole=True)
+
+
+def _later(plan: dict, step: dict, lib: dict) -> list[dict]:
+    """Every step after this one: what waits on it through the deps, transitively, and
+    what runs in a strictly later band of the spine (`_ranked`) — a merge a lead left
+    unwired is still after the implementation it lands. Never the step itself."""
+    steps = [s for s in (plan.get("steps") or ()) if isinstance(s, dict)]
+    me = _num(_STEP_ID, step.get("id"))
+    after, grew = {me}, True
+    while grew:
+        grew = False
+        for s in steps:
+            n = _num(_STEP_ID, s.get("id"))
+            if n not in after and any(_num(_STEP_ID, d) in after for d in (s.get("deps") or ())):
+                after.add(n)
+                grew = True
+    rank = _ranked(step, lib)
+    return [s for s in steps if _num(_STEP_ID, s.get("id")) != me
+            and (_num(_STEP_ID, s.get("id")) in after or _ranked(s, lib) > rank)]
 
 
 def note(ctx, args) -> Result:
@@ -3516,7 +3743,7 @@ def _written(plan: dict, entry: dict, step: dict) -> None:
 
 
 def _on_step(ctx, given: str, action: str, reason: Optional[str], change,
-             *, unblocked: bool = False) -> Result:
+             *, unblocked: bool = False, whole: bool = False) -> Result:
     """Read, change the one step named, log, write. Every step verb is this.
 
     `change` mutates the step and returns the changelog detail — or a `Result`, for the
@@ -3525,8 +3752,13 @@ def _on_step(ctx, given: str, action: str, reason: Optional[str], change,
     rather than a thing nine verbs each remember: a verb that skipped `_log` would have to
     not be written this way at all.
 
-    `unblocked` is what the two verbs that MOVE a step past ask for: what this move just
+    `unblocked` is what the verbs that MOVE a step past ask for: what this move just
     released, printed under the result with its instructions in full. See `_next`.
+
+    `whole` hands `change` the plan and the library as well, for a verb whose decision
+    reads past the one step (a kind's completion mode, the steps after it). A `change` may
+    return `(action, detail)` where which action it was is only known once the step is read
+    — a `take` that turns out to be a steal.
     """
     doc, seal = _read_logged(ctx)
     if not _looks_step_id(given):       # a display name — resolve it to an id first
@@ -3543,9 +3775,11 @@ def _on_step(ctx, given: str, action: str, reason: Optional[str], change,
     if bad:
         return bad
     who = ctx.agent or "human"
-    detail = change(step, who)
+    detail = change(step, who, plan, lib) if whole else change(step, who)
     if isinstance(detail, Result):
         return detail                   # refused, and nothing has been written
+    if isinstance(detail, tuple):
+        action, detail = detail
     _log(ctx, plan, who, action, reason, detail, step=step.get("id"))
     _write(ctx.state_dir, doc, seal)
     return _changed(plan, step, lib, _next(plan, step) if unblocked else [])
@@ -5232,9 +5466,9 @@ def _minting(d: Path):
     design answers with a convention rather than a lock. `name-step` held this lock only
     for the store-wide step counter and holds nothing now.
 
-    Every other verb takes nothing. `tick`, `skip`, `note` and every read run concurrently
-    with each other and with an editor, which is the concurrency the per-file split was
-    for.
+    The ownership verbs take `_owning`, a sibling lock of their own. Every other verb takes
+    nothing. `tick`, `skip`, `note` and every read run concurrently with each other and with
+    an editor, which is the concurrency the per-file split was for.
 
     WHAT IS STILL UNGUARDED, said here rather than left to be discovered:
 
@@ -5248,8 +5482,41 @@ def _minting(d: Path):
       - A filesystem where `flock` does not work (some network mounts). `_reserve` is the
         second lock on the plan-id half of that door, and it needs no cooperation at all.
     """
+    with _flocked(d, MINT):
+        yield
+
+
+OWN = ".own.lock"
+
+
+@contextlib.contextmanager
+def _owning(d: Path):
+    """`_minting`'s sibling: held across one ownership verb's read, change and write.
+
+    THE ONE OTHER PLACE A CONVENTION IS NOT ENOUGH. "Exactly one accountable owner" is an
+    invariant the design mechanizes rather than asserts (v2 §4): two agents racing `take`
+    on one unowned step must resolve to one winner and one refusal, and `complete` racing
+    a `--steal` must resolve by arrival order. Without a lock both racers read the step
+    unowned and the later write silently wins — two agents each told the step is theirs.
+    So `take`, `release`, `complete` and `reopen` hold this across `_on_step`, and the
+    second racer reads the step the first one already wrote and is refused on it.
+
+    ITS OWN FILE and not `.mint.lock`, so a steal waiting on a slow write never holds up a
+    `create` in another worktree, and `_minting`'s promise — held over an id allocation and
+    nothing else — stays true. What it does NOT serialize: `tick`, `skip`, `note` and a
+    hand-edit still take nothing, so one of those landing mid-`take` on the same plan is
+    the ordinary two-writers case `_minting` describes. The ownership verbs are serialized
+    against each other, which is the race the invariant is about.
+    """
+    with _flocked(d, OWN):
+        yield
+
+
+@contextlib.contextmanager
+def _flocked(d: Path, name: str):
+    """An exclusive `flock` on one lock file in the state dir, released on close."""
     d.mkdir(parents=True, exist_ok=True)
-    fd = os.open(d / MINT, os.O_CREAT | os.O_RDWR, 0o644)
+    fd = os.open(d / name, os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield

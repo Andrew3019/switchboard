@@ -1870,6 +1870,129 @@ class StepsTest(PlansSandbox):
         self.assertEqual(self.data("plugin", "plans", "show", "p-1")
                          ["steps"][0]["kind"], "merge")
 
+    # -- ownership verbs (#316) ------------------------------------------------
+
+    def test_two_agents_racing_take_on_one_unowned_step_get_one_winner(self):
+        """"Exactly one accountable owner" is mechanized, not asserted: a second `take` that
+        starts while the first is between its read and its write waits on the ownership
+        lock, reads the step the first one wrote, and is refused naming the owner and
+        `--steal`. Provoked, not hoped for: w2 is started from inside w1's file replace,
+        which is the window where an unlocked w2 would read the step unowned and win."""
+        import threading
+        self.migrate()
+        self.plan("write it")
+        me = {}                             # thread id -> the agent that thread is
+        patch = mock.patch.object(cli.Broker, "whoami",
+                                  lambda self: me.get(threading.get_ident(), "w1"))
+        patch.start()
+        self.addCleanup(patch.stop)
+        codes, real = {}, os.replace
+
+        def racer():
+            me[threading.get_ident()] = "w2"
+            codes["w2"] = cli.main(["plugin", "plans", "take", "step-1"])
+
+        second = threading.Thread(target=racer)
+
+        def watched(src, dst):
+            if Path(dst).name == "p-1.json" and not second.is_alive() and "w2" not in codes:
+                second.start()
+                time.sleep(0.5)             # long enough for w2 to reach its read
+            real(src, dst)
+
+        # One capture around both racers: redirection is process-wide, so per-thread
+        # buffers would swap output between them. The refusal is asserted by its words,
+        # so a crash that also exits 1 cannot pass for one.
+        out = io.StringIO()
+        with mock.patch("os.replace", watched), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            codes["w1"] = cli.main(["plugin", "plans", "take", "step-1"])
+            second.join(10)
+        self.assertEqual((codes["w1"], codes["w2"]), (0, 1), out.getvalue())
+        self.assertIn("is owned by w1", out.getvalue())
+        self.assertIn("--steal", out.getvalue())
+        self.assertEqual(self.step("step-1")["owner"], "w1")
+        self.assertEqual(self.actions(), ["create", "take"])
+
+    def test_steal_tells_a_live_previous_owner_and_skips_a_finished_one(self):
+        """A steal is never silent — except to an agent that has already called `sb done`
+        (Andrew): there is nobody left to act on the news. Asserted on the store's message
+        rows, the durable half of `sb tell`; whether a doorbell rings is the broker's."""
+        db = store.connect(self.repo)
+        for name in ("w1", "w2", "w3"):
+            store.create_agent(db, name=name, role="worker", workspace="ws-1",
+                               cwd=str(self.repo))
+            store.set_state(db, name, "working")
+        db.close()
+        self.plan("write it")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "take", "step-1")
+        self.as_agent("w2")
+        code, out, _ = self.sb("plugin", "plans", "take", "step-1", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("--steal", json.loads(out)["data"]["error"])
+
+        got = self.data("plugin", "plans", "take", "step-1", "--steal")
+        self.assertEqual(got["notified"], "w1")
+        db = store.connect(self.repo)
+        told = [m["body"] for m in store.unread_for(db, "w1", mark=False)]
+        self.assertTrue(any("step-1" in b and "w2" in b for b in told), told)
+
+        store.set_state(db, "w2", "done")   # w2 has reported done
+        db.close()
+        self.as_agent("w3")
+        got = self.data("plugin", "plans", "take", "step-1", "--steal")
+        self.assertIsNone(got["notified"])
+        self.assertIn("finished", got["notice_skipped"])
+        db = store.connect(self.repo)
+        self.assertEqual(store.unread_for(db, "w2", mark=False), [])
+        db.close()
+        self.assertEqual(self.step("step-1")["owner"], "w3")
+        self.assertEqual(self.actions(), ["create", "take", "steal", "steal"])
+
+    def test_complete_is_the_owners_and_never_a_system_kinds(self):
+        """`complete` is judgment completion: only the step's owner declares it, and a
+        system kind (`open_pr`, `merge`) is refused whoever asks — decided by kind, so a
+        rename cannot smuggle one through."""
+        self.plan("write it")
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
+        pr = next(s["id"] for s in self.steps() if s["kind"] == "open_pr")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "take", "step-1")
+        self.ok("plugin", "plans", "take", pr)
+        self.as_agent("w2")
+        self.assertEqual(self.sb("plugin", "plans", "complete", "step-1")[0], 1)
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "complete", "write", "--reason", "diff is in")
+        self.assertEqual(self.step("step-1")["progress"], "done")
+        code, out, err = self.sb("plugin", "plans", "complete", pr, "--json")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(json.loads(out)["data"]["kind"], "open_pr")
+        self.assertEqual(self.step(pr)["progress"], "open")
+
+    def test_reopen_suspends_every_later_step_and_a_merged_plan_is_terminal(self):
+        """Reopening a done step puts every step after it back to open, saying why, because
+        what they were done against is no longer complete. Once the merge-kind step is
+        done the plan is terminal and reopen is refused."""
+        self.plan("write it", "review it", "ship it")      # chained 1 → 2 → 3
+        self.as_agent("w1")
+        for sid in ("step-1", "step-2", "step-3"):
+            self.ok("plugin", "plans", "tick", sid)
+        self.ok("plugin", "plans", "reopen", "step-1", "--reason", "changes requested")
+        self.assertEqual([s["progress"] for s in self.steps()], ["open", "open", "open"])
+        self.assertIn("step-1 was reopened", self.step("step-3")["why"])
+        self.assertEqual(self.actions()[-1], "reopen")
+
+        self.data("plugin", "plans", "name-step", "p-1", "merge")
+        merge = next(s["id"] for s in self.steps() if s["kind"] == "merge")
+        for sid in ("step-1", "step-2", "step-3"):
+            self.ok("plugin", "plans", "tick", sid)
+        self.edit_step(merge, progress="done")
+        code, out, _ = self.sb("plugin", "plans", "reopen", "step-1", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("merged", json.loads(out)["data"]["error"])
+        self.assertEqual(self.step("step-1")["progress"], "done")
+
 
 class CatalogueTest(PlansSandbox):
     """The library, the templates and the obligation: links, copies, and what comes with what.
