@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import re
 import sqlite3
 import sys
@@ -692,8 +693,10 @@ CREATE INDEX idx_notes_subject ON notes(subject, created_at);
                 p = self._populated_store()
                 with self._fourth(first=first):
                     db = store.connect(path=p)                 # migrates, keeps the rows
+                    history = self._counts(db)[2]
                     store._reset(db, force=True)               # and now: on purpose
-                    self.assertEqual(self._counts(db), (0, 0, 0))
+                    # Current state is gone; the one event log is carried across (v2 §13).
+                    self.assertEqual(self._counts(db), (0, 0, history))
                     self.assertEqual(
                         db.execute("SELECT count(*) FROM notes").fetchone()[0], 0)
                     self.assertEqual(store.schema_deficit(db), [])
@@ -1167,6 +1170,54 @@ class UnhookedTurnRepairTest(unittest.TestCase):
         store.set_turn(self.db, "top", store.TURN_WORKING)   # a hook, later
         store._repair_unhooked_turn(self.db)
         self.assertEqual(store.get_agent(self.db, "top")["turn"], store.TURN_WORKING)
+
+
+class OneEventLogTest(StoreTest):
+    """v2 §13: one append-only log; Agent, Task, Plan and Step history are views of it."""
+
+    def test_every_history_is_a_filter_over_the_same_rows(self):
+        """"Task, Plan, Step and Agent history are different filtered views of this one
+        event history, never independently maintained logs." So one row about an agent, a
+        Task, a Plan and a Step is found by each view, and each view finds nothing else."""
+        store.log_event(self.db, kind="other", agent="w2")
+        mid = store.log_event(self.db, kind="plan", agent="w1", task_id="t-1",
+                              plan_id="p-1", step_id="step-2", action="tick")
+        store.log_event(self.db, kind="plan", plan_id="p-1", step_id="step-3")
+        store.log_event(self.db, kind="plan", plan_id="p-2")
+        ids = lambda **kw: [r["id"] for r in store.history(self.db, **kw)]
+        self.assertIn(mid, ids(agent="w1"))
+        self.assertEqual(ids(task_id="t-1"), [mid])
+        self.assertEqual(ids(plan_id="p-1", step_id="step-2"), [mid])
+        self.assertEqual(len(ids(plan_id="p-1")), 2)
+        self.assertEqual(ids(plan_id="p-1", kinds=("other",)), [])
+        self.assertEqual(len(ids()), 4)
+        # `recent_events` is the same log's tail, newest first — not a second reader.
+        self.assertEqual([r["id"] for r in store.recent_events(self.db, limit=4)],
+                         ids()[::-1])
+
+    def test_a_tell_is_logged_whole_with_its_reply_mode(self):
+        """"`tell` (including whether it was `--no-reply`) ... Full Switchboard message text
+        is retained." The body in the log is the body sent, not a clip of it."""
+        store.create_agent(self.db, name="lead", role="lead")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead")
+        body = "x" * 5000
+        mid = store.put_message(self.db, from_agent="lead", to_agent="w1", kind="tell",
+                                body=body, no_reply=True)
+        [row] = store.history(self.db, agent="lead", kinds=("message",))
+        payload = json.loads(row["payload"])
+        self.assertEqual((payload["id"], payload["to"], payload["body"], payload["no_reply"]),
+                         (mid, "w1", body, True))
+
+    def test_a_rebuild_resets_state_and_keeps_the_history(self):
+        """"Keep structured history locally and retain it indefinitely for now." A schema
+        rebuild used to drop the event log along with current state."""
+        store.create_agent(self.db, name="w1", role="worker")
+        eid = store.log_event(self.db, kind="plan", agent="w1", plan_id="p-1", detail="made")
+        store._reset(self.db, force=True)
+        self.assertIsNone(store.get_agent(self.db, "w1"))
+        [row] = store.history(self.db, plan_id="p-1")
+        self.assertEqual((row["id"], row["agent"], json.loads(row["payload"])["detail"]),
+                         (eid, "w1", "made"))
 
 
 if __name__ == "__main__":

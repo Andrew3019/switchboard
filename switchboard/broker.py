@@ -5703,8 +5703,15 @@ class Broker:
         # Say so unconditionally rather than checking first: `working, not ended` is what
         # this row is, whoever wrote what to it while we were waiting on herdr.
         store.mark_spawned(self.db, name)
+        # The spawn as it happened, for the history view and for metrics derived later:
+        # the parent/child edge, role, tier, what bound to it, where it runs, the task in
+        # full, and the session id that locates its transcript (which is never copied).
         store.log_event(self.db, kind="delegate", agent=name, parent=me, role=role,
-                        workspace=ws)
+                        workspace=ws, tier=model, branch=branch, cwd=str(where),
+                        isolation=isolation, with_=list(with_) or None,
+                        custom_prompt=bool(as_prompt), task=task,
+                        awaiting_task=bool(awaiting_task),
+                        session_id=agent.session_id or None)
         # EVERY agent opens with the tree beside it, not just the top-level
         # orchestrator `sb start` makes: `delegate` is the one place every spawn
         # passes through, so this is the one place the board can be opened without
@@ -6990,7 +6997,12 @@ class Broker:
                         # durable count for multiline and parentless reports. This is
                         # metadata only: the report body and its existing delivery path
                         # stay untouched.
-                        summary_words=len(summary.split()), commit=commit)
+                        summary_words=len(summary.split()),
+                        # The report in full (a root agent's has no mail row to hold it)
+                        # and the session id that locates the transcript behind it.
+                        text=summary, session_id=_column(store.get_agent(self.db, me),
+                                                         "session_id"),
+                        commit=commit)
 
     def _burst_possible(self, parent: str) -> bool:
         """Could this parent be about to hear from a sibling too?
@@ -7254,7 +7266,7 @@ class Broker:
         # herdr's own detector reads a waiting agent as idle unprompted — the very value we
         # were paying the binding to tell it. The notification below is what reaches you.
         self._surface(me, why)
-        store.log_event(self.db, kind="blocked", agent=me, why=why[:EVENT_CLIP])
+        store.log_event(self.db, kind="blocked", agent=me, why=why[:EVENT_CLIP], text=why)
 
     # `sb status` is deliberately NOT here. It is a join of the store against herdr — what
     # an agent was told to be, against what its pane is doing — and belongs to neither, so

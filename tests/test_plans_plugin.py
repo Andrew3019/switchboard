@@ -1287,6 +1287,27 @@ class StepsTest(PlansSandbox):
         self.assertIn("skipped → done",
                       self.data("plugin", "plans", "changelog", "p-1")[1]["detail"])
 
+    def test_the_changelog_is_a_view_of_the_one_event_log(self):
+        """"Task, Plan, Step and Agent history are different filtered views of this one
+        event history, never independently maintained logs." So a verb's entry goes to sb's
+        event log about the plan and step, the file does not keep a second copy, and what the
+        file already held before the log existed is still shown — nothing is dropped."""
+        self.plan("write it")
+        mod = _plans()
+        doc, seal = mod._read(self._dir())
+        doc["plans"][0]["changelog"].append(
+            {"at": 1, "by": "human", "action": "legacy", "reason": None, "detail": "old"})
+        mod._write(self._dir(), doc, seal)
+        self.ok("plugin", "plans", "tick", "s-1", "--reason", "written")
+
+        self.assertEqual([e["action"] for e in self._doc()["plans"][0]["changelog"]],
+                         ["legacy"])
+        self.assertEqual([e["action"] for e in self.data("plugin", "plans", "changelog", "p-1")],
+                         ["legacy", "create", "tick"])
+        rows = json.loads(self.ok("log", "--plan", "p-1", "--json"))["events"]
+        self.assertEqual([(r["kind"], r["step_id"]) for r in rows],
+                         [("plan", None), ("plan", self.step("s-1")["id"])])
+
     # -- note, checkpoint ------------------------------------------------------
 
     def test_notes_land_on_a_step_and_on_the_plan(self):
@@ -2613,7 +2634,7 @@ class CatalogueTest(PlansSandbox):
                           "create-pr": "done", "merge": "open"})
         # Its OWN action and never a `tick`, so the record still says which progress an agent
         # asserted and which this file derived from a fact it had already checked.
-        actions = [e["action"] for e in self._doc()["plans"][0]["changelog"]]
+        actions = [e["action"] for e in self.data("plugin", "plans", "changelog", "p-1")]
         self.assertEqual(actions.count("auto-tick"), 3)
         self.assertNotIn("tick", actions)
 
@@ -6405,7 +6426,7 @@ class LandingMergeTest(PlansSandbox):
 
         self.assertEqual(data["auto_ticked"], ["step-1", "step-2", "step-3", "step-4"])
         self.assertEqual(self.progress(), ["done"] * 4)
-        entries = [e for e in self._doc()["plans"][0]["changelog"]
+        entries = [e for e in self.data("plugin", "plans", "changelog", "p-1")
                    if e["action"] == "auto-tick"]
         self.assertEqual(len(entries), 4)
         self.assertIn("merged at the approved head", entries[0]["reason"])
@@ -6442,7 +6463,7 @@ class LandingMergeTest(PlansSandbox):
 
         self.assertNotEqual(code, 0)
         self.assertEqual(self.progress(), ["open"] * 4)
-        self.assertFalse([e for e in self._doc()["plans"][0]["changelog"]
+        self.assertFalse([e for e in self.data("plugin", "plans", "changelog", "p-1")
                           if e["action"] == "auto-tick"])
 
     def test_a_merge_that_lands_and_a_comment_that_does_not_is_recorded_as_both(self):

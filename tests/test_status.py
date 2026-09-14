@@ -696,8 +696,9 @@ class StatusTest(unittest.TestCase):
         for _ in range(3):
             status.collect(self.db, h)
         self.assertEqual(len(store.unread_for(self.db, "lead", mark=False)), 1)
+        # `gone`, and the `failed` mail it sent, which the one event log holds too.
         self.assertEqual([e["kind"] for e in store.recent_events(self.db, agent="w1")],
-                         ["gone"])
+                         ["gone", "message"])
 
     def test_a_root_that_dies_pings_nobody_and_raises_nothing(self):
         """No parent, and the human has no mailbox — so the failure stays a row and an
