@@ -4140,7 +4140,8 @@ def edit(ctx, args) -> Result:
 
     THEN THE STEPS, BY ID — which is what #314's stable ids are for:
       - a step carrying an existing id IS that step. Its fields are taken from the document,
-        except what the system holds (`_HELD_STEP`: progress and its `why`, the owner), which
+        except what the system holds (`_HELD_STEP`: progress and its `why`, the owner, a review
+        step's `review_independence` stamp), which
         stays as stored — and a changed `kind` or `def` is refused, because kind confers powers
         and is immutable;
       - a step with no id is NEW: an id is minted, and its kind comes from its declared
