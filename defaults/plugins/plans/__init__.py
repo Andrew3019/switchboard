@@ -890,6 +890,9 @@ def register(reg):
               reg.arg("--steal", flag=True,
                       help="take it even though somebody owns it; recorded, and the "
                            "previous owner is told unless it has already finished"),
+              reg.arg("--self-review", flag=True,
+                      help="take a review step although you worked on this plan's "
+                           "implementation; recorded as self-reviewed on the step and PR"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "release", release, audience="both",
@@ -899,8 +902,12 @@ def register(reg):
     reg.command(
         "complete", complete, audience="both",
         help="as a step's owner, declare a judgment step done — refused for the steps "
-             "Switchboard completes itself (open_pr, merge)",
+             "Switchboard completes itself (open_pr, merge), and for a review step by "
+             "an agent that worked on the implementation unless --self-review",
         args=[reg.arg("step", help="a step id (step-1, p-2/step-1) or its board name"),
+              reg.arg("--self-review", flag=True,
+                      help="complete a review step although you worked on this plan's "
+                           "implementation; recorded as self-reviewed on the step and PR"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "reopen", reopen, audience="both",
@@ -1536,7 +1543,10 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   refused once the plan's `merge` step is done. All four are serialized against each
   other, so two agents racing `take` resolve to one winner and one refusal naming
   `--steal`; `take --steal` takes an owned step anyway and tells the previous owner unless
-  it has already called `sb done`.
+  it has already called `sb done`. REVIEW IS INDEPENDENT BY DEFAULT: an agent that owns,
+  owned or completed an `implement` step cannot `take` or `complete` the plan's `review`
+  step. `--self-review` on that take or complete does it anyway — your call, for this one
+  review — and stamps `review_independence: self-reviewed` on the step and the PR comment.
 
   THE WHOLE DOCUMENT HAS AN EDIT VERB TOO, an alternative to the file for a version-checked
   rewrite in one call: `sb plugin plans edit <plan> --version <v> --file <path>` (the
@@ -3636,9 +3646,10 @@ def take(ctx, args) -> Result:
     if bad:
         return bad
     steal = bool(getattr(args, "steal", False))
+    self_review = bool(getattr(args, "self_review", False))
     was: dict = {}
 
-    def _take(step, who):
+    def _take(step, who, plan, lib):
         prev = _owner(step)
         if prev == who:
             return Result(human=f"{step['id']} is already yours — nothing to take",
@@ -3647,16 +3658,86 @@ def take(ctx, args) -> Result:
             return _denied(step, f"{step['id']} is owned by {prev} — it is theirs to "
                                  f"release, or take it anyway with `take {step['id']} "
                                  f"--steal`, which tells them", owner=prev)
+        marked = _independence(step, who, plan, self_review, "take")
+        if isinstance(marked, Result):
+            return marked
         step["owner"] = who
         was["prev"] = prev
-        return ("steal" if prev else "take"), f"{step['id']} owner {prev or 'unowned'} → {who}"
+        return (("steal" if prev else "take"),
+                f"{step['id']} owner {prev or 'unowned'} → {who}{marked}")
 
     with _owning(ctx.state_dir):
-        done = _on_step(ctx, args.step, "take", args.reason, _take)
+        done = _on_step(ctx, args.step, "take", args.reason, _take, whole=True)
     prev = was.get("prev")
     if not done.ok or not prev:
         return done
     return _told(ctx, done, prev)
+
+
+# REVIEW INDEPENDENCE, ENFORCED BY DEFAULT (#321, Andrew's A1). An agent that owns, owned or is
+# a recorded contributor to an `implement`-kind step cannot `take` or `complete` the plan's
+# `review`-kind step — keyed on kind, never on a display name. The exception is PER INSTANCE
+# and the agent's own call (Andrew: no repo flag, no human grant): `--self-review` on that take
+# or complete, which stamps `review_independence: self-reviewed` on the review step, where it is
+# system-held (`_HELD_STEP`) and drawn on the pull request comment (`_evidence_section`). The
+# stamp is never cleared: that an override was used on this review is a fact, whoever finishes.
+SELF_REVIEWED = "self-reviewed"
+# The changelog actions that name an owner of the step they are about: a take or steal names
+# the new owner as `by`, a release or complete the owner doing it. A move's detail is written
+# `<step> owner <was> → <now>`, which also names an owner a hand-edit had pre-staged.
+_OWNING_ACTIONS = ("take", "steal", "release", "complete")
+_OWNER_MOVE = re.compile(r"^\S+ owner (?P<was>\S+) → (?P<now>\S+)")
+
+
+def _contributed(plan: dict, who: str) -> list[str]:
+    """The ids of this plan's `implement`-kind steps that `who` owns, owned or contributed to.
+
+    A RECORDED CONTRIBUTOR IS AN OWNER ON THE RECORD (#321 A3): the step's current `owner`,
+    and every agent the step's ownership events name — the `by` of a take, steal, release or
+    complete, and both sides of an owner move. Read from switchboard's own record and never
+    from git, because agents on one plan share a worktree and one git identity. What this
+    cannot see is an owner a hand-edit set and a later hand-edit replaced with no verb between:
+    no event was ever written for it.
+    """
+    steps = [s for s in (plan.get("steps") or ())
+             if isinstance(s, dict) and _kind_of(s) == "implement"]
+    ids = {_num(_STEP_ID, s.get("id")): str(s.get("id")) for s in steps}
+    hit = {_num(_STEP_ID, s.get("id")) for s in steps if _owner(s) == who}
+    for e in plan.get("changelog") or ():
+        if not isinstance(e, dict) or e.get("action") not in _OWNING_ACTIONS:
+            continue
+        detail = str(e.get("detail") or "")
+        n = _num(_STEP_ID, detail.split(" ", 1)[0])
+        if n is None or n not in ids:
+            continue
+        moved = _OWNER_MOVE.match(detail)
+        if who == e.get("by") or (moved and who in (moved["was"], moved["now"])):
+            hit.add(n)
+    return [sid for n, sid in ids.items() if n in hit]
+
+
+def _independence(step: dict, who: str, plan: dict, override: bool, verb: str) -> Any:
+    """The review-independence guard for `take` and `complete`: `""`, a detail suffix, or a
+    refusal. Only a `review`-kind step, and only an agent — `human` is who grants exceptions.
+
+    `complete` also passes on a review step already stamped self-reviewed: the override was
+    made on this instance at its take, and asking for it twice buys nothing but a retry.
+    """
+    if _kind_of(step) != "review" or who == "human":
+        return ""
+    mine = _contributed(plan, who)
+    if not mine:
+        return ""
+    granted = verb == "complete" and step.get("review_independence") == SELF_REVIEWED
+    if not (override or granted):
+        return _denied(step, f"{step['id']} is a `review` step and you own, owned or "
+                             f"contributed to {', '.join(mine)}, the implementation it "
+                             f"reviews — review is independent by default, so a fresh agent "
+                             f"takes it. `{verb} {step['id']} --self-review` does it anyway, "
+                             f"recorded as self-reviewed on the step and the PR comment",
+                       implemented=mine)
+    step["review_independence"] = SELF_REVIEWED
+    return f"; {SELF_REVIEWED} — {who} contributed to {', '.join(mine)}"
 
 
 def _told(ctx, done: Result, prev: str) -> Result:
@@ -3715,6 +3796,7 @@ def complete(ctx, args) -> Result:
     bad = _cap(args.reason)
     if bad:
         return bad
+    self_review = bool(getattr(args, "self_review", False))
 
     def _complete(step, who, plan, lib):
         if _kind_completion(step, lib) == SYSTEM:
@@ -3727,7 +3809,11 @@ def complete(ctx, args) -> Result:
                    else f"{step['id']} is owned by {owner}, not you — only its owner "
                         f"completes it")
             return _denied(step, why, owner=owner)
-        return _close(step, args.reason, "complete")
+        marked = _independence(step, who, plan, self_review, "complete")
+        if isinstance(marked, Result):
+            return marked
+        closed = _close(step, args.reason, "complete")
+        return closed if isinstance(closed, Result) else closed + marked
 
     with _owning(ctx.state_dir):
         return _on_step(ctx, args.step, "complete", args.reason, _complete, unblocked=True,
@@ -4033,7 +4119,7 @@ _HELD_PLAN = frozenset({"id", "kind", "steps", "workspace", "workspace_from", "c
 # The rest — the request, the contract, `human_checks` the PR flow asks an agent to write —
 # is authored content and edits like any other field.
 _HELD_CHANGE = ("path", "approval", "verification", "review", "pr", "landing", "handoff")
-_HELD_STEP = frozenset({"id", "progress", "why", "owner"})
+_HELD_STEP = frozenset({"id", "progress", "why", "owner", "review_independence"})
 _FIXED_STEP = ("kind", "def")
 # The fields a linked step resolves from its definition on read (`_resolve`). Handed back
 # unchanged they are the library's words, not the step's, and are not copied in.
@@ -8370,7 +8456,9 @@ _SHOWN_PLAN = frozenset({"id", "display", "title", "steps", "incomplete", "advis
                          # here so neither lands in the metadata fold.
                          "change", "kind"})
 _SHOWN_STEP = frozenset({"id", "name", "display", "progress", "why", "gate", "output",
-                         "owner", "deps", "obliged_by", "root"})
+                         "owner", "deps", "obliged_by", "root",
+                         # Drawn by name in `_evidence_section`, beside the review it qualifies.
+                         "review_independence"})
 
 # A value as something a mermaid node id or a markdown anchor can be spelled with.
 _UNSAFE = re.compile(r"[^0-9A-Za-z]+")
@@ -8408,7 +8496,7 @@ def _comment(p: dict, steps: list) -> str:
         lines += ["", f"_{_cell('title', p['title'])}_"]
     lines += _need_section(p, steps)
     lines += _why_section(p)
-    lines += _evidence_section(p)
+    lines += _evidence_section(p, steps)
     lines += _detail_record(p, steps)
     return "\n".join(lines)
 
@@ -8525,12 +8613,13 @@ def _why_section(p: dict) -> list[str]:
     return lines
 
 
-def _evidence_section(p: dict) -> list[str]:
+def _evidence_section(p: dict, steps: list = ()) -> list[str]:
     """`## Agent evidence` — the reviewed commit, the verification, the review and its fixes.
 
     The case that the change is sound, bound to the identities the change record carries so a
     reader sees what was verified and reviewed rather than a claim that it was. Omitted when
-    the record carries no evidence.
+    the record carries no evidence. A review step stamped self-reviewed (`_independence`) is
+    a row of its own here, in the open, because it qualifies the claim the review row makes.
     """
     c = _change_of(p)
     rev = c.get("review") if isinstance(c.get("review"), dict) else {}
@@ -8548,6 +8637,12 @@ def _evidence_section(p: dict) -> list[str]:
                        ("baseline", "Baseline failures")):
         if _some(c.get(key)):
             parts.append((label, c[key]))
+    selfrev = [str(s.get("id")) for s in steps
+               if isinstance(s, dict) and s.get("review_independence") == SELF_REVIEWED]
+    if selfrev:
+        parts.append(("Review independence",
+                      f"{SELF_REVIEWED} — {', '.join(selfrev)} was taken or completed by an "
+                      f"agent that worked on the implementation, with --self-review"))
     if not parts:
         return []
     # A `Check | Result` TABLE. `_cell` flattens a structured value — `review`'s

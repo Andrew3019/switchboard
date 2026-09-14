@@ -2035,6 +2035,71 @@ class StepsTest(PlansSandbox):
         self.assertIn("merged", json.loads(out)["data"]["error"])
         self.assertEqual(self.step("step-1")["progress"], "done")
 
+    # -- review independence (#321) ---------------------------------------------
+
+    def test_an_implementer_cannot_take_or_complete_the_review_step_and_a_fresh_agent_can(self):
+        """#321 A1: independence is enforced by default, keyed on kind. w1 only OWNED the
+        implement step (took it, released it) and is still refused the review's `take`; w2,
+        its current owner, pre-staged on the review by hand, is refused its `complete`. A
+        fresh agent with no ownership record on the implementation takes and completes it,
+        and nothing is stamped self-reviewed."""
+        self.plan("write it")
+        self.data("plugin", "plans", "name-step", "p-1", "review")
+        review = next(s["id"] for s in self.steps() if s["kind"] == "review")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "take", "step-1")
+        self.ok("plugin", "plans", "release", "step-1")
+        self.as_agent("w2")
+        self.ok("plugin", "plans", "take", "step-1")
+
+        self.as_agent("w1")
+        code, out, _ = self.sb("plugin", "plans", "take", review, "--json")
+        self.assertEqual(code, 1)
+        data = json.loads(out)["data"]
+        self.assertEqual(data["implemented"], ["step-1"])
+        self.assertIn("--self-review", data["error"])
+        self.assertIsNone(self.step(review)["owner"])
+
+        self.edit_step(review, owner="w2")
+        self.as_agent("w2")
+        code, out, _ = self.sb("plugin", "plans", "complete", review, "--json")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["data"]["implemented"], ["step-1"])
+        self.assertEqual(self.step(review)["progress"], "open")
+        self.ok("plugin", "plans", "release", review)
+
+        self.as_agent("w3")
+        self.ok("plugin", "plans", "take", review)
+        self.ok("plugin", "plans", "complete", review, "--reason", "looked, fine")
+        self.assertEqual(self.step(review)["progress"], "done")
+        self.assertNotIn("review_independence", self.step(review))
+
+    def test_the_self_review_override_is_recorded_held_and_surfaced_on_the_pr_comment(self):
+        """The per-instance override is the agent's own call: `take --self-review` stamps
+        `review_independence: self-reviewed` on the review step, the `complete` after it
+        needs no second flag, the PR comment draws it in the open, and a whole-document edit
+        handing the field back empty cannot erase it — it is system-held."""
+        self.plan("write it")
+        self.data("plugin", "plans", "name-step", "p-1", "review")
+        review = next(s["id"] for s in self.steps() if s["kind"] == "review")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "take", "step-1")
+        self.ok("plugin", "plans", "complete", "step-1")
+        self.ok("plugin", "plans", "take", review, "--self-review", "--reason", "one-liner")
+        self.assertEqual(self.step(review)["review_independence"], "self-reviewed")
+        self.ok("plugin", "plans", "complete", review)
+        self.assertEqual(self.step(review)["progress"], "done")
+
+        md = self.ok("plugin", "plans", "show", "p-1", "--markdown")
+        self.assertIn("| Review independence | self-reviewed", md)
+
+        doc = self.read_full()
+        for s in doc["steps"]:
+            s.pop("review_independence", None)
+        code, data = self.edit_with("p-1", doc, doc["version"])
+        self.assertEqual(code, 0, data)
+        self.assertEqual(self.step(review)["review_independence"], "self-reviewed")
+
     # -- the whole-document edit (#317) ------------------------------------------
 
     def read_full(self, plan: str = "p-1") -> dict:
