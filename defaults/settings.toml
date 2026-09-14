@@ -1045,3 +1045,23 @@ initial = 0
 # anything permanently: the cursor policies (`once`, `once-until-clear`) still decide
 # whether a rule has anything to say at all, and this only spaces out the ones that do.
 ceiling = 300
+
+
+[plans]
+# THE `Open PR` BUNDLE'S LOCAL REQUIRED CHECKS — the commands `sb plugin plans open-pr` runs,
+# in order, on the exact commit it is about to push, before it opens the pull request. Each
+# is one command line, split like a shell would split it and run with no shell. Remote CI is
+# NOT one of these: it is GitHub's, and nothing here waits on it.
+#
+# EMPTY ON PURPOSE, and `open-pr` REFUSES while it is. Switchboard is installed into product
+# repos it knows nothing about, so there is no test command it could honestly ship: a
+# `python -m pytest tests` default is switchboard's own dev-repo command and wrong for
+# everybody else, and a default of nothing-to-run would let the bundle report "checks
+# green" on zero checks. So a repo names its own, in `.switchboard/settings.toml`:
+#
+#     [plans]
+#     required_checks = ["python -m pytest tests"]
+#
+# and may add lint, build or type checks as further entries. An array, so a repo's list
+# JOINS this one — which, being empty, is the same as replacing it.
+required_checks = []

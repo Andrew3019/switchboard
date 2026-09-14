@@ -7116,6 +7116,153 @@ class LandingMergeTest(PlansSandbox):
             self.assertIn(token, about)
 
 
+class OpenPrBundleTest(PlansSandbox):
+    """`open-pr` and `step retry`: the `Open PR` bundle (v2 §4, #318).
+
+    Three decisions, pinned. The `open_pr` step completes only when the WHOLE bundle — the
+    repo's local required checks, the push, the PR and the summary comment — has succeeded;
+    a sub-operation that fails after the PR opened leaves the step `failed`, naming which
+    one; and a retry reuses the PR that already exists rather than opening a second.
+
+    GitHub and `git push` are faked at the argv the plugin builds; the check is a real
+    process, the branch and the clean-tree read are the sandbox's real git. Unproven here:
+    that `gh api` substitutes `{owner}` inside the open-PR search's query string, which only
+    a live run against GitHub shows.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.marker = Path(self.tmp.name) / "checks-ran"
+        check = f"{sys.executable} -c \"open({str(self.marker)!r}, 'a').write('x')\""
+        with (self.sw / "settings.toml").open("a") as f:
+            f.write(f"\n[plans]\nrequired_checks = [{json.dumps(check)}]\n")
+
+    @contextlib.contextmanager
+    def github(self, *, comment_error=None):
+        """A repo's pulls and one PR's comments behind the real `gh api` argv, and a push that
+        always lands. `box["comment_error"]` is mutable so a test can heal it mid-way."""
+        seen: list[list] = []
+        comments: list[dict] = []
+        box = {"pulls": [], "comment_error": comment_error, "pushed": 0, "next_id": 100}
+        real_run = subprocess.run
+
+        def ok(argv, obj):
+            return subprocess.CompletedProcess(argv, 0, json.dumps(obj), "")
+
+        def run(argv, *args, **kwargs):
+            argv = list(argv)
+            seen.append(argv)
+            if argv[:1] == ["git"] and len(argv) > 3 and argv[3] == "push":
+                box["pushed"] += 1
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:2] != ["gh", "api"]:
+                return real_run(argv, *args, **kwargs)
+            method = argv[argv.index("--method") + 1] if "--method" in argv else "GET"
+            path = next(str(a) for a in argv if str(a).startswith("repos/")).split("?")[0]
+            if path == "repos/{owner}/{repo}":
+                return ok(argv, {"default_branch": "main"})
+            if path == "repos/{owner}/{repo}/pulls":
+                if method != "POST":
+                    return ok(argv, [p for p in box["pulls"] if p["state"] == "open"])
+                sent = json.loads(kwargs["input"])
+                pull = {"number": 7 + len(box["pulls"]), "state": "open", "merged": False,
+                        "head": {"ref": sent["head"], "sha": "a" * 40},
+                        "base": {"ref": sent["base"]}}
+                box["pulls"].append(pull)
+                return ok(argv, pull)
+            if "/pulls/" in path:
+                n = int(path.rsplit("/", 1)[-1])
+                return ok(argv, next(p for p in box["pulls"] if p["number"] == n))
+            if box["comment_error"]:
+                return subprocess.CompletedProcess(argv, 1, "", box["comment_error"])
+            if "--paginate" in argv:
+                return ok(argv, [comments])
+            body = json.loads(kwargs["input"])["body"]
+            if method == "POST":
+                row = {"id": box["next_id"], "body": body}
+                box["next_id"] += 1
+                comments.append(row)
+            else:
+                cid = int(str(argv[argv.index("--method") + 2]).rsplit("/", 1)[-1])
+                row = next(r for r in comments if r["id"] == cid)
+                row["body"] = body
+            return ok(argv, row)
+
+        with mock.patch("subprocess.run", side_effect=run):
+            yield _Fake(seen, comments, box)
+
+    def ready(self) -> None:
+        """A direct change record carrying the evidence the PR-open gate reads, on the
+        sandbox's own branch, with a clean tracked tree."""
+        self.data("plugin", "plans", "record", "raise the upload timeout",
+                  "--display", "board: raise the upload timeout")
+        doc = self._doc()
+        doc["plans"][0]["change"].update({
+            "verification": {"commit": "abc1234", "check": "pytest", "result": "green"},
+            "review": {"commit": "abc1234", "reviewer": "reviewer-x", "findings": "none"},
+            "human_checks": "none"})
+        self._save(doc)
+        self.as_agent("worker-x")
+
+    def open_pr_step(self) -> dict:
+        return self._doc()["plans"][0]["steps"][2]
+
+    @staticmethod
+    def pr_posts(gh) -> list:
+        return [c for c in gh.seen if list(c[:2]) == ["gh", "api"] and "POST" in c
+                and "repos/{owner}/{repo}/pulls" in c]
+
+    def test_the_whole_bundle_succeeding_completes_the_open_pr_step(self):
+        """Checks ran, the branch was pushed, one PR opened, one summary comment posted —
+        and only then is `open_pr` done, owned by the caller who ran it."""
+        self.ready()
+        with self.github() as gh:
+            self.data("plugin", "plans", "open-pr", "p-1")
+
+        self.assertTrue(self.marker.exists(), "the local required check never ran")
+        self.assertEqual(gh.box["pushed"], 1)
+        self.assertEqual(len(self.pr_posts(gh)), 1)
+        self.assertEqual(len(gh.comments), 1)
+        step = self.open_pr_step()
+        self.assertEqual(step["progress"], "done")
+        self.assertEqual(step["owner"], "worker-x")
+        self.assertNotIn("failure", step)
+        self.assertEqual(self._doc()["plans"][0]["change"]["pr"]["number"], 7)
+
+    def test_a_comment_that_fails_after_the_pr_opened_leaves_the_step_failed(self):
+        """The PR exists but the summary comment did not post: that is not an opened PR in
+        the bundle's sense, so the step is `failed` and says the comment is what failed."""
+        self.ready()
+        with self.github(comment_error="HTTP 502: bad gateway") as gh:
+            code, out, _ = self.sb("plugin", "plans", "open-pr", "p-1", "--json")
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(json.loads(out)["data"]["failed"], "comment")
+        self.assertEqual(len(self.pr_posts(gh)), 1)
+        step = self.open_pr_step()
+        self.assertEqual(step["progress"], "failed")
+        self.assertEqual(step["failure"]["op"], "comment")
+        self.assertEqual(self._doc()["plans"][0]["change"]["pr"]["number"], 7)
+
+    def test_retry_reuses_the_pr_it_already_opened(self):
+        """At most one primary PR: the retry re-runs the checks and the comment against the
+        PR on the record, never POSTs a second one, and completes the step."""
+        self.ready()
+        with self.github(comment_error="HTTP 502: bad gateway") as gh:
+            self.sb("plugin", "plans", "open-pr", "p-1")
+            self.marker.unlink()
+            gh.box["comment_error"] = None
+            self.data("plugin", "plans", "step", "retry", "p-1/step-3")
+
+        self.assertTrue(self.marker.exists(), "the retry did not re-run the checks")
+        self.assertEqual(len(self.pr_posts(gh)), 1)
+        self.assertEqual(len(gh.box["pulls"]), 1)
+        self.assertEqual(len(gh.comments), 1)
+        step = self.open_pr_step()
+        self.assertEqual(step["progress"], "done")
+        self.assertNotIn("failure", step)
+
+
 class _Fake:
     """What the GitHub fake hands a test: every subprocess argv it saw, the PR's comments,
     and the mutable pull request itself."""
