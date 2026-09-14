@@ -588,6 +588,29 @@ class PlansTest(PlansSandbox):
         self.assertEqual((shown["branch"], shown["branch_from"]), (None, "inferred"))
         self.assertNotIn("branch ", self.ok("plugin", "plans", "show", "p-2"))
 
+    def test_git_not_answering_is_unavailable_and_retried_on_read(self):
+        """git failing to RUN is not git saying there is no branch: `unavailable`, not a
+        final null. A read while it still fails stays readable and leaves the marker; the
+        first read git answers binds the branch and persists it."""
+        real_run = subprocess.run
+
+        def no_git(argv, *a, **kwargs):
+            if not isinstance(argv, (str, bytes)) and list(argv)[:1] == ["git"] \
+                    and "symbolic-ref" in argv:
+                raise FileNotFoundError("git")
+            return real_run(argv, *a, **kwargs)
+
+        with mock.patch("subprocess.run", no_git):
+            made = self.data("plugin", "plans", "create", "no git", "--display", "board: n")
+            self.assertEqual((made["branch"], made["branch_from"]), (None, "unavailable"))
+            self.assertIn("p-1", self.ok("plugin", "plans", "show", "p-1"))
+        self.assertEqual(self._doc()["plans"][0]["branch_from"], "unavailable")
+
+        shown = self.data("plugin", "plans", "show", "p-1")
+        self.assertEqual((shown["branch"], shown["branch_from"]), ("main", "inferred"))
+        stored = self._doc()["plans"][0]
+        self.assertEqual((stored["branch"], stored["branch_from"]), ("main", "inferred"))
+
     def test_ids_are_monotonic_and_never_reused(self):
         """PLAN ids are monotonic across the store and never reused — a hand-deleted plan
         must not free its number, because a changelog entry citing it stays true for the

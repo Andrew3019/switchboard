@@ -5961,7 +5961,7 @@ def _repair_workspaces(d: Path, doc: dict, seal: dict, plans: list[dict]) -> Non
             plan["workspace"], plan["workspace_from"] = where, how
 
 
-def _branch(checkout: Any) -> tuple[Optional[str], bool]:
+def _branch(checkout: Any, *, clock: "_Budget") -> tuple[Optional[str], bool]:
     """The branch checked out in `checkout`, and whether git answered at all.
 
     `symbolic-ref` rather than `rev-parse --abbrev-ref`: it names the branch of a repo with
@@ -5969,14 +5969,21 @@ def _branch(checkout: Any) -> tuple[Optional[str], bool]:
     rather than answering the literal `HEAD`. Both failures git reports — detached, or no
     repo there, a gone worktree included — are an answer of no branch; only git not running
     or not returning in time is no answer, which the caller keeps as `unavailable`.
+
+    Timed on a shared `_Budget`, as `_ask` is, so a read that backfills a whole store past a
+    few hung checkouts costs that one budget and not five seconds per plan; whatever the
+    budget did not reach is left pending for the next read.
     """
     if not checkout:
         return None, True
+    seconds = clock.left()
+    if seconds <= 0:
+        return None, False
     try:
         out = subprocess.run(["git", "-C", str(checkout),
                               "symbolic-ref", "--short", "-q", "HEAD"],
                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                             timeout=PER_ASK)
+                             timeout=seconds)
     except (OSError, subprocess.SubprocessError):
         return None, False
     name = out.stdout.strip() if out.returncode == 0 else ""
@@ -5985,7 +5992,7 @@ def _branch(checkout: Any) -> tuple[Optional[str], bool]:
 
 def _bound(checkout: Any) -> tuple[Optional[str], str]:
     """A new plan's primary branch and its `branch_from`, as `create` and `record` store it."""
-    name, answered = _branch(checkout)
+    name, answered = _branch(checkout, clock=_Budget())
     return name, (AT_CREATE if answered else UNAVAILABLE)
 
 
@@ -6004,9 +6011,10 @@ def _repair_branches(d: Path, doc: dict, seal: dict, plans: list[dict]) -> None:
     # is left exactly as it is rather than rewritten on a read to say so.
     pending = [p for p in plans if p.get("checkout")
                and p.get("branch_from") in (None, UNAVAILABLE) and not p.get("branch")]
+    clock = _Budget()
     changed: list[tuple[dict, dict]] = []
     for plan in pending:
-        name, answered = _branch(plan.get("checkout"))
+        name, answered = _branch(plan.get("checkout"), clock=clock)
         if not answered:
             continue
         changed.append((plan, {k: plan[k] for k in ("branch", "branch_from") if k in plan}))
