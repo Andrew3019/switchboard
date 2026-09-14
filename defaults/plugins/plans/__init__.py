@@ -27,9 +27,10 @@ The records
             "next_step": 4, "steps": [...], "changelog": [...], "notes": [...],
             "change": {...}, "created_by": "lead", "created_at": 1754570000}
 
-    step   {"id": "step-1", "name": "…", "display": null, "def": null, "obliged_by": null,
-            "progress": "open", "why": null, "gate": null, "output": null, "owner": null,
-            "tries": 1, "notes": [], "deps": [], "root": false, "checkpoints": []}
+    step   {"id": "step-1", "name": "…", "display": null, "def": null, "kind": "implement",
+            "obliged_by": null, "progress": "open", "why": null, "gate": null,
+            "output": null, "owner": null, "tries": 1, "notes": [], "deps": [],
+            "root": false, "checkpoints": []}
 
     record {"id": "p-2", "kind": "record", "workspace": "…", "checkout": "…", "title": "…",
             "display": "…", "changelog": [...], "notes": [...], "change": {...},
@@ -644,6 +645,34 @@ _PHASES = ("shaping", "approval", "execution", "review", "human-review", "landin
 # numbering, which is exactly why both spellings have to resolve.
 _PLAN_ID = re.compile(r"^(?:p(?:lan)?-)?(\d+)$", re.IGNORECASE)
 _STEP_ID = re.compile(r"^(?:s(?:tep)?-)?(\d+)$", re.IGNORECASE)
+
+# A STEP'S KIND, distinct from its display name and from the `def` link. The name is what a
+# human reads and is freely renamed; the KIND is what confers powers, set once at creation and
+# never changed by an edit (see `_step`, and the immutability the whole-document edit enforces
+# against a step's stable id). Kind — not name — decides whether Switchboard completes a step
+# itself (`open_pr`, `merge`) or its owner declares it done, and which step the
+# review-independence record applies to (`review`). Renaming `open PR` to `raise PR` cannot
+# turn a system step into one an agent completes, and naming a step `ship it` cannot smuggle in
+# a merge — an unrecognised kind is a judgment step with no special powers.
+#
+# The built-in kinds and how each completes. SYSTEM kinds are the two the tooling establishes
+# as fact (`create-pr` opening the PR, `merge` landing it) and refuses to let an agent declare
+# done; every other built-in is JUDGMENT — the accountable owner declares it. A REPO-DEFINED
+# kind is any kind not in this map: it is judgment by default, unless the library definition it
+# came from declares `"completion": "system"` (Andrew, #314 A4 — a repo's own `deploy` kind can
+# be one Switchboard completes on observing the fact).
+_KIND_SYSTEM = ("open_pr", "merge")
+_KIND_JUDGMENT = ("implement", "review", "research", "design")
+_STEP_KINDS = _KIND_SYSTEM + _KIND_JUDGMENT
+SYSTEM, JUDGMENT = "system", "judgment"
+# The kind an on-the-fly step is born with when none is declared — a judgment work step with no
+# special powers. `--steps "Name:kind"` (the whole-document edit) is how an author names another.
+DEFAULT_KIND = "implement"
+# The shipped library keys that ARE a built-in kind under another spelling; every other def key
+# is used verbatim as a repo-defined kind (`change-approval` → kind `change-approval`), and an
+# on-the-fly step with no def gets `DEFAULT_KIND`.
+_DEF_KIND = {"implementation": "implement", "review": "review",
+             "create-pr": "open_pr", "merge": "merge"}
 
 # Long enough for a real sentence, short enough that a plan stays readable when it is shown.
 # Anything longer wants a brief, and briefs are files a checkpoint can point at.
@@ -2081,7 +2110,12 @@ def show(ctx, args) -> Result:
     that reads one that way and is the older meaning `show 1` has always had.
     """
     given = str(args.id or "").strip()
-    if "/" in given or (given[:1].lower() == "s" and _num(_STEP_ID, given) is not None):
+    step_form = "/" in given or (given[:1].lower() == "s"
+                                 and _num(_STEP_ID, given) is not None)
+    # A token that is neither a step id nor a plan id (a bare number or `p-1`) is a step's
+    # DISPLAY NAME — `show "open PR"` — and goes to the step view, which resolves it. A plan
+    # is shown only by id, so nothing here is stolen from the plan path.
+    if step_form or (given and _num(_PLAN_ID, given) is None):
         return _one_step(ctx, given, markdown=bool(getattr(args, "markdown", False)),
                          full=bool(getattr(args, "full", False)))
     doc, seal = _read_logged(ctx)
@@ -2775,6 +2809,13 @@ def _one_step(ctx, given: str, *, markdown: bool = False, full: bool = False) ->
     written back into the file.
     """
     doc, _ = _read_logged(ctx)
+    if not _looks_step_id(given):       # a display name — resolve it to an id first
+        lib_all, bad = _lib(doc["plans"])
+        if bad:
+            return bad
+        given, bad = _as_step_id(doc, given, lib_all)
+        if bad:
+            return bad
     plan, step = _locate(doc, given)
     if step is None:
         return _no_step(doc, given)
@@ -3461,6 +3502,13 @@ def _on_step(ctx, given: str, action: str, reason: Optional[str], change,
     released, printed under the result with its instructions in full. See `_next`.
     """
     doc, seal = _read_logged(ctx)
+    if not _looks_step_id(given):       # a display name — resolve it to an id first
+        lib_all, bad = _lib(doc["plans"])
+        if bad:
+            return bad
+        given, bad = _as_step_id(doc, given, lib_all)
+        if bad:
+            return bad
     plan, step = _locate(doc, given)
     if step is None:
         return _no_step(doc, given)
@@ -3645,6 +3693,77 @@ def _no_step(doc: dict, given: str, plan: Optional[dict] = None) -> Result:
     return Result(ok=False, human=why, data={"error": why, "id": given})
 
 
+def _looks_step_id(given: str) -> bool:
+    """Does this token name a step by id — qualified `p-2/step-1` or bare `step-1`/`3`?
+
+    The one thing name resolution must not steal: a bare id that more than one plan holds is
+    a real id form with its own "qualify it" recovery (`_no_step`), and treating it as a name
+    would lose that. So id forms stay on the id path even when they miss; only a token that is
+    no id at all is looked up as a display name.
+    """
+    g = str(given or "").strip()
+    plan_id, sep, step_id = g.rpartition("/")
+    return _num(_STEP_ID, step_id if sep else g) is not None
+
+
+def _step_labels(step: dict, lib: dict) -> list[str]:
+    """The display names a step answers to, resolved — the board label and the full name.
+
+    A linked step keeps its `name`/`display` null and draws them from the library, so the
+    label to match on is the resolved one; an on-the-fly step carries its own. Both are
+    offered so `open PR` (the board label) and its longer definition name resolve alike.
+    """
+    view = _resolve(step, lib) if _defkey(step) else step
+    return [s for s in (str(view.get("display") or "").strip(),
+                        str(view.get("name") or "").strip()) if s]
+
+
+def _name_hits(doc: dict, name: str, lib: dict,
+               plan: Optional[dict] = None) -> list[tuple[dict, dict]]:
+    """Every (plan, step) whose display name matches, case-insensitively. The resolution set.
+
+    Scoped to one plan when the caller already knows which (a qualified miss, or a verb
+    working inside a plan); over the whole store otherwise, which is the bare-id ergonomics
+    carried to names. Matching is on the trimmed, case-folded label so `Open PR` finds `open
+    PR`; exact past that, because a substring match would make `review` claim `plan review`.
+    """
+    want = str(name or "").strip().casefold()
+    if not want:
+        return []
+    plans = [plan] if plan is not None else doc["plans"]
+    return [(p, st) for p in plans for st in (p.get("steps") or ())
+            if any(lbl.casefold() == want for lbl in _step_labels(st, lib))]
+
+
+def _as_step_id(doc: dict, given: str, lib: dict,
+                plan: Optional[dict] = None) -> tuple[Optional[str], Optional[Result]]:
+    """Resolve a step argument that may be a display name to its id. Id forms pass through.
+
+    Returns `(id, None)` for a token to hand to `_locate` — the original when it is already
+    an id form, a qualified `p-<n>/step-<m>` when a single step's name matched — or `(None,
+    refusal)` when a name matched nothing or was ambiguous. An ambiguous name is refused
+    naming the candidates and their ids, the same recovery an ambiguous bare id gets, because
+    a display name is a convenience and Switchboard must never guess which step was meant.
+    """
+    g = str(given or "").strip()
+    if _looks_step_id(g):
+        return g, None
+    hits = _name_hits(doc, g, lib, plan)
+    if len(hits) == 1:
+        p, st = hits[0]
+        return f"{p.get('id')}/{st.get('id')}", None
+    said = _flat(g)
+    if not hits:
+        why = (f"no step named '{said}' — name it by its board label, or by id like step-1")
+        return None, Result(ok=False, human=why, data={"error": why, "name": given})
+    named = ", ".join(f"{_flat(p.get('id'))}/{_flat(st.get('id'))}" for p, st in hits)
+    why = (f"'{said}' names more than one step ({named}) — say which by its id")
+    return None, Result(ok=False, human=why,
+                        data={"error": why, "name": given,
+                              "candidates": [f"{p.get('id')}/{st.get('id')}"
+                                             for p, st in hits]})
+
+
 def _needs(what: str, why: str) -> Result:
     """A required argument that was not given, said with the reason it is required.
 
@@ -3763,8 +3882,16 @@ def _mint_step(plan: dict) -> str:
 
 
 def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
-          key: Optional[str] = None, obliged_by: Optional[str] = None) -> dict:
+          key: Optional[str] = None, obliged_by: Optional[str] = None,
+          kind: Optional[str] = None) -> dict:
     """One step, with every field the design names it carries and nothing more.
+
+    `kind` is set here, once, and is what confers a step's powers rather than its display
+    name (see `_kind_for` and the kind constants). Left to derive from the `def` link when
+    the caller does not name one — which is every current call site, since kinds arrive from
+    the library today and the `--steps "Name:kind"` authoring syntax is the whole-document
+    edit's. Immutable thereafter: no verb here rewrites it, and the whole-document edit
+    carries a step's kind across a rename by its stable id.
 
     `tries` starts at 1 rather than 0: a step being worked is on its first try, and a count
     above one is what renders. `deps` are the ids this step comes after — fan-out and join
@@ -3812,6 +3939,7 @@ def _step(sid: str, name: Optional[str], *, display: Optional[str] = None,
     is simply next in a chain says so.
     """
     return {"id": sid, "name": name, "display": display, "def": key,
+            "kind": kind or _kind_for(key),
             "obliged_by": obliged_by, "progress": OPEN, "why": None, "gate": None,
             "output": None, "owner": None, "tries": 1, "notes": [], "deps": [],
             "root": False, "checkpoints": []}
@@ -4327,6 +4455,62 @@ def _defkey(step: dict) -> Optional[str]:
     """The definition a step links to, or None for one that owns its own words."""
     key = step.get("def")
     return str(key).strip() or None if key else None
+
+
+def _kind_for(def_key: Optional[str]) -> str:
+    """The kind a step gets at creation, derived from its declared type (the `def` link).
+
+    A shipped library key that is a built-in kind under another spelling maps to it
+    (`implementation` → `implement`); any other def key is used verbatim as a repo-defined
+    kind (`change-approval` → `change-approval`); an on-the-fly step with no def gets
+    `DEFAULT_KIND`. This is only the DERIVATION at birth — once written, a step's `kind` is
+    read from the field and never re-derived, so a later library edit cannot move it.
+    """
+    key = str(def_key or "").strip()
+    if not key:
+        return DEFAULT_KIND
+    return _DEF_KIND.get(key, key)
+
+
+# The built-in kind spellings are RESERVED semantics, not a namespace a repo is fenced out of.
+# A def key or an authored `--steps "Name:kind"` value spelled `open_pr`/`merge` claims
+# system-completion, and `implement`/`review`/`research`/`design` claim judgment — on purpose,
+# because kind IS the identity of the power (that is the whole point of "kind, not name,
+# confers powers"). `_DEF_KIND` exists so the shipped aliases (`create-pr`, `implementation`)
+# resolve to the right built-in without a repo having to spell it; every other def key becomes a
+# repo-defined kind of its own name, judgment unless its definition declares
+# `"completion": "system"`. So a repo naming a kind after a built-in is opting into that
+# built-in's completion mode deliberately, and #317's `--steps` validation reads the same rule.
+
+
+def _kind_of(step: dict) -> str:
+    """One step's kind. The stored field when it has one; derived from `def` otherwise.
+
+    The fallback is the whole of how a step made before kinds existed gains one — read
+    against its stable `def`, never its display name, so it is the same answer every time
+    and needs no rewrite of the file. A new step carries `kind` explicitly (see `_step`).
+    """
+    k = str(step.get("kind") or "").strip()
+    return k or _kind_for(_defkey(step))
+
+
+def _kind_completion(step: dict, lib: dict) -> str:
+    """SYSTEM or JUDGMENT for this step's kind — who is allowed to complete it.
+
+    Built-in kinds carry their answer in `_KIND_SYSTEM`. A repo-defined kind is judgment
+    unless the library definition it came from declares `"completion": "system"` (#314 A4:
+    a repo's own kind may be one Switchboard completes on observing a fact). Read by the
+    ownership `complete` verb, which refuses a system kind, and by anything asking whether a
+    step is the tooling's to close.
+    """
+    kind = _kind_of(step)
+    if kind in _KIND_SYSTEM:
+        return SYSTEM
+    if kind in _KIND_JUDGMENT:
+        return JUDGMENT
+    spec = lib.get(_defkey(step) or "") if isinstance(lib, dict) else None
+    declared = str((spec or {}).get("completion") or "").strip().lower()
+    return SYSTEM if declared == SYSTEM else JUDGMENT
 
 
 def _resolve(step: dict, lib: dict) -> dict:
@@ -5448,6 +5632,11 @@ def _check(f: Path, plan: dict) -> None:
         for key in ("def", "obliged_by"):
             if step.get(key) is not None and not isinstance(step.get(key), str):
                 raise _refuse(f, f"has an s-{m} whose {key} is not a name")
+        # `kind` confers a step's powers and is looked up, not merely rendered, so a non-string
+        # there is refused rather than resolved to nonsense — like `def` above. Absent is fine:
+        # a step from before kinds derives one from its `def` on read (`_kind_of`).
+        if step.get("kind") is not None and not isinstance(step.get("kind"), str):
+            raise _refuse(f, f"has an s-{m} whose kind is not a name")
     for key in ("changelog", "notes"):
         if not isinstance(plan.get(key, []), list):
             raise _refuse(f, f"has a p-{n} whose {key} is not a list")
@@ -6105,7 +6294,7 @@ def _viewed(shown: dict, live: _Live, *, tokens: bool = False) -> dict:
     one thing here that costs a subprocess per agent (see `_Live.tokens`). `list` renders a
     board and must not pay it; a terminal `show` has nowhere to draw it either.
     """
-    steps = [dict(s, owner_status=live.owner(s.get("owner")))
+    steps = [dict(s, kind=_kind_of(s), owner_status=live.owner(s.get("owner")))
              for s in (shown.get("steps") or ())]
     condition, where = live.condition(shown)
     out = dict(shown, steps=steps, condition=condition, worktree=where)
@@ -6455,7 +6644,12 @@ def _full(p: dict) -> str:
 # `_resolve`), are drawn above, and a renderer calling them unknown prints them twice.
 _DRAWN = frozenset({"id", "name", "display", "def", "obliged_by", "progress", "why",
                     "gate", "output", "owner", "owner_status", "tries", "notes", "deps",
-                    "checkpoints", "command", "root", "anchor", "strategy"})
+                    "checkpoints", "command", "root", "anchor", "strategy", "kind"})
+# `kind` is here for the same reason `anchor` is: it is operational machinery this renderer
+# knows about and deliberately does NOT draw as a raw line, not an unknown field the catch-all
+# should surface. It rides `--json` (where every field goes) and is filtered out of the
+# markdown dump by `_MACHINERY`; leaving it out of `_DRAWN` would print `kind  implement` on
+# every ordinary tick/skip/note, which is noise, not a fact a human reads a plan to learn.
 
 
 def _strategy_lines(value: Any, indent: int = 0) -> list[str]:

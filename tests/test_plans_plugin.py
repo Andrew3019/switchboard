@@ -369,7 +369,7 @@ class PlansTest(PlansSandbox):
         # added by a later PR has to be added deliberately rather than noticed later.
         self.assertEqual(made["steps"][0],
                          {"id": "step-1", "name": "write it", "display": "write",
-                          "def": None,
+                          "def": None, "kind": "implement",
                           "obliged_by": None, "progress": "open", "why": None, "gate": None,
                           "output": None, "owner": None, "tries": 1, "notes": [], "deps": [],
                           "root": False, "checkpoints": []})
@@ -1686,13 +1686,109 @@ class StepsTest(PlansSandbox):
         for argv, expected in ((("tick", "s-9"), "the highest is step-1"),
                                (("tick", "p-1/step-9"),
                                 "no step step-9 in p-1 — the highest there is step-1"),
-                               (("note", "banana", "--text", "x"), "is not a step id"),
+                               (("note", "banana", "--text", "x"),
+                                "no step named 'banana'"),
                                (("note", "s-9", "--text", "x"), "the highest is step-1")):
             with self.subTest(verb=argv[0]):
                 code, out, _ = self.sb("plugin", "plans", *argv, "--json")
                 self.assertEqual(code, 1)
                 self.assertIn(expected, json.loads(out)["data"]["error"])
         self.assertEqual(self.actions(), ["create"])
+
+    # -- stable id, immutable kind, and name resolution (#314) ------------------
+
+    def test_a_step_carries_an_immutable_kind_derived_from_its_type(self):
+        """The kind — not the display name — is what confers a step's powers, and it is set
+        at creation from the declared type. An on-the-fly step is a judgment `implement`
+        step with no special powers; a library step takes the kind its definition maps to,
+        so `create-pr` is `open_pr` and `merge` is `merge` however they are renamed. A
+        repo-defined library key (`change-approval`) becomes a kind of its own."""
+        self.plan("write it")
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
+        self.data("plugin", "plans", "name-step", "p-1", "merge")
+        by_def = {s.get("def"): s["kind"] for s in self.steps()}
+        self.assertEqual(by_def[None], "implement")        # the on-the-fly step
+        self.assertEqual(by_def["create-pr"], "open_pr")
+        self.assertEqual(by_def["merge"], "merge")
+        # change-approval rides in obliged by create-pr; a repo-defined kind, spelled itself.
+        kinds = {s["kind"] for s in self.steps()}
+        self.assertIn("change-approval", kinds)
+
+    def test_renaming_a_step_keeps_its_id_kind_and_completion(self):
+        """The whole point of a stable id and a kind independent of the name: an edit to a
+        step's display name touches neither its identity nor its powers nor its progress.
+        System-held state is keyed to the id, never to the words a human reads."""
+        self.plan("write it")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "tick", "step-1", "--reason", "done")
+        before = self.step("step-1")
+        self.assertEqual(before["kind"], "implement")
+        self.assertEqual(before["progress"], "done")
+        # Rename it, both the board label and the full name.
+        self.edit_step("step-1", display="rewritten", name="rewrite it entirely")
+        after = self.step("step-1")
+        self.assertEqual(after["id"], "step-1")
+        self.assertEqual(after["kind"], "implement")
+        self.assertEqual(after["progress"], "done")
+
+    def test_a_step_is_named_by_its_display_name_and_resolves_to_its_id(self):
+        """A verb may name a step by the board label a human reads; Switchboard resolves it
+        to the id and acts on that one step. The convenience the design asks for."""
+        self.plan("write it")                              # board label "write"
+        self.as_agent("w1")
+        shown = self.ok("plugin", "plans", "tick", "write", "--reason", "the diff is in")
+        self.assertIn("step-1", shown)
+        self.assertEqual(self.step("step-1")["progress"], "done")
+        # A library step by its resolved definition label, too.
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr")
+        got = self.data("plugin", "plans", "show", "open PR")
+        self.assertEqual(got["kind"], "open_pr")
+
+    def test_an_unknown_or_ambiguous_display_name_is_refused(self):
+        """A display name is a convenience, so Switchboard never guesses which step was
+        meant: an unknown name is refused, and a name two steps share is refused naming the
+        candidates and their ids — the same recovery an ambiguous bare id gets."""
+        # Two steps sharing one board label ("write"), plus a distinct one.
+        self.data(*_create("a job", "write it", "write again", "review it"))
+        code, out, _ = self.sb("plugin", "plans", "tick", "nope", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("no step named 'nope'", json.loads(out)["data"]["error"])
+        code, out, _ = self.sb("plugin", "plans", "tick", "write", "--json")
+        self.assertEqual(code, 1)
+        data = json.loads(out)["data"]
+        self.assertIn("names more than one step", data["error"])
+        self.assertEqual(sorted(data["candidates"]), ["p-1/step-1", "p-1/step-2"])
+        self.assertEqual(self.actions(), ["create"])       # nothing was ticked
+
+    def test_kind_is_json_only_and_never_leaks_into_terminal_output(self):
+        """Kind is operational machinery — carried on `--json`, filtered from the markdown
+        dump (`_MACHINERY`), and kept out of the terminal renderer's unknown-field catch-all.
+        A plain tick/skip/note or a `--full` view must not print a raw `kind  implement` line,
+        which is noise a human never reads a plan to learn."""
+        self.plan("write it")
+        self.as_agent("w1")
+        ticked = self.ok("plugin", "plans", "tick", "step-1", "--reason", "done")
+        self.assertNotIn("kind", ticked)
+        full = self.ok("plugin", "plans", "show", "p-1")   # `ok` appends --full here
+        self.assertNotIn("kind", full)
+        listed = self.ok("plugin", "plans", "list", "--full")
+        self.assertNotIn("kind", listed)
+        # But it IS on the machine view.
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")
+                         ["steps"][0]["kind"], "implement")
+
+    def test_a_step_from_before_kinds_gains_one_on_read(self):
+        """Zero-regression: a step written before the kind field is migrated on read, its
+        kind derived from its stable `def` and never from its display name — so an existing
+        plan reads with a kind everywhere without a rewrite of the file."""
+        self.plan("write it")
+        doc = self._doc()
+        step = doc["plans"][0]["steps"][0]
+        step.pop("kind", None)                             # a pre-#314 step on disk
+        step["def"] = "merge"
+        self._save(doc)
+        self.assertEqual(self.data("plugin", "plans", "show", "p-1")
+                         ["steps"][0]["kind"], "merge")
 
 
 class CatalogueTest(PlansSandbox):
