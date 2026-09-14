@@ -797,7 +797,10 @@ def register(reg):
         help="create or update one plan or change record's marked PR comment by its exact "
              "numeric id",
         args=[reg.arg("plan", help="the plan or change record to post, e.g. p-1"),
-              reg.arg("--pr", help="the pull request number, required")])
+              reg.arg("--pr", help="the pull request number, required"),
+              reg.arg("--self-review", flag=True,
+                      help="close the review step as the PR opens although its recorded "
+                           "reviewer worked on the implementation; recorded as self-reviewed")])
     reg.command(
         # THE `Open PR` BUNDLE (v2 §4, #318): what brings the push, `gh` and the local checks
         # into the tooling, so "checks green, PR open, summary posted" is a fact it establishes
@@ -813,6 +816,9 @@ def register(reg):
                                       "when omitted"),
               reg.arg("--body", help="a file holding the PR description when one is opened; "
                                      "a short one drawn from the change record when omitted"),
+              reg.arg("--self-review", flag=True,
+                      help="close the review step as the PR opens although its recorded "
+                           "reviewer worked on the implementation; recorded as self-reviewed"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "step", step_verb, audience="both",
@@ -1545,10 +1551,14 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   other, so two agents racing `take` resolve to one winner and one refusal naming
   `--steal`; `take --steal` takes an owned step anyway and tells the previous owner unless
   it has already called `sb done`. REVIEW IS INDEPENDENT BY DEFAULT: an agent that owns,
-  owned or completed an `implement` step cannot `take` or `complete` the plan's `review`
-  step. `--self-review` on that take or complete does it anyway — your call, for this one
-  review — and stamps `review_independence: self-reviewed` on the step and the PR comment.
-  `tick` is refused on a review step, so its completion always goes through `complete`.
+  owned, ticked or completed an `implement` step cannot `take` or `complete` the plan's
+  `review` step. `--self-review` on that take or complete does it anyway — your call, for
+  this one review — and stamps `review_independence: self-reviewed` on the step and the PR
+  comment. `tick` is refused on a review step, so its completion always goes through
+  `complete`. On a change record the review is derived done as the PR opens instead, and
+  `open-pr` (or `comment`) checks the same thing of `change.review.reviewer`, which must
+  be named, with its own `--self-review`; `open-pr` also refuses unless `change.review.commit`
+  covers the HEAD it pushes.
 
   THE WHOLE DOCUMENT HAS AN EDIT VERB TOO, an alternative to the file for a version-checked
   rewrite in one call: `sb plugin plans edit <plan> --version <v> --file <path>` (the
@@ -2400,9 +2410,6 @@ def comment(ctx, args) -> Result:
 
     number = _num(_PLAN_ID, plan.get("id"))
     marker = f"<!-- switchboard-plan: plan-{number}:{nonce} -->"
-    rendered = _plan_result(
-        _viewed(_shown(plan, lib), _Live(ctx), tokens=True), markdown=True).human
-    body = f"{rendered.rstrip()}\n\n{marker}\n"
     endpoint = f"repos/{{owner}}/{{repo}}/issues/{pr}/comments"
 
     listed, bad = _github(ctx, ["--paginate", "--slurp", endpoint])
@@ -2432,16 +2439,7 @@ def comment(ctx, args) -> Result:
                             "comment_ids": [row.get("id") for row in matches]})
 
     opening = False
-    if matches:
-        comment_id = matches[0].get("id")
-        if not isinstance(comment_id, int) or comment_id <= 0:
-            why = f"GitHub returned a marked comment without a numeric id on PR {pr}"
-            return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
-        action = "updated"
-        target = f"repos/{{owner}}/{{repo}}/issues/comments/{comment_id}"
-        changed, bad = _github(ctx, ["--method", "PATCH", target, "--input", "-"],
-                               body=body)
-    else:
+    if not matches:
         # PR-OPEN GATES ON THE RECORDED EVIDENCE. The first time this comment lands on a PR
         # is the PR-open the design gates — nothing else in the tooling mediates the raw push
         # and `gh pr create` that create the PR itself, so this is the moment to fail closed.
@@ -2462,6 +2460,31 @@ def comment(ctx, args) -> Result:
                     bad.human += (f"\n\nthe plan is {path} — edit it there, then `sb plugin "
                                   "plans validate`")
                 return bad
+            # The review this post is about to derive done has to be independent too, and
+            # the stamp lands before the body renders so the comment draws it. The bundle
+            # ran this itself, with its own `--self-review`.
+            if not getattr(args, "bundled", False):
+                marked = _derived_review(plan, bool(getattr(args, "self_review", False)),
+                                         f"comment {plan['id']} --pr {pr}")
+                if isinstance(marked, Result):
+                    return marked
+                if marked:
+                    _write(ctx.state_dir, doc, seal)
+
+    # Rendered only now, after the gate, so a self-review stamp it just made is on the page.
+    rendered = _plan_result(
+        _viewed(_shown(plan, lib), _Live(ctx), tokens=True), markdown=True).human
+    body = f"{rendered.rstrip()}\n\n{marker}\n"
+    if matches:
+        comment_id = matches[0].get("id")
+        if not isinstance(comment_id, int) or comment_id <= 0:
+            why = f"GitHub returned a marked comment without a numeric id on PR {pr}"
+            return Result(ok=False, human=why, data={"error": why, "pr": int(pr)})
+        action = "updated"
+        target = f"repos/{{owner}}/{{repo}}/issues/comments/{comment_id}"
+        changed, bad = _github(ctx, ["--method", "PATCH", target, "--input", "-"],
+                               body=body)
+    else:
         action = "created"
         changed, bad = _github(ctx, ["--method", "POST", endpoint, "--input", "-"],
                                body=body)
@@ -3054,12 +3077,20 @@ def _bundle(ctx, given: str, args, *, verb: str) -> Result:
         if bad:
             return bad
         plan_id, sid, branch = plan["id"], step["id"], str(plan["branch"])
+        # The review this bundle derives done at the end is checked for independence now,
+        # before anything runs, and a self-review stamp is written before the comment renders.
+        marked = _derived_review(plan, bool(getattr(args, "self_review", False)),
+                                 f"open-pr {plan_id}")
+        if isinstance(marked, Result):
+            return marked
         # An unowned step is taken by whoever runs its bundle, so the step has an accountable
         # owner from here on and a failure is somebody's. Logged as the take it is.
-        if _owner(step) is None:
+        taken = _owner(step) is None
+        if taken:
             step["owner"] = who
             _log(ctx, plan, who, "take", reason,
                  f"{sid} owner unowned → {who} (taken by `{verb}`)", step=sid)
+        if taken or marked:
             _write(ctx.state_dir, doc, seal)
         snapshot = json.loads(json.dumps(_stored(plan)))
 
@@ -3108,7 +3139,7 @@ def _bundle(ctx, given: str, args, *, verb: str) -> Result:
     step.pop("failure", None)
     _log(ctx, plan, who, DERIVED, reason,
          f"{moved} — `{verb}`: {len(checks)} local check(s) passed on {head[:12]}, pushed, "
-         f"PR {pr} {how}, summary comment {posted.data.get('action')}", step=sid)
+         f"PR {pr} {how}, summary comment {posted.data.get('action')}{marked}", step=sid)
     _write(ctx.state_dir, doc, seal)
 
     done = _changed(plan, step, lib, _next(plan, step))
@@ -3177,6 +3208,18 @@ def _bundle_ready(ctx, plan: dict, who: str,
     head = _sha(got.stdout) if got is not None and got.returncode == 0 else None
     if head is None:
         return no("git could not name the commit at HEAD")
+    # THE REVIEW HAS TO COVER WHAT IS PUSHED, compared as `_covers` compares heads at the
+    # merge. The gate above only asks that a review commit is recorded; after a reopen that is
+    # still the pre-reopen one, and deriving the review done off it would present the fix as
+    # reviewed when the re-review the reopen asked for never happened.
+    given = plan["change"]["review"].get("commit")
+    reviewed = _sha(given)
+    if reviewed is None or not (head.startswith(reviewed) or reviewed.startswith(head)):
+        return no(f"`change.review.commit` is {str(given or '')[:12] or 'not a commit'}, but "
+                  f"the commit this would push is {head[:12]} — the review does not cover "
+                  f"what the PR would carry. Re-review at {head[:12]} and record "
+                  f"`change.review` against it, then run this again",
+                  expected=head, found=str(given or "") or None)
     return step, head, None
 
 
@@ -3700,11 +3743,14 @@ def take(ctx, args) -> Result:
 # or complete, which stamps `review_independence: self-reviewed` on the review step, where it is
 # system-held (`_HELD_STEP`) and drawn on the pull request comment (`_evidence_section`). The
 # stamp is never cleared: that an override was used on this review is a fact, whoever finishes.
+# A change record's review is normally closed by neither verb but DERIVED off `change.review`
+# when its PR opens (`_derived_review`), so the same guard and override run there too.
 SELF_REVIEWED = "self-reviewed"
-# The changelog actions that name an owner of the step they are about: a take or steal names
-# the new owner as `by`, a release or complete the owner doing it. A move's detail is written
-# `<step> owner <was> → <now>`, which also names an owner a hand-edit had pre-staged.
-_OWNING_ACTIONS = ("take", "steal", "release", "complete")
+# The changelog actions that name a contributor to the step they are about: a take or steal
+# names the new owner as `by`, a release or complete the owner doing it, and a tick whoever
+# closed it — an implement step can be ticked without ever being taken. A move's detail is
+# written `<step> owner <was> → <now>`, which also names an owner a hand-edit had pre-staged.
+_OWNING_ACTIONS = ("take", "steal", "release", "complete", "tick")
 _OWNER_MOVE = re.compile(r"^\S+ owner (?P<was>\S+) → (?P<now>\S+)")
 
 
@@ -3712,8 +3758,8 @@ def _contributed(plan: dict, who: str) -> list[str]:
     """The ids of this plan's `implement`-kind steps that `who` owns, owned or contributed to.
 
     A RECORDED CONTRIBUTOR IS AN OWNER ON THE RECORD (#321 A3): the step's current `owner`,
-    and every agent the step's ownership events name — the `by` of a take, steal, release or
-    complete, and both sides of an owner move. Read from switchboard's own record and never
+    and every agent the step's ownership events name — the `by` of a take, steal, release,
+    complete or tick, and both sides of an owner move. Read from switchboard's own record and never
     from git, because agents on one plan share a worktree and one git identity. What this
     cannot see is an owner a hand-edit set and a later hand-edit replaced with no verb between:
     no event was ever written for it.
@@ -3757,6 +3803,47 @@ def _independence(step: dict, who: str, plan: dict, override: bool, verb: str) -
                        implemented=mine)
     step["review_independence"] = SELF_REVIEWED
     return f"; {SELF_REVIEWED} — {who} contributed to {', '.join(mine)}"
+
+
+def _derived_review(plan: dict, override: bool, verb: str) -> Any:
+    """The same guard where a change record's review is NORMALLY closed: `_derive`, as the PR
+    opens (`open-pr`, or a hand-run `comment`'s first post), off `change.review`. `""`, a
+    detail suffix, or a refusal — `_independence`'s shape, with `verb` the command to rerun.
+
+    Only when `_derive` is about to close the step: the one `review`-def step, still open. A
+    review already completed went through `complete`'s guard; a skipped one stays a visible,
+    reasoned path and asks for no reviewer. Otherwise the recorded reviewer is who is checked,
+    so it has to be named — an omitted one would be a review nobody can be checked against.
+    """
+    change = plan.get("change")
+    carrying = [s for s in (plan.get("steps") or ())
+                if isinstance(s, dict) and str(s.get("def") or "") == "review"]
+    if (not isinstance(change, dict) or len(carrying) != 1
+            or _kind_of(carrying[0]) != "review"
+            or str(carrying[0].get("progress") or "") != OPEN):
+        return ""
+    step = carrying[0]
+    review = change.get("review") if isinstance(change.get("review"), dict) else {}
+    reviewer = str(review.get("reviewer") or "").strip()
+    if not reviewer:
+        return _denied(step, f"{plan['id']}: `{verb}` would close {step['id']}, the review, off "
+                             f"`change.review`, which names no `reviewer` — independence is "
+                             f"checked against who reviewed, so record them, or `skip "
+                             f"{step['id']} --why` if this change is not reviewed",
+                       plan=plan["id"], missing="change.review.reviewer")
+    mine = [] if reviewer == "human" else _contributed(plan, reviewer)
+    if not mine:
+        return ""
+    if not (override or step.get("review_independence") == SELF_REVIEWED):
+        return _denied(step, f"{plan['id']}: `{verb}` would close {step['id']}, the review, but "
+                             f"its recorded reviewer {reviewer} owns, owned or contributed to "
+                             f"{', '.join(mine)}, the implementation it reviews — review is "
+                             f"independent by default, so a fresh agent reviews. `{verb} "
+                             f"--self-review` does it anyway, recorded as self-reviewed on the "
+                             f"step and the PR comment",
+                       plan=plan["id"], implemented=mine, reviewer=reviewer)
+    step["review_independence"] = SELF_REVIEWED
+    return f"; {SELF_REVIEWED} — {reviewer} contributed to {', '.join(mine)}"
 
 
 def _told(ctx, done: Result, prev: str) -> Result:

@@ -2094,6 +2094,23 @@ class StepsTest(PlansSandbox):
         self.assertNotIn("review_independence", self.step(review))
         self.assertEqual(self.actions(), before)
 
+    def test_ticking_an_implement_step_without_taking_it_still_makes_you_a_contributor(self):
+        """An implement step can be closed by `tick` with no owner ever recorded; the tick's
+        `by` is still a contribution, so that agent's review take and complete are refused."""
+        self.plan("write it")
+        self.data("plugin", "plans", "name-step", "p-1", "review")
+        review = next(s["id"] for s in self.steps() if s["kind"] == "review")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "tick", "step-1")
+        self.assertIsNone(self.step("step-1")["owner"])
+        code, out, _ = self.sb("plugin", "plans", "take", review, "--json")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["data"]["implemented"], ["step-1"])
+        self.edit_step(review, owner="w1")
+        code, out, _ = self.sb("plugin", "plans", "complete", review, "--json")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["data"]["implemented"], ["step-1"])
+
     def test_the_self_review_override_is_recorded_held_and_surfaced_on_the_pr_comment(self):
         """The per-instance override is the agent's own call: `take --self-review` stamps
         `review_independence: self-reviewed` on the review step, the `complete` after it
@@ -3200,6 +3217,25 @@ class CatalogueTest(PlansSandbox):
         actions = [e["action"] for e in self.data("plugin", "plans", "changelog", "p-1")]
         self.assertEqual(actions.count("auto-tick"), 3)
         self.assertNotIn("tick", actions)
+
+    def test_a_first_post_refuses_to_derive_a_review_that_names_no_reviewer(self):
+        """The hand-run path carries the same independence guard as `open-pr`, and a review
+        with no recorded reviewer is refused rather than waved past it — omitting the name
+        is otherwise the whole bypass. A SKIPPED review is left a legitimate path: nothing is
+        derived for it, so no reviewer is asked for and the PR opens."""
+        self.data("plugin", "plans", "record", "raise the upload timeout",
+                  "--display", "board: raise the upload timeout")
+        self.ready_to_open("p-1", review={"commit": "abc1234", "findings": "none"})
+        with self.github_comments() as comments:
+            code, out, _ = self.sb("plugin", "plans", "comment", "p-1", "--pr", "42", "--json")
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(out)["data"]["missing"], "change.review.reviewer")
+            self.assertEqual(comments, [])
+
+            self.ok("plugin", "plans", "skip", "p-1/step-2", "--why", "a one-line typo fix")
+            made = self.data("plugin", "plans", "comment", "p-1", "--pr", "42")
+        self.assertEqual(made["auto_ticked"], ["step-1", "step-3"])
+        self.assertEqual(self.steps()[1]["progress"], "skipped")
 
     def test_a_derived_tick_touches_only_the_skeleton_never_a_skip_and_only_the_open(self):
         """Its three boundaries. It reads `def` and closes only the fixed skeleton's own
@@ -7283,13 +7319,25 @@ class OpenPrBundleTest(PlansSandbox):
         sandbox's own branch, with a clean tracked tree."""
         self.data("plugin", "plans", "record", "raise the upload timeout",
                   "--display", "board: raise the upload timeout")
-        doc = self._doc()
-        doc["plans"][0]["change"].update({
-            "verification": {"commit": "abc1234", "check": "pytest", "result": "green"},
-            "review": {"commit": "abc1234", "reviewer": "reviewer-x", "findings": "none"},
-            "human_checks": "none"})
-        self._save(doc)
+        self.record_review(self.head(), verification=True)
         self.as_agent("worker-x")
+
+    def head(self) -> str:
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def record_review(self, commit: str, *, verification: bool = False, **review) -> None:
+        """The evidence on the record, as its owner writes it: the review (and verification)
+        against `commit`, with `review` overriding its fields — None drops one."""
+        doc = self._doc()
+        change = doc["plans"][0]["change"]
+        change["review"] = {k: v for k, v in dict(
+            {"commit": commit, "reviewer": "reviewer-x", "findings": "none"}, **review).items()
+            if v is not None}
+        if verification:
+            change.update({"verification": {"commit": commit, "check": "pytest",
+                                            "result": "green"}, "human_checks": "none"})
+        self._save(doc)
 
     def open_pr_step(self) -> dict:
         return self._doc()["plans"][0]["steps"][2]
@@ -7348,6 +7396,62 @@ class OpenPrBundleTest(PlansSandbox):
         step = self.open_pr_step()
         self.assertEqual(step["progress"], "done")
         self.assertNotIn("failure", step)
+
+    def test_after_a_reopen_open_pr_refuses_until_the_review_covers_the_new_head(self):
+        """The requested-changes loop: a reviewer reopens the implementation, the implementer
+        commits a fix and runs `open-pr` again. The recorded review still names the old
+        commit, so the bundle refuses — not `failed`, nothing run or derived — and only once
+        the re-review is recorded at the new head does it go through, reusing the PR."""
+        self.ready()
+        with self.github() as gh:
+            self.data("plugin", "plans", "open-pr", "p-1")
+            self.as_agent("reviewer-r")
+            self.ok("plugin", "plans", "reopen", "p-1/step-1", "--reason", "changes requested")
+            self.as_agent("worker-x")
+            (self.repo / "fix.txt").write_text("the fix\n")
+            subprocess.run(["git", "add", "fix.txt"], cwd=self.repo, check=True)
+            subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit",
+                            "-qm", "the fix"], cwd=self.repo, check=True)
+            self.marker.unlink()
+
+            code, out, _ = self.sb("plugin", "plans", "open-pr", "p-1", "--json")
+            self.assertEqual(code, 1)
+            data = json.loads(out)["data"]
+            self.assertNotIn("failed", data)
+            self.assertEqual(data["expected"], self.head())
+            self.assertIn("Re-review", data["error"])
+            self.assertFalse(self.marker.exists(), "a refusal must run nothing")
+            steps = self._doc()["plans"][0]["steps"]
+            self.assertEqual([s["progress"] for s in steps[:3]], ["open", "open", "open"])
+
+            self.record_review(self.head(), reviewer="reviewer-r")
+            self.data("plugin", "plans", "open-pr", "p-1")
+        self.assertEqual(len(self.pr_posts(gh)), 1)
+        self.assertEqual([s["progress"] for s in self._doc()["plans"][0]["steps"][:3]],
+                         ["done", "done", "done"])
+
+    def test_an_implementer_recorded_as_reviewer_is_refused_unless_it_says_self_review(self):
+        """#321's guard on the change record's normal review path: `open-pr` derives the
+        review done off `change.review`, so its recorded reviewer is checked. The implementer
+        recorded there is refused before anything runs; `--self-review` goes through, stamps
+        the review step and draws it on the PR comment."""
+        self.ready()
+        self.ok("plugin", "plans", "take", "p-1/step-1")
+        self.record_review(self.head(), reviewer="worker-x")
+        with self.github() as gh:
+            code, out, _ = self.sb("plugin", "plans", "open-pr", "p-1", "--json")
+            self.assertEqual(code, 1)
+            data = json.loads(out)["data"]
+            self.assertEqual(data["implemented"], ["step-1"])
+            self.assertIn("--self-review", data["error"])
+            self.assertEqual(gh.box["pushed"], 0)
+            self.assertNotIn("review_independence", self._doc()["plans"][0]["steps"][1])
+
+            self.data("plugin", "plans", "open-pr", "p-1", "--self-review")
+        review = self._doc()["plans"][0]["steps"][1]
+        self.assertEqual((review["progress"], review["review_independence"]),
+                         ("done", "self-reviewed"))
+        self.assertIn("| Review independence | self-reviewed", gh.comments[0]["body"])
 
 
 class _Fake:
