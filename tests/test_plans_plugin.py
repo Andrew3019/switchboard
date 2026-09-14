@@ -2276,8 +2276,13 @@ class CatalogueTest(PlansSandbox):
         stored = self.steps()
         self.assertEqual([s["def"] for s in stored], ["merge-human-review", None])
         self.assertEqual(stored[1]["name"], "review it twice, it is a migration")
-        # No verb takes a definition and rewrites it for one plan; the library is files.
-        self.assertNotIn("edit", _plans_commands())
+        # No verb takes a definition and rewrites it for one plan; the library is files. The
+        # whole-document `edit` edits a PLAN, and refuses to relabel a linked step for it.
+        version = self.data("plugin", "plans", "show", "p-1", "--full")["version"]
+        code, out, _ = self.sb("plugin", "plans", "edit", "p-1", "--version", version,
+                               "--steps", "step-1=my own label,step-2", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("library step", json.loads(out)["data"]["error"])
 
     # -- composition -----------------------------------------------------------
 
