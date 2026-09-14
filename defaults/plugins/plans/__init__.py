@@ -1369,10 +1369,12 @@ EVERY STEP HAS A BOARD NAME AND A DEP
 EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
 
   The plan is a JSON file and editing it IS the interface. There is no verb for most of
-  what a lead does to a plan — an owner, a gate, a checkpoint, a new step, an edge, a
-  reworked step — because each of them was one field, and a verb per field is a surface
-  nobody can hold in their head to do something a file edit does better. The shape of the
-  job is:
+  what a lead does to a plan — a gate, a checkpoint, a new step, an edge, a reworked step —
+  because each of them was one field, and a verb per field is a surface nobody can hold in
+  their head to do something a file edit does better. OWNERSHIP is the one exception:
+  `take`, `release`, `complete`, `reopen` and `take --steal` are dedicated, serialized
+  verbs (below), because "exactly one accountable owner" needs mechanizing and not just
+  recording. The shape of the job is:
 
       sb plugin plans create … / template use …    makes it, and prints the file
       read that file, then edit or write it        shape it: steps, owners, gates, deps
@@ -1416,8 +1418,14 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   are the ones that only ever arrive by editing it, and each says who writes it and when.
   `sb plugin plans template use docs` is one worked example of every one of them.
 
-    owner        the plan's owner, as it hands the step out. A name, and nothing is told:
-                 the plan never pushes to a running agent, so say so yourself.
+    owner        the plan's owner, as it hands the step out. A hand-written name PRE-STAGES
+                 it — legal even on a step still waiting on its deps (#314/INV-123) — and
+                 tells nobody: the plan never pushes to a running agent, so say so yourself.
+                 `take`, `release`, `complete` and `reopen` (below) are the mechanized way
+                 to MOVE it once an agent is live: serialized against each other so a race
+                 resolves to one winner, and `take --steal` tells the previous owner unless
+                 it has already finished. Use those for a live handoff; hand-edit only to
+                 pre-stage one before anybody is there to be told.
     gate         the plan's owner, as it shapes the plan. The sentence a human has to
                  answer before this step is finished — a FIELD on the step whose exit
                  condition it is, never a step of its own. No verb clears it: the owning
@@ -1484,6 +1492,31 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   its command, and how its definition says it is done. `sb plugin plans --help` lists the
   rest.
 
+  OWNERSHIP HAS ITS OWN VERBS, mechanizing "exactly one accountable owner" rather than
+  leaving it to a hand-edited `owner` (INV-38): `take <step>` to become its owner — legal
+  even on a step still waiting on its deps, to pre-stage who picks it up (#314/INV-123) —
+  `release <step>` to stop, `complete <step>` for the OWNER of a judgment step to declare
+  it done (refused for `open_pr`/`merge`, or a repo kind whose definition declares
+  `"completion": "system"` — Switchboard closes those itself), and `reopen <step>` to send
+  a done judgment step, and every later step with it, back to `open` with a reason —
+  refused once the plan's `merge` step is done. All four are serialized against each
+  other, so two agents racing `take` resolve to one winner and one refusal naming
+  `--steal`; `take --steal` takes an owned step anyway and tells the previous owner unless
+  it has already called `sb done`.
+
+  THE WHOLE DOCUMENT HAS AN EDIT VERB TOO, an alternative to the file for a version-checked
+  rewrite in one call: `sb plugin plans edit <plan> --version <v> --file <path>` (the
+  version is what `show <plan> --json --full` hands back) merges the document's steps
+  against their stable ids — a kept id's `progress`, `why` and `owner` stay what the store
+  holds no matter what the document says, and a changed `kind` or `def` is refused, because
+  kind is immutable — and refuses the same structural defects `validate` reports (deleting
+  or reordering a complete system step, moving incomplete work ahead of complete, more than
+  one `open_pr`/`merge`, an unpaired or out-of-order pair, zero steps). A stale version is
+  refused with the current document rather than merged. `--steps "step-1,Review:review"` is
+  the same edit as shorthand — an id keeps that step, `Display Name:kind` adds one. This
+  does not replace the file as the normal way to shape a plan (above); it is there for a
+  version-checked rewrite of many steps at once.
+
   DEPS SAY WHEN A STEP RUNS, NOT WHEN IT MAY. Running one ahead of its deps is allowed and
   is sometimes the right call — a slow external check worth queueing early, a machine that
   is briefly awake — and nothing refuses it or warns on it. What the early start does not
@@ -1499,7 +1532,9 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   naming the plans it could have meant. `p-16/step-3` names the plan on the front and
   always works, and is what that refusal is asking you for. A plan made before per-plan
   numbering keeps its `s-<n>` ids and nothing is renumbered; both spellings, and a bare
-  number, resolve.
+  number, resolve. ITS BOARD LABEL RESOLVES TOO (#314) — `take "open PR"` finds the same
+  step as `take step-4` — refused, naming the candidates by id, when more than one step in
+  scope answers to that name.
 
   WHAT VALIDATE IS FOR. Nothing watches the file, so an edit is noticed when something
   next reads the store — the next command, or the board, which redraws every few seconds
@@ -4866,17 +4901,22 @@ class _BadDef(ValueError):
 def _lib(plans: Optional[list] = None) -> tuple[dict, Optional[Result]]:
     """The step library and a refusal, of which exactly one is real. Never raises.
 
-    `plans` is what is about to be rendered: if not one of their steps is a link, the
-    catalogue is not read AT ALL and a broken file in it cannot reach this command. That is
-    the difference between refusing the verbs that resolve a definition — right — and
-    refusing `show` on a plan that never named one, which would make a typo in a shipped
-    JSON file take down every plan in the repo.
+    `plans` is what is about to be rendered: if not one of their steps is a link AND not one
+    of their steps carries a repo-defined `kind`, the catalogue is not read AT ALL and a
+    broken file in it cannot reach this command. That is the difference between refusing the
+    verbs that resolve a definition — right — and refusing `show` on a plan that never named
+    one, which would make a typo in a shipped JSON file take down every plan in the repo.
+    The `kind` half matters since #317: `edit --steps "Name:deploy"` mints a step carrying a
+    repo-defined kind with no `def` link at all, and `_kind_completion` still has to find
+    that kind's `"completion": "system"` (#314 A4) — kind is the identity of the power, not
+    the link (see `_kind_completion`), so a plan naming the kind and not the definition still
+    needs the catalogue read to answer who may complete it.
 
     `None` means the caller needs the library whatever the plans hold: `name-step`,
     `template use` and `library` itself.
     """
-    if plans is not None and not any(_defkey(s) for p in plans
-                                     for s in (p.get("steps") or ())):
+    if plans is not None and not any(_defkey(s) or _kind_of(s) not in _STEP_KINDS
+                                     for p in plans for s in (p.get("steps") or ())):
         return {}, None
     try:
         return _catalogue(LIBRARY), None
@@ -5269,17 +5309,22 @@ def _kind_completion(step: dict, lib: dict) -> str:
     """SYSTEM or JUDGMENT for this step's kind — who is allowed to complete it.
 
     Built-in kinds carry their answer in `_KIND_SYSTEM`. A repo-defined kind is judgment
-    unless the library definition it came from declares `"completion": "system"` (#314 A4:
-    a repo's own kind may be one Switchboard completes on observing a fact). Read by the
-    ownership `complete` verb, which refuses a system kind, and by anything asking whether a
-    step is the tooling's to close.
+    unless the library definition NAMED BY THE KIND declares `"completion": "system"` (#314
+    A4: a repo's own kind may be one Switchboard completes on observing a fact). Looked up
+    by `kind`, not by the step's `def` link: kind IS the identity of the power (see the
+    `_DEF_KIND` note above `_kind_for`), so a step authored on the fly with `kind: "deploy"`
+    — `edit --steps "Name:deploy"`, never linked to the `deploy` definition — answers the
+    same as one `name-step`d from it. A step actually linked to it always agrees, since an
+    unaliased def key IS the kind a linked step gets (`_kind_for`). Read by the ownership
+    `complete` verb, which refuses a system kind, and by anything asking whether a step is
+    the tooling's to close.
     """
     kind = _kind_of(step)
     if kind in _KIND_SYSTEM:
         return SYSTEM
     if kind in _KIND_JUDGMENT:
         return JUDGMENT
-    spec = lib.get(_defkey(step) or "") if isinstance(lib, dict) else None
+    spec = lib.get(kind) if isinstance(lib, dict) else None
     declared = str((spec or {}).get("completion") or "").strip().lower()
     return SYSTEM if declared == SYSTEM else JUDGMENT
 

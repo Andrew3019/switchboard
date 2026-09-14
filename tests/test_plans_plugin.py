@@ -1970,6 +1970,48 @@ class StepsTest(PlansSandbox):
         self.assertEqual(json.loads(out)["data"]["kind"], "open_pr")
         self.assertEqual(self.step(pr)["progress"], "open")
 
+    def test_take_pre_stages_ownership_on_a_step_not_yet_eligible(self):
+        """#314/INV-123: assigning an owner to a not-yet-eligible (pending) step is legal —
+        ownership is orthogonal to eligibility, so an agent can be pre-staged on a step
+        that is still waiting on its predecessor. `take` carries no eligibility check of
+        its own (see `take`'s docstring), so this pins that omission is not an oversight:
+        step-2 depends on step-1, step-1 is still open, and the take still lands."""
+        self.plan("write it", "review it")          # step-2 deps=[step-1]
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "take", "step-2")
+        self.assertEqual(self.step("step-2")["owner"], "w1")
+        self.assertEqual(self.step("step-1")["progress"], "open")
+        self.assertEqual(self.step("step-2")["progress"], "open")
+
+    def test_a_repo_defined_system_completion_kind_is_refused_linked_and_unlinked(self):
+        """#314 A4: a repo's own kind may declare `"completion": "system"` and is then
+        Switchboard's to close, not an agent's — the same refusal a built-in system kind
+        (`open_pr`, `merge`) gets. Kind is the identity of the power (`_kind_completion`),
+        so this holds whether the step is LINKED to the definition (`name-step`) or was
+        authored on the fly with just the kind string (`edit --steps "Name:kind"`, #317) —
+        the two ways #317 and #314 let a step come by a kind."""
+        self.define("deploy", completion="system")
+        self.plan("write it")
+        self.data("plugin", "plans", "name-step", "p-1", "deploy")
+        linked = next(s["id"] for s in self.steps() if s.get("def") == "deploy")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "take", linked)
+        code, out, err = self.sb("plugin", "plans", "complete", linked, "--json")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(json.loads(out)["data"]["kind"], "deploy")
+
+        doc = self.read_full()
+        code, data = self.edit_with("p-1", dict(doc, steps=doc["steps"] + [{
+            "display": "Deploy it", "kind": "deploy"}]), doc["version"])
+        self.assertEqual(code, 0, data)
+        unlinked = next(s["id"] for s in self.steps() if s["kind"] == "deploy"
+                        and s["id"] != linked)
+        self.assertIsNone(self.step(unlinked)["def"])
+        code, out, err = self.sb("plugin", "plans", "complete", unlinked, "--json")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(json.loads(out)["data"]["kind"], "deploy")
+        self.assertEqual(self.sb("plugin", "plans", "reopen", unlinked)[0], 1)
+
     def test_reopen_suspends_every_later_step_and_a_merged_plan_is_terminal(self):
         """Reopening a done step puts every step after it back to open, saying why, because
         what they were done against is no longer complete. Once the merge-kind step is
@@ -4887,6 +4929,35 @@ class PlannerPackageTest(PlansSandbox):
             self.assertIn(f"`{root}`", said)
         # And the silence is named: a truncated plan is a legal plan.
         self.assertIn("naming one never brings another", said)
+
+    def test_the_guide_names_the_ownership_verbs_and_the_whole_document_edit(self):
+        """#317's review flagged the guide as still describing only hand-editing — it named
+        no ownership verb and no `edit`, both landed this wave (#314/#316/#317). Pinned here
+        so the guide cannot go stale about them the way it did about the library roots
+        above; matched on the printed block as one whitespace-joined run, like the other
+        guide-content tests."""
+        said = " ".join(self.ok("plugin", "plans", "guide").split())
+        for expected in (
+                # Ownership is a verb-mechanized exception to "there is no verb for this".
+                "OWNERSHIP is the one exception",
+                "`take`, `release`, `complete`, `reopen` and `take --steal`",
+                "OWNERSHIP HAS ITS OWN VERBS",
+                "legal even on a step still waiting on its deps",
+                "#314/INV-123",
+                "refused for `open_pr`/`merge`, or a repo kind whose definition declares "
+                "`\"completion\": \"system\"`",
+                "refused once the plan's `merge` step is done",
+                # A hand-written owner still pre-stages and still tells nobody.
+                "PRE-STAGES", "tells nobody",
+                # Name resolution, alongside the id forms.
+                "ITS BOARD LABEL RESOLVES TOO",
+                # The whole-document edit verb, alongside the file.
+                "THE WHOLE DOCUMENT HAS AN EDIT VERB TOO",
+                "sb plugin plans edit <plan> --version <v> --file <path>",
+                "a changed `kind` or `def` is refused, because kind is immutable",
+                "A stale version is refused with the current document rather than merged",
+                "does not replace the file as the normal way to shape a plan"):
+            self.assertIn(expected, said)
 
     def test_the_pr_comment_reads_as_a_live_render_rather_than_something_that_waits(self):
         """Bug 2026-08-26-143005 defect 2. `change-approval` says the approved text goes in
