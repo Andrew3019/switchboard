@@ -862,7 +862,8 @@ def register(reg):
                       help="a plan id, e.g. p-1; omit for every plan in the repo")])
     reg.command(
         "tick", tick, audience="both",
-        help="mark a step done — nothing infers progress and nothing else writes it",
+        help="mark a step done — nothing infers progress and nothing else writes it; a "
+             "review step is refused and is `complete`d by its owner instead",
         args=[reg.arg("step", help="a step id, e.g. step-1, or p-2/step-1 to say "
                                    "which plan"),
               reg.arg("--reason", help="why, for the changelog")])
@@ -1547,6 +1548,7 @@ EDITING IT — THIS IS THE NORMAL WAY, NOT THE FALLBACK
   owned or completed an `implement` step cannot `take` or `complete` the plan's `review`
   step. `--self-review` on that take or complete does it anyway — your call, for this one
   review — and stamps `review_independence: self-reviewed` on the step and the PR comment.
+  `tick` is refused on a review step, so its completion always goes through `complete`.
 
   THE WHOLE DOCUMENT HAS AN EDIT VERB TOO, an alternative to the file for a version-checked
   rewrite in one call: `sb plugin plans edit <plan> --version <v> --file <path>` (the
@@ -3553,12 +3555,29 @@ def tick(ctx, args) -> Result:
     and a change approval that never happened is not a step you get to close. Refused at the
     door like a skip with no reason, where the message can say what to write. A trivially small
     change still SKIPS the step with a reason; only a `tick` is refused, and only for this def.
+
+    AND A `review`-KIND STEP IS NEVER TICKED (#321). Review independence is enforced on
+    `complete` (`_independence`), and a tick beside it would be the same completion with the
+    guard and the self-reviewed stamp both left out — so every review completion goes through
+    `complete`, and this refuses and says so. A re-tick of a review already `done` is still
+    the free no-op above. `_derive` closing the skeleton's review off a checked fact is not a
+    tick and is untouched.
     """
     bad = _cap(args.reason)
     if bad:
         return bad
-    return _on_step(ctx, args.step, "tick", args.reason,
-                    lambda step, who: _close(step, args.reason, "tick"), unblocked=True)
+
+    def _tick(step, who):
+        if _kind_of(step) == "review" and str(step.get("progress") or "") != DONE:
+            return _denied(step, f"{step['id']} is a `review` step, which is completed with "
+                                 f"`complete {step['id']}` by its owner — review is independent "
+                                 f"by default, and `complete` is where that is checked; "
+                                 f"`complete {step['id']} --self-review` if you worked on the "
+                                 f"implementation and are reviewing it anyway",
+                           kind="review")
+        return _close(step, args.reason, "tick")
+
+    return _on_step(ctx, args.step, "tick", args.reason, _tick, unblocked=True)
 
 
 def _close(step: dict, reason: Optional[str], verb: str) -> Any:

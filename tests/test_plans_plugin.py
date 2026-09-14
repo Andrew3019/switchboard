@@ -2074,6 +2074,26 @@ class StepsTest(PlansSandbox):
         self.assertEqual(self.step(review)["progress"], "done")
         self.assertNotIn("review_independence", self.step(review))
 
+    def test_tick_is_refused_on_a_review_step_so_its_completion_goes_through_complete(self):
+        """The tick bypass is closed: an implement owner cannot close the review with `tick`,
+        which would skip both the guard and the self-reviewed stamp. Refused with a pointer
+        to `complete`, and nothing is written."""
+        self.plan("write it")
+        self.data("plugin", "plans", "name-step", "p-1", "review")
+        review = next(s["id"] for s in self.steps() if s["kind"] == "review")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "take", "step-1")
+        self.ok("plugin", "plans", "complete", "step-1")
+        before = self.actions()
+        code, out, _ = self.sb("plugin", "plans", "tick", review, "--json")
+        self.assertEqual(code, 1)
+        data = json.loads(out)["data"]
+        self.assertEqual(data["kind"], "review")
+        self.assertIn("--self-review", data["error"])
+        self.assertEqual(self.step(review)["progress"], "open")
+        self.assertNotIn("review_independence", self.step(review))
+        self.assertEqual(self.actions(), before)
+
     def test_the_self_review_override_is_recorded_held_and_surfaced_on_the_pr_comment(self):
         """The per-instance override is the agent's own call: `take --self-review` stamps
         `review_independence: self-reviewed` on the review step, the `complete` after it
@@ -3387,7 +3407,9 @@ class CatalogueTest(PlansSandbox):
         # And the tick chain does not hand over the PR while the approval is open, which is
         # how an agent following `next — this move unblocked` walked past it.
         self.ok("plugin", "plans", "tick", "step-1")
-        released = json.loads(self.ok("plugin", "plans", "tick",
+        # A review step is `complete`d by its owner, never ticked (#321).
+        self.ok("plugin", "plans", "take", by_def["review"]["id"])
+        released = json.loads(self.ok("plugin", "plans", "complete",
                                       by_def["review"]["id"], "--json"))
         self.assertEqual(released["data"].get("next", []), [],
                          "the review alone does not release the PR")
