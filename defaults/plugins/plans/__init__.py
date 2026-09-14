@@ -446,6 +446,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -886,6 +887,23 @@ def register(reg):
                       help="one or more library definitions, e.g. create-pr merge; they "
                            "land where each RUNS, so the order you type them decides "
                            "nothing"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "edit", edit, audience="both",
+        help="rewrite a plan as a WHOLE document — read it (`show <plan> --json --full`), "
+             "change it, hand it back with the version you read; a stale version is "
+             "refused with the current document",
+        args=[reg.arg("plan", help="a plan id, e.g. p-1"),
+              reg.arg("--version", help="the `version` the document was read at, required — "
+                                        "an edit against anything newer is refused"),
+              reg.arg("--file", help="the edited plan as JSON, as `show --json --full` emits "
+                                     "it (`-` reads stdin). A step keeping its `id` is that "
+                                     "step; a step with no `id` is new; an id left out is "
+                                     "deleted"),
+              reg.arg("--steps", help="the whole step list in shorthand instead of --file: "
+                                      "`\"step-1,Review:review,Open PR:open_pr,Merge:merge\"` "
+                                      "— an id keeps that step (`step-1=New name` renames "
+                                      "it), `Display Name:kind` adds one"),
               reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         "template", template, audience="both",
@@ -2181,7 +2199,10 @@ def show(ctx, args) -> Result:
     if bad:
         return bad
     md = bool(getattr(args, "markdown", False))
-    return _plan_result(_viewed(_shown(plan, lib), _Live(ctx), tokens=md), markdown=md,
+    # `version` is what a whole-document `edit` hands back (see `_version`); read AFTER the
+    # workspace repair above, since that repair is itself a write the version has to cover.
+    return _plan_result(_viewed(dict(_shown(plan, lib), version=_version(plan)), _Live(ctx),
+                                tokens=md), markdown=md,
                         full=bool(getattr(args, "full", False)))
 
 
@@ -3478,6 +3499,495 @@ def name_step(ctx, args) -> Result:
     _log(ctx, plan, who, "name-step", args.reason, _minted(added, lib))
     _write(ctx.state_dir, doc, seal)
     return _added(plan, added, lib)
+
+
+# -- the whole-document edit ---------------------------------------------------
+#
+# READ, REASON, WRITE: an agent reads the plan whole, changes what it means to change, and
+# hands the whole thing back. Alongside the granular verbs and the hand-edit, not instead of
+# them — `tick`, `skip`, `note`, `name-step` and editing the file all keep working.
+#
+# THE VERSION IS A DIGEST OF THE PLAN AS STORED (`_version`), not a counter kept in the file.
+# The file is an interface every verb AND every editor writes, and a counter only the edit
+# verb bumps would call a plan unchanged across a tick or a hand-edit that landed in between;
+# a digest of the stored text moves on every write whoever made it, and needs no new stored
+# field and no change to any other verb. It is short on purpose — it is typed back as a flag.
+#
+# Stale is REFUSED, never merged: conflicts are rare, the retry is one re-read, and the
+# refusal carries the current document so that re-read costs nothing.
+
+# What a READ adds to a plan and its steps — derived live, resolved from the library, or
+# computed from the store — and never stores. A document carrying them back carries nothing.
+_VIEW_PLAN = frozenset({"version", "condition", "worktree", "roles", "tokens", "incomplete",
+                        "advisories", "file"})
+_VIEW_STEP = frozenset({"owner_status"})
+# SYSTEM-HELD: what the store and the verbs own. An agent's document never overrides these,
+# so an edit read before a tick cannot un-tick the step by handing the old progress back.
+# `kind` and `def` on a step are not in here because a CHANGE to either is refused rather than
+# ignored (`_FIXED_STEP`): kind is immutable, and `def` is the declared type it came from.
+_HELD_PLAN = frozenset({"id", "kind", "steps", "workspace", "workspace_from", "checkout",
+                        "branch", "branch_from", "next_step", "changelog", "created_by",
+                        "created_at", "pr_comment_nonce"})
+# The change record merges KEY BY KEY, and its evidence and identity keys are fixed: the
+# approval, verification, review, PR head and landing are what `comment` and `merge` trust as
+# the record of what happened, so a sanctioned edit that could set them would be a way to
+# forge that record. A document carrying them back unchanged is fine; changing one is refused.
+# The rest — the request, the contract, `human_checks` the PR flow asks an agent to write —
+# is authored content and edits like any other field.
+_HELD_CHANGE = ("path", "approval", "verification", "review", "pr", "landing", "handoff")
+_HELD_STEP = frozenset({"id", "progress", "why", "owner"})
+_FIXED_STEP = ("kind", "def")
+# The fields a linked step resolves from its definition on read (`_resolve`). Handed back
+# unchanged they are the library's words, not the step's, and are not copied in.
+_RESOLVED = ("name", "display", "anchor", "command")
+# `Display Name:kind` — the kind is an identifier straight after the LAST colon, so a name
+# with a colon in its prose (`fix: parser`) is still a name.
+_KIND_SUFFIX = re.compile(r"^(?P<name>.*?)\s*:(?P<kind>[A-Za-z0-9][A-Za-z0-9_.-]*)$")
+# The mark sb's compact `--json` leaves on a string it clipped (`plugins.compact_json`).
+_CLIP_LIMIT = 600
+
+
+def edit(ctx, args) -> Result:
+    """The plan as a WHOLE document, merged against its stable step ids and validated.
+
+    THE VERSION FIRST. The caller names the `version` it read (`show --json` carries it); a
+    plan that has moved since is refused with the current document and a re-read-and-retry
+    message, and nothing is written.
+
+    THEN THE STEPS, BY ID — which is what #314's stable ids are for:
+      - a step carrying an existing id IS that step. Its fields are taken from the document,
+        except what the system holds (`_HELD_STEP`: progress and its `why`, the owner), which
+        stays as stored — and a changed `kind` or `def` is refused, because kind confers powers
+        and is immutable;
+      - a step with no id is NEW: an id is minted, and its kind comes from its declared
+        `kind` (or its `def`), checked against the built-ins and this repo's library;
+      - an id present before and absent now is DELETED.
+    Plan-level fields merge the same way: what the document carries replaces the stored
+    value, what it omits is kept, and the system-held ones (`_HELD_PLAN`) never move.
+
+    THEN THE STRUCTURE, refused with a reason (`_structure`) before anything is written.
+
+    `--steps` is the same edit written as the step list alone: `step-1` keeps a step,
+    `step-1=Label` relabels it, and `Display Name:kind` adds one chained after the entry
+    before it. A record's skeleton is fixed and is not edited here, as `name-step` refuses it.
+    """
+    given = str(getattr(args, "version", None) or "").strip()
+    if not given:
+        return _needs("--version", "it is the version you read the plan at, from `show "
+                                   "<plan> --json --full` — an edit is refused against a "
+                                   "plan that has changed since, so it never overwrites "
+                                   "somebody else's write")
+    path = str(getattr(args, "file", None) or "").strip()
+    shorthand = getattr(args, "steps", None)
+    if bool(path) == (shorthand is not None):
+        why = ("give the edited plan as exactly one of --file <path> — the whole document, "
+               "as `show <plan> --json --full` emits it — or --steps \"step-1,Review:review\"")
+        return Result(ok=False, human=why, data={"error": why})
+    bad = _cap(args.reason)
+    if bad:
+        return bad
+    submitted = None
+    if path:
+        submitted, bad = _submitted(path)
+        if bad:
+            return bad
+
+    doc, seal = _read_logged(ctx)
+    plan = _find(doc, args.plan)
+    if plan is None:
+        return _missing(doc, args.plan)
+    if _is_record(plan):
+        why = (f"{plan['id']} is a change record — it carries the fixed direct-change "
+               f"skeleton, which is not reshaped. A job that needs its own steps is a shaped "
+               f"plan (`create`).")
+        return Result(ok=False, human=why, data={"error": why})
+    lib, bad = _lib()
+    if bad:
+        return bad
+    current = _version(plan)
+    if given != current:
+        why = (f"{plan['id']} has changed since you read it (you read version {_flat(given)}; "
+               f"it is now {current}) — nothing was written. Re-read it, reapply your change "
+               f"to that document, and retry with --version {current}. The current document "
+               f"is in this refusal's `plan`.")
+        return Result(ok=False, human=why,
+                      data={"error": why, "stale": True, "version": current,
+                            "plan": dict(_shown(plan, lib), version=current)})
+
+    old = list(plan.get("steps") or [])
+    if submitted is not None:
+        if (submitted.get("id") is not None
+                and _num(_PLAN_ID, submitted.get("id")) != _num(_PLAN_ID, plan["id"])):
+            why = (f"the document is {_flat(str(submitted.get('id')))}, not {plan['id']} — "
+                   f"an edit rewrites the plan it names")
+            return Result(ok=False, human=why, data={"error": why})
+        steps, bad = _merged_steps(plan, submitted["steps"], lib)
+    else:
+        steps, bad = _shorthand_steps(plan, str(shorthand), lib)
+    if bad:
+        return bad
+    bad = _structure(old, steps)
+    if bad:
+        return bad
+    fields: list[str] = []
+    if submitted is not None:
+        fields, bad = _merged_fields(plan, submitted)
+        if bad:
+            return bad
+    plan["steps"] = steps
+    who = ctx.agent or "human"
+    _log(ctx, plan, who, "edit", args.reason, _edited(old, steps, fields))
+    _write(ctx.state_dir, doc, seal)
+    return _plan_result(dict(_shown(plan, lib), version=_version(plan)))
+
+
+def _version(plan: dict) -> str:
+    """The version a whole-document edit is checked against: a digest of the STORED plan.
+
+    `_stored`, so the changelog rows the event log holds (and `_hydrate` merges in on every
+    read) are not part of it — two reads of an unchanged plan agree whatever the log did.
+    """
+    return hashlib.sha256(_text(_stored(plan)).encode("utf-8")).hexdigest()[:12]
+
+
+def _submitted(path: str) -> tuple[Optional[dict], Optional[Result]]:
+    """The edited plan, off disk or stdin. The whole `--json` envelope is accepted as-is."""
+    def refuse(why: str):
+        return None, Result(ok=False, human=why, data={"error": why})
+    try:
+        text = (sys.stdin.read() if path == "-"
+                else Path(path).expanduser().read_text(encoding="utf-8"))
+        given = json.loads(text)
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        return refuse(f"could not read the edited plan from {_flat(path)} ({_flat(str(e))}) "
+                      f"— --file takes a JSON plan, as `show <plan> --json --full` emits it")
+    if isinstance(given, dict) and "steps" not in given and isinstance(given.get("data"), dict):
+        given = given["data"]           # the envelope `sb … --json` prints, pasted whole
+    if (not isinstance(given, dict) or not isinstance(given.get("steps"), list)
+            or any(not isinstance(s, dict) for s in given["steps"])):
+        return refuse("the edited plan is not a plan — a JSON object whose `steps` is a list "
+                      "of steps, as `show <plan> --json --full` emits it")
+    if _clipped(given):
+        # A compact read clips long text, and handing it back would overwrite the real text
+        # with the clipped copy. Refused, because nothing downstream could tell.
+        return refuse("the edited plan was read COMPACTED — sb clips long text in `--json` "
+                      "without `--full`, and writing that back would truncate it. Re-read with "
+                      "`show <plan> --json --full` and edit that.")
+    return given, None
+
+
+def _clipped(value: Any) -> bool:
+    """Does this document carry a string sb's compact `--json` clipped? See `compact_json`."""
+    if isinstance(value, str):
+        return len(value) == _CLIP_LIMIT and value.endswith("…")
+    if isinstance(value, list):
+        return any(_clipped(v) for v in value)
+    if isinstance(value, dict):
+        return any(_clipped(v) for v in value.values())
+    return False
+
+
+def _merged_steps(plan: dict, given: list, lib: dict) -> tuple[list, Optional[Result]]:
+    """The document's steps merged against the stored ones by id. See `edit`."""
+    def refuse(why: str, **extra):
+        return [], Result(ok=False, human=why, data={"error": why, **extra})
+    stored = {_num(_STEP_ID, s.get("id")): s for s in plan.get("steps") or ()}
+    out: list[dict] = []
+    seen: set = set()
+    for raw in given:
+        sid = raw.get("id")
+        if sid is None or not str(sid).strip():
+            step, bad = _new_step(plan, raw, lib, out[-1] if out else None)
+            if bad:
+                return [], bad
+            out.append(step)
+            continue
+        n = _num(_STEP_ID, sid)
+        was = stored.get(n) if n is not None else None
+        if was is None:
+            return refuse(f"the document names {_flat(str(sid))}, which is not a step in "
+                          f"{plan['id']} — a step keeps the id it was minted with, and a NEW "
+                          f"step carries no `id` at all (one is minted for it)",
+                          step=str(sid))
+        if n in seen:
+            return refuse(f"the document holds {_flat(str(sid))} twice — one id is one step",
+                          step=str(sid))
+        seen.add(n)
+        for key in _FIXED_STEP:
+            if key not in raw:
+                continue
+            now = str(raw.get(key) or "").strip() or None
+            then = _kind_of(was) if key == "kind" else _defkey(was)
+            if now != then:
+                return refuse(f"{was['id']} is a `{_flat(str(then))}` step and the document "
+                              f"makes it `{_flat(str(now))}` — a step's {key} is fixed when "
+                              f"it is made, because kind (not name) is what confers its "
+                              f"powers. Rename it freely; for a different kind, delete it and "
+                              f"add a new step with no id.", step=was["id"], field=key)
+        view = _resolve(was, lib) if _defkey(was) else was
+        step = dict(was)
+        for key, value in raw.items():
+            if key in _HELD_STEP or key in _VIEW_STEP or key in _FIXED_STEP:
+                continue
+            if _defkey(was) and key in _RESOLVED:
+                if value == view.get(key):
+                    continue            # the library's words, read back — not the step's
+                if key in ("name", "display"):
+                    return refuse(_linked_label(was), step=was["id"], field=key)
+            step[key] = value
+        bad = _step_text(step)
+        if bad:
+            return [], bad
+        out.append(step)
+    return out, None
+
+
+def _new_step(plan: dict, raw: dict, lib: dict,
+              prev: Optional[dict]) -> tuple[Optional[dict], Optional[Result]]:
+    """A step the document added — no id — minted with the kind it declares.
+
+    A `def` makes it a linked step exactly as `name-step` makes one: `name` and `display` stay
+    null and resolve from the library. Otherwise it owns its words and needs a display name,
+    as every minting verb requires. With no `deps` of its own it follows the step before it
+    in the document, the way `create` chains what it is given.
+    """
+    key = _defkey(raw)
+    if key is not None and key not in lib:
+        return None, _no_def(lib, key)
+    kind = str(raw.get("kind") or "").strip() or None
+    if kind is not None:
+        bad = _known_kind(kind, lib)
+        if bad:
+            return None, bad
+    display = str(raw.get("display") or "").strip() or None
+    name = str(raw.get("name") or "").strip() or display
+    if key is None and display is None:
+        return None, _no_display("a new step", "Give it a `display` in the document.")
+    step = _step(_mint_step(plan), None if key else name,
+                 display=None if key else display, key=key, kind=kind)
+    for k, v in raw.items():
+        if k in _HELD_STEP or k in _VIEW_STEP or k in _FIXED_STEP or k in _RESOLVED:
+            continue
+        step[k] = v
+    if "deps" not in raw and prev is not None:
+        step["deps"] = [prev["id"]]
+    bad = _step_text(step)
+    return (None, bad) if bad else (step, None)
+
+
+def _shorthand_steps(plan: dict, text: str, lib: dict) -> tuple[list, Optional[Result]]:
+    """`--steps "step-1,step-2=Relabel,Review:review"` — the whole step list, in order."""
+    def refuse(why: str):
+        return [], Result(ok=False, human=why, data={"error": why})
+    stored = {_num(_STEP_ID, s.get("id")): s for s in plan.get("steps") or ()}
+    out: list[dict] = []
+    seen: set = set()
+    for entry in (e.strip() for e in text.split(",")):
+        if not entry:
+            continue
+        head, eq, label = entry.partition("=")
+        n = _num(_STEP_ID, head.strip())
+        if n is not None:
+            was = stored.get(n)
+            if was is None:
+                return refuse(f"{_flat(head.strip())} is not a step in {plan['id']} — name "
+                              f"an existing step by its id, or add one as `Display Name:kind`")
+            if n in seen:
+                return refuse(f"{was['id']} is in --steps twice — one id is one step")
+            seen.add(n)
+            step = dict(was)
+            if eq:
+                if _defkey(was):
+                    return refuse(_linked_label(was))
+                if not label.strip():
+                    return refuse(f"`{_flat(entry)}` relabels {was['id']} to nothing — "
+                                  f"a step needs a display name")
+                step["display"] = label.strip()
+                bad = _step_text(step)
+                if bad:
+                    return [], bad
+            out.append(step)
+            continue
+        m = _KIND_SUFFIX.match(entry)
+        display, kind = (m.group("name").strip(), m.group("kind")) if m else (entry, None)
+        if not display:
+            return [], _no_display("a new step", f"`{_flat(entry)}` declares a kind and no "
+                                                 f"name — write `Display Name:kind`.")
+        if kind is not None:
+            bad = _known_kind(kind, lib)
+            if bad:
+                return [], bad
+        step = _step(_mint_step(plan), display, display=display, kind=kind)
+        if out:
+            step["deps"] = [out[-1]["id"]]
+        bad = _step_text(step)
+        if bad:
+            return [], bad
+        out.append(step)
+    return out, None
+
+
+def _linked_label(step: dict) -> str:
+    """Why a library step's label is not edited here: it is resolved, never stored."""
+    return (f"{step['id']} is a library step ({_flat(str(_defkey(step)))}) and draws its name "
+            f"and board label from that definition on every read, so a label written onto "
+            f"it would never show. Edit the definition, or replace the step with one that "
+            f"owns its words.")
+
+
+def _step_text(step: dict) -> Optional[Result]:
+    """The one-line text fields of an edited step through `_cap`, as every verb's text goes."""
+    return _cap(*(v for v in (step.get("name"), step.get("display")) if isinstance(v, str)))
+
+
+def _known_kind(kind: str, lib: dict) -> Optional[Result]:
+    """A declared kind is a built-in or one this repo's library defines (`_kind_for`)."""
+    repo = sorted({_kind_for(k) for k in lib} - set(_STEP_KINDS))
+    if kind in _STEP_KINDS or kind in repo:
+        return None
+    why = (f"no step kind '{_flat(kind)}' — a kind is a built-in ({', '.join(_STEP_KINDS)})"
+           + (f" or one this repo's step library defines ({', '.join(_flat(k) for k in repo)})"
+              if repo else "")
+           + ". A kind confers powers, so an unrecognised one is refused rather than "
+             "becoming a label that claims powers it does not have.")
+    return Result(ok=False, human=why, data={"error": why, "kind": kind})
+
+
+def _structure(old: list, new: list) -> Optional[Result]:
+    """The shapes a whole-document edit may not produce, refused with the reason.
+
+    Stricter than `_check`, which refuses only a file the code cannot read: these are plans
+    that load fine and are wrong. ORDER is the document's step order. A rule about MOVING a
+    step compares against where the stored plan had it, so a plan whose steps were already
+    finished out of order can still be edited — it just cannot be made more so.
+    """
+    def refuse(why: str):
+        return Result(ok=False, human=why, data={"error": why, "refused": "structure"})
+
+    if not new:
+        return refuse("an edit cannot leave a plan with no steps — a plan always has at least "
+                      "one. To drop the work, skip its steps with the reason.")
+    num = lambda s: _num(_STEP_ID, s.get("id"))          # noqa: E731
+    done = lambda s: str(s.get("progress") or "") == DONE  # noqa: E731
+    new_nums = [num(s) for s in new]
+    kept = set(new_nums) & {num(s) for s in old}
+    old_kept = [num(s) for s in old if num(s) in kept]
+    new_kept = [n for n in new_nums if n in kept]
+    for s in old:
+        kind = _kind_of(s)
+        if not done(s) or kind not in _KIND_SYSTEM:
+            continue
+        n = num(s)
+        if n not in kept:
+            return refuse(f"{s['id']} is a complete `{kind}` step and cannot be deleted — "
+                          f"Switchboard completed it off a real fact, and the plan has to "
+                          f"keep saying so")
+        if set(old_kept[:old_kept.index(n)]) != set(new_kept[:new_kept.index(n)]):
+            return refuse(f"{s['id']} is a complete `{kind}` step and cannot be reordered — "
+                          f"what came before it is what it was completed after")
+    was_at = {num(s): i for i, s in enumerate(old)}
+    for i, s in enumerate(new):
+        if done(s):
+            continue
+        for later in new[i + 1:]:
+            if not done(later):
+                continue
+            if num(s) in was_at and was_at[num(s)] < was_at[num(later)]:
+                continue                # already ahead of it before this edit
+            return refuse(f"{s['id']} is not complete and this edit puts it ahead of "
+                          f"{later['id']}, which is — finished work stays ahead of unfinished "
+                          f"work. Put {s['id']} after it.")
+    # The open_pr/merge rules judge what the EDIT does to those steps. A plan can already sit
+    # with a PR step and no merge yet — `name-step p-1 create-pr` alone makes one — and an edit
+    # that leaves those steps exactly as they were (same ids, same order) is not the edit that
+    # made it so, and is not refused for it.
+    system = lambda steps: [(num(s), _kind_of(s)) for s in steps  # noqa: E731
+                            if _kind_of(s) in _KIND_SYSTEM]
+    if system(new) == system(old):
+        return None
+    kinds = [_kind_of(s) for s in new]
+    for kind in _KIND_SYSTEM:
+        holders = [s["id"] for s in new if _kind_of(s) == kind]
+        if len(holders) > 1:
+            return refuse(f"a plan has at most one `{kind}` step, and this edit leaves "
+                          f"{len(holders)} ({', '.join(holders)})")
+    pr, merge = "open_pr" in kinds, "merge" in kinds
+    if pr and not merge:
+        return refuse("an `open_pr` step with no `merge` step — a PR and its landing appear "
+                      "together or not at all. Add a `Merge:merge` step after it, or drop it.")
+    if merge and not pr:
+        return refuse("a `merge` step with no `open_pr` step has nothing to merge — they "
+                      "appear together or not at all. Add an `Open PR:open_pr` step before it, "
+                      "or drop it.")
+    if pr and kinds.index("open_pr") > kinds.index("merge"):
+        return refuse("the `merge` step comes before the `open_pr` step — a change lands after "
+                      "its PR opens. Put the merge after the PR.")
+    return None
+
+
+def _merged_fields(plan: dict, given: dict) -> tuple[list[str], Optional[Result]]:
+    """The document's plan-level fields onto the plan. What it omits is kept. See `edit`."""
+    for key in ("title", "display"):
+        if key in given:
+            if key == "display" and not str(given.get(key) or "").strip():
+                return [], _no_display("a plan", "An edit may change the board name, not "
+                                                 "remove it.")
+            bad = _cap(given[key] if isinstance(given[key], str) else None)
+            if bad:
+                return [], bad
+    changed = []
+    for key, value in given.items():
+        if key in _HELD_PLAN or key in _VIEW_PLAN:
+            continue
+        if key == "change":
+            stored = plan.get("change") if isinstance(plan.get("change"), dict) else {}
+            if value == stored:
+                continue
+            if not isinstance(value, dict):
+                why = ("the document's `change` is not an object — the change record merges "
+                       "key by key, so hand back the keys you mean to change")
+                return [], Result(ok=False, human=why, data={"error": why, "field": "change"})
+            forged = [k for k in _HELD_CHANGE if k in value and value[k] != stored.get(k)]
+            if forged:
+                why = (f"the document changes change.{', change.'.join(forged)} — the change "
+                       f"record's evidence and identity ({', '.join(_HELD_CHANGE)}) are "
+                       f"written by the steps that establish them, never by an edit. Hand "
+                       f"them back as you read them; edit the authored keys (request, "
+                       f"contract, human_checks, …) freely.")
+                return [], Result(ok=False, human=why,
+                                  data={"error": why, "field": "change", "keys": forged})
+            merged = dict(stored)
+            merged.update({k: v for k, v in value.items() if k not in _HELD_CHANGE})
+            if merged != stored:
+                plan["change"] = merged
+                changed.append("change")
+            continue
+        if key not in plan or plan[key] != value:
+            plan[key] = value
+            changed.append(key)
+    return changed, None
+
+
+def _edited(old: list, new: list, fields: list[str]) -> str:
+    """What an edit did, for the changelog: steps added, removed, changed, and plan fields."""
+    before = {_num(_STEP_ID, s.get("id")): s for s in old}
+    after = {_num(_STEP_ID, s.get("id")) for s in new}
+    parts = []
+    if (added := [s["id"] for s in new if _num(_STEP_ID, s.get("id")) not in before]):
+        parts.append(f"added {', '.join(added)}")
+    if (removed := [s["id"] for s in old if _num(_STEP_ID, s.get("id")) not in after]):
+        parts.append(f"removed {', '.join(removed)}")
+    changed = [s["id"] for s in new
+               if (was := before.get(_num(_STEP_ID, s.get("id")))) is not None and s != was]
+    if changed:
+        parts.append(f"changed {', '.join(changed)}")
+    kept_old = [_num(_STEP_ID, s.get("id")) for s in old if _num(_STEP_ID, s.get("id")) in after]
+    kept_new = [_num(_STEP_ID, s.get("id")) for s in new if _num(_STEP_ID, s.get("id")) in before]
+    if kept_old != kept_new:
+        parts.append("reordered")
+    if fields:
+        parts.append(f"plan {', '.join(_flat(f) for f in fields)}")
+    return "; ".join(parts) or "no change"
 
 
 def template(ctx, args) -> Result:
@@ -7167,7 +7677,7 @@ def _step_lines(steps: list) -> list[str]:
 #
 # Kept out of markdown by dropping these fields from the copy being dumped (`_dumped`),
 # one call above it. The underlying record and `--json` remain untouched.
-_MACHINERY = frozenset({"anchor", "pr_comment_nonce", "kind"})
+_MACHINERY = frozenset({"anchor", "pr_comment_nonce", "kind", "version"})
 
 
 def _dumped(shown: dict) -> dict:

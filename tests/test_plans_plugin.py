@@ -1993,6 +1993,138 @@ class StepsTest(PlansSandbox):
         self.assertIn("merged", json.loads(out)["data"]["error"])
         self.assertEqual(self.step("step-1")["progress"], "done")
 
+    # -- the whole-document edit (#317) ------------------------------------------
+
+    def read_full(self, plan: str = "p-1") -> dict:
+        """The document an edit starts from: `show --json --full`, as an agent reads it."""
+        return self.data("plugin", "plans", "show", plan, "--full")
+
+    def edit_with(self, plan: str, doc: dict, version: str) -> tuple[int, dict]:
+        f = Path(self.tmp.name) / "edited.json"
+        f.write_text(json.dumps(doc))
+        code, out, _ = self.sb("plugin", "plans", "edit", plan, "--version", version,
+                               "--file", str(f), "--json")
+        return code, json.loads(out)["data"]
+
+    def test_a_stale_whole_document_edit_is_refused_and_a_fresh_one_applies(self):
+        """Optimistic concurrency: the edit names the version it read. A plan that moved
+        since — here, a tick landing between the read and the write — refuses the edit with
+        the current document and a re-read-and-retry message, writing nothing; the same
+        edit against the fresh version applies. Linked library steps round-trip as links."""
+        self.plan("write it", "test it")
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr", "merge")
+        doc = self.read_full()
+        doc["display"] = "board: renamed job"
+        doc["steps"][1]["display"] = "verify"
+        self.ok("plugin", "plans", "tick", "step-1", "--reason", "landed meanwhile")
+
+        code, data = self.edit_with("p-1", doc, doc["version"])
+        self.assertEqual(code, 1)
+        self.assertTrue(data["stale"])
+        self.assertIn("re-read", data["error"].lower())
+        self.assertEqual(data["plan"]["version"], data["version"])
+        self.assertEqual(data["plan"]["steps"][0]["progress"], "done")
+        self.assertNotEqual(self._doc()["plans"][0]["display"], "board: renamed job")
+
+        fresh = self.read_full()
+        fresh["display"] = "board: renamed job"
+        fresh["steps"][1]["display"] = "verify"
+        code, data = self.edit_with("p-1", fresh, fresh["version"])
+        self.assertEqual(code, 0, data)
+        stored = self._doc()["plans"][0]
+        self.assertEqual(stored["display"], "board: renamed job")
+        self.assertEqual(stored["steps"][1]["display"], "verify")
+        self.assertEqual(data["version"], self.read_full()["version"])
+        linked = [s for s in stored["steps"] if s.get("def")]
+        self.assertTrue(linked)
+        self.assertTrue(all(s["name"] is None and s["display"] is None for s in linked))
+        self.assertEqual(self.actions()[-1], "edit")
+
+    def test_a_rename_through_edit_keeps_the_steps_id_kind_and_completion(self):
+        """#314's immutability seen through the edit path. The step is matched by its id, so
+        renaming it keeps the id; its completion is system-held, so a document still saying
+        `open` cannot un-tick it; and a changed kind is refused, never applied."""
+        self.plan("write it")
+        self.ok("plugin", "plans", "tick", "step-1", "--reason", "done")
+        doc = self.read_full()
+        doc["steps"][0].update(display="rewritten", name="rewrite it", progress="open")
+        code, data = self.edit_with("p-1", doc, doc["version"])
+        self.assertEqual(code, 0, data)
+        after = self.step("step-1")
+        self.assertEqual((after["id"], after["display"], after["kind"], after["progress"]),
+                         ("step-1", "rewritten", "implement", "done"))
+
+        doc = self.read_full()
+        doc["steps"][0]["kind"] = "merge"
+        code, data = self.edit_with("p-1", doc, doc["version"])
+        self.assertEqual(code, 1)
+        self.assertIn("kind", data["error"])
+        self.assertEqual(self.step("step-1")["kind"], "implement")
+
+    def test_edit_cannot_forge_the_change_records_evidence(self):
+        """The change record's evidence and identity — approval, verification, review, PR,
+        landing — are what `comment` and `merge` trust, so the sanctioned edit refuses to set
+        them. Authored keys like `human_checks` still edit, merged key by key."""
+        self.plan("write it")
+        doc = self.read_full()
+        doc["change"] = dict(doc["change"], approval={"plan_revision": "x", "by": "me"},
+                             verification={"commit": "fake", "result": "pass"})
+        code, data = self.edit_with("p-1", doc, doc["version"])
+        self.assertEqual(code, 1)
+        self.assertEqual(sorted(data["keys"]), ["approval", "verification"])
+        self.assertIsNone(self._doc()["plans"][0]["change"]["approval"])
+
+        doc = self.read_full()
+        doc["change"] = {"human_checks": ["click through the board"]}
+        code, data = self.edit_with("p-1", doc, doc["version"])
+        self.assertEqual(code, 0, data)
+        change = self._doc()["plans"][0]["change"]
+        self.assertEqual(change["human_checks"], ["click through the board"])
+        self.assertEqual(change["path"], "shaped")          # omitted keys are kept
+
+    def test_structural_validation_refuses_the_shapes_an_edit_may_not_make(self):
+        """Refused with a reason, before anything is written: deleting a complete system
+        step, a second `merge`, a `merge` ahead of its `open_pr`, and a plan with no steps.
+        `--steps` is the shorthand, with `Display Name:kind` declaring a new step's kind."""
+        self.plan("write it")
+        self.data("plugin", "plans", "name-step", "p-1", "create-pr", "merge")
+        merge = next(s for s in self.steps() if s["kind"] == "merge")
+        self.edit_step(merge["id"], progress="done")
+        ids = ",".join(s["id"] for s in self.steps())
+
+        def refused(steps: str, expected: str, plan: str = "p-1") -> None:
+            version = self.read_full(plan)["version"]
+            code, out, _ = self.sb("plugin", "plans", "edit", plan, "--version", version,
+                                   "--steps", steps, "--json")
+            self.assertEqual(code, 1, out)
+            self.assertIn(expected, json.loads(out)["data"]["error"])
+
+        with self.subTest("delete a complete system step"):
+            refused(ids.replace(f",{merge['id']}", ""), "cannot be deleted")
+        with self.subTest("a second merge"):
+            refused(f"{ids},Ship it:merge", "at most one `merge`")
+        with self.subTest("zero steps"):
+            refused("", "no steps")
+        with self.subTest("merge ahead of open_pr"):
+            self.data(*_create("other job", "do it"))
+            refused("Implement,Merge:merge,Open PR:open_pr", "comes before", plan="p-2")
+        self.assertNotIn("edit", self.actions("p-1") + self.actions("p-2"))
+
+        # The pairing rules judge the edit, not the plan: `name-step create-pr` alone leaves a
+        # PR step with no merge, and an edit that leaves that step alone still applies.
+        self.data(*_create("third job", "do it"))
+        self.data("plugin", "plans", "name-step", "p-3", "create-pr")
+        version = self.read_full("p-3")["version"]
+        kept = ",".join(s["id"] for s in self.steps("p-3")).replace("step-1", "step-1=done it", 1)
+        self.ok("plugin", "plans", "edit", "p-3", "--version", version, "--steps", kept)
+        self.assertEqual(self.steps("p-3")[0]["display"], "done it")
+
+        version = self.read_full("p-2")["version"]
+        self.ok("plugin", "plans", "edit", "p-2", "--version", version,
+                "--steps", "step-1,Open PR:open_pr,Merge:merge")
+        self.assertEqual([s["kind"] for s in self.steps("p-2")],
+                         ["implement", "open_pr", "merge"])
+
 
 class CatalogueTest(PlansSandbox):
     """The library, the templates and the obligation: links, copies, and what comes with what.
@@ -2174,8 +2306,13 @@ class CatalogueTest(PlansSandbox):
         stored = self.steps()
         self.assertEqual([s["def"] for s in stored], ["merge-human-review", None])
         self.assertEqual(stored[1]["name"], "review it twice, it is a migration")
-        # No verb takes a definition and rewrites it for one plan; the library is files.
-        self.assertNotIn("edit", _plans_commands())
+        # No verb takes a definition and rewrites it for one plan; the library is files. The
+        # whole-document `edit` edits a PLAN, and refuses to relabel a linked step for it.
+        version = self.data("plugin", "plans", "show", "p-1", "--full")["version"]
+        code, out, _ = self.sb("plugin", "plans", "edit", "p-1", "--version", version,
+                               "--steps", "step-1=my own label,step-2", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("library step", json.loads(out)["data"]["error"])
 
     # -- composition -----------------------------------------------------------
 
