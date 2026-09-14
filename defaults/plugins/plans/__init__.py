@@ -451,11 +451,13 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
 import textwrap
 import time
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -527,6 +529,11 @@ LEGACY_FORMAT = 1
 # `progress: waiting on Andrew` into the file by some later verb is not violating anything,
 # which is why nothing below compares against this list to decide whether a move is allowed.
 OPEN, DONE, SKIPPED = "open", "done", "skipped"
+
+# What the `Open PR` bundle writes when one of its sub-operations fails (v2 §4): the step is
+# not done, and its `failure` says which sub-operation to fix before `step retry`. Written by
+# `open-pr` and `step retry` only, and only onto the `open_pr`-kind step they run.
+FAILED = "failed"
 
 # What `comment` and `merge` write when they DERIVE a skeleton step's completion from a fact
 # they have already refused to proceed without, rather than being told it. Its own action and
@@ -791,6 +798,33 @@ def register(reg):
              "numeric id",
         args=[reg.arg("plan", help="the plan or change record to post, e.g. p-1"),
               reg.arg("--pr", help="the pull request number, required")])
+    reg.command(
+        # THE `Open PR` BUNDLE (v2 §4, #318): what brings the push, `gh` and the local checks
+        # into the tooling, so "checks green, PR open, summary posted" is a fact it establishes
+        # rather than a claim. `comment` above stays the hand-run path, unchanged.
+        "open-pr", open_pr, audience="both",
+        help="run the Open PR bundle for a plan or change record — the repo's local required "
+             "checks (`[plans] required_checks`), push, open or reuse the PR, post the summary "
+             "comment — and complete its open_pr step only if all of it succeeds",
+        args=[reg.arg("plan", help="the plan or change record to open the PR for, e.g. p-1"),
+              reg.arg("--base", help="the branch the PR merges into; the repo's default "
+                                     "branch when omitted"),
+              reg.arg("--title", help="the PR title when one is opened; the plan's title "
+                                      "when omitted"),
+              reg.arg("--body", help="a file holding the PR description when one is opened; "
+                                     "a short one drawn from the change record when omitted"),
+              reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "step", step_verb, audience="both",
+        help="`step retry <step>` — re-run a failed Open PR bundle, idempotently: the checks "
+             "and the comment run again, and the PR it already opened is reused",
+        args=[reg.arg("action", choices=("retry",), help="what to do to the step"),
+              reg.arg("step", help="the failed open_pr step (step-3, p-2/step-3) or its "
+                                   "board name"),
+              reg.arg("--base", help="as for `open-pr`, if the retry has to open the PR"),
+              reg.arg("--title", help="as for `open-pr`, if the retry has to open the PR"),
+              reg.arg("--body", help="as for `open-pr`, if the retry has to open the PR"),
+              reg.arg("--reason", help="why, for the changelog")])
     reg.command(
         # The landing verb, and the reason it is a verb: the approved-head-versus-live-head
         # comparison is the one check the design says must fail closed, and prose asking an
@@ -2446,8 +2480,13 @@ def comment(ctx, args) -> Result:
     # did not run on: `merge`'s own landed refresh above, and a legacy plan with no `change`,
     # which the gate waves through WITHOUT READING ANYTHING. Deriving there would mark
     # `implementation` done off no fact at all, which is the one thing this must never do.
+    #
+    # NOR WHEN THE `Open PR` BUNDLE IS THE CALLER. The comment is only its last sub-operation,
+    # and the bundle completes its steps itself once the whole of it has succeeded (`_bundle`).
+    # `bundled` is internal like `landed`: no parser declares it.
     derived: list[str] = []
-    if action == "created" and opening and isinstance(plan.get("change"), dict):
+    if (action == "created" and opening and isinstance(plan.get("change"), dict)
+            and not getattr(args, "bundled", False)):
         derived = _derive(ctx, plan["id"], ("implementation", "review", "create-pr"),
                           f"PR {pr} opened, which this refused to do until the record carried "
                           f"the verification, the review and the human checklist")
@@ -2902,6 +2941,430 @@ def _github(ctx, argv: list[str], *, body: Optional[str] = None,
         why = f"gh api failed: {_flat(detail)}"
         return got, Result(ok=False, human=why, data={"error": why})
     return got, None
+
+
+# -- the Open PR bundle ------------------------------------------------------------
+#
+# `open-pr` and `step retry` (v2 §4, #318). `Open PR` is a BUNDLED step: it completes when the
+# whole operation succeeds, not merely because a PR exists. The operation is the repo's local
+# required checks, the push, the PR, and the summary comment, run in that order by the tooling
+# so the agent never hand-runs `gh`.
+#
+# TWO WAYS NOT TO FINISH, and they are different. A REFUSAL happens before anything is
+# attempted (no change record, the PR-open evidence not recorded, no checks configured, someone
+# else owns the step, the wrong branch, a dirty tree). The step is left exactly as it was and
+# the caller fixes the precondition. A FAILURE is a sub-operation that was attempted and did
+# not succeed. The step goes `failed`, `failure.op` names which sub-operation, and `step retry`
+# re-runs the bundle from the top. That retry is idempotent because the PR is found, never
+# assumed: the live one on the record, else the open one for the branch, and only then a new one.
+#
+# REMOTE CI IS NOT PART OF IT (#318 §2). The checks here are the repo's LOCAL commands; the
+# remote's own checks are GitHub's gate at merge, and nothing here waits on them.
+#
+# `comment` is untouched and stays the hand-run path, including its derive-on-first-post. Once
+# this bundle is what agents rely on, that derive is the follow-up to remove.
+
+# How much of a failing check's output comes back to the caller. The step itself stores
+# one line; the tail is for the terminal of whoever has to fix it.
+_CHECK_TAIL = 20
+
+
+def open_pr(ctx, args) -> Result:
+    """Run the Open PR bundle for one plan or change record, and complete its `open_pr` step
+    only if every sub-operation succeeded. See the section note above for refusal vs failure.
+
+    Run it again whenever the PR should be brought up to date, such as after a reopen and a
+    fix. It re-runs the checks against the new head, pushes, reuses the PR and refreshes the
+    comment, so it can put a done step back to `failed`, exactly as the design says.
+    """
+    return _bundle(ctx, args.plan, args, verb="open-pr")
+
+
+def step_verb(ctx, args) -> Result:
+    """`step retry <step>`: re-run a FAILED Open PR bundle.
+
+    Only an `open_pr`-kind step in `failed` is retried. Nothing else in the plugin writes
+    `failed`, and the merge side has no bundle to retry (#306 comment 5 cut that machinery).
+    The retry is the same operation as `open-pr` and so equally idempotent: the checks and
+    the comment run again, and the PR the failed run opened is reused, never a second one.
+    """
+    bad = _cap(args.reason)
+    if bad:
+        return bad
+    doc, _ = _read_logged(ctx)
+    given = args.step
+    if not _looks_step_id(given):       # a display name — resolve it to an id first
+        lib_all, bad = _lib(doc["plans"])
+        if bad:
+            return bad
+        given, bad = _as_step_id(doc, given, lib_all)
+        if bad:
+            return bad
+    plan, step = _locate(doc, given)
+    if step is None:
+        return _no_step(doc, given)
+    if _kind_of(step) != "open_pr":
+        return _denied(step, f"{step['id']} is a `{_kind_of(step)}` step — `step retry` re-runs "
+                             f"a failed Open PR bundle, and only an `open_pr` step has one",
+                       kind=_kind_of(step))
+    if str(step.get("progress") or "") != FAILED:
+        return _denied(step, f"{step['id']} is {step.get('progress') or OPEN}, not {FAILED} — "
+                             f"there is nothing to retry; `sb plugin plans open-pr "
+                             f"{plan['id']}` runs the bundle", progress=step.get("progress"))
+    return _bundle(ctx, plan["id"], args, verb="step retry")
+
+
+def _bundle(ctx, given: str, args, *, verb: str) -> Result:
+    """The bundle itself: refusals first, then checks → push → PR → comment → completion."""
+    reason = getattr(args, "reason", None)
+    bad = _cap(reason, getattr(args, "title", None), getattr(args, "base", None))
+    if bad:
+        return bad
+    body = None
+    if getattr(args, "body", None):
+        try:
+            body = Path(args.body).read_text()
+        except OSError as e:
+            why = f"cannot read the PR description file {args.body}: {e}"
+            return Result(ok=False, human=why, data={"error": why})
+    checks, bad = _required_checks(ctx)
+    if bad:
+        return bad
+
+    who = ctx.agent or "human"
+    here = _here(ctx)
+    with _owning(ctx.state_dir):
+        doc, seal = _read_logged(ctx)
+        plan = _find(doc, given)
+        if plan is None:
+            return _missing(doc, given)
+        step, head, bad = _bundle_ready(ctx, plan, who, here)
+        if bad:
+            return bad
+        plan_id, sid, branch = plan["id"], step["id"], str(plan["branch"])
+        # An unowned step is taken by whoever runs its bundle, so the step has an accountable
+        # owner from here on and a failure is somebody's. Logged as the take it is.
+        if _owner(step) is None:
+            step["owner"] = who
+            _log(ctx, plan, who, "take", reason,
+                 f"{sid} owner unowned → {who} (taken by `{verb}`)", step=sid)
+            _write(ctx.state_dir, doc, seal)
+        snapshot = json.loads(json.dumps(_stored(plan)))
+
+    def failed(op: str, detail: str, **more) -> Result:
+        return _bundle_failed(ctx, plan_id, sid, who, reason, verb, op, detail, head=head,
+                              **more)
+
+    for cmd in checks:
+        broke = _run_check(here, cmd)
+        if broke:
+            return failed("checks", broke[0], output=broke[1])
+
+    pushed = _git(here, "push", "-u", "origin", branch,
+                  env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    if pushed is None or pushed.returncode:
+        detail = ("git could not be run" if pushed is None else
+                  (pushed.stderr or pushed.stdout or f"exit {pushed.returncode}").strip())
+        return failed("push", f"`git push -u origin {branch}` failed: {detail}")
+
+    pr, how, bad = _bundle_pr(ctx, snapshot, branch, args, body)
+    if bad:
+        return failed("pr", bad.human)
+    _bundle_record_pr(ctx, plan_id, pr, head)
+
+    posted = comment(ctx, SimpleNamespace(plan=plan_id, pr=str(pr), bundled=True))
+    if not posted.ok:
+        return failed("comment", posted.human, pr=pr)
+
+    # THE WHOLE BUNDLE SUCCEEDED, which is the fact `open_pr` waits on. The implementation and
+    # the review are derived as `comment` derives them on the hand-run path: the evidence gate
+    # above refused to go on until the record carried both.
+    derived = _derive(ctx, plan_id, ("implementation", "review"),
+                      f"PR {pr} opened by `{verb}`, which refused until the record carried the "
+                      f"verification, the review and the human checklist")
+    doc, seal = _read_logged(ctx)
+    plan = _find(doc, plan_id)
+    step = _in_plan(plan, sid) if plan is not None else None
+    if step is None:
+        why = (f"{plan_id}: the Open PR bundle succeeded (PR {pr} {how}, comment posted), but "
+               f"{sid} is no longer in the plan to complete")
+        return Result(ok=False, human=why, data={"error": why, "plan": plan_id, "pr": pr})
+    lib, bad = _lib([plan])
+    if bad:
+        return bad
+    moved = _progress(step, DONE, None)
+    step.pop("failure", None)
+    _log(ctx, plan, who, DERIVED, reason,
+         f"{moved} — `{verb}`: {len(checks)} local check(s) passed on {head[:12]}, pushed, "
+         f"PR {pr} {how}, summary comment {posted.data.get('action')}", step=sid)
+    _write(ctx.state_dir, doc, seal)
+
+    done = _changed(plan, step, lib, _next(plan, step))
+    done.human = (f"Open PR bundle succeeded: {len(checks)} local check(s) passed on "
+                  f"{head[:12]}, PR {pr} {how}, summary comment {posted.data.get('action')} — "
+                  f"{sid} done\n" + (f"  auto-ticked {', '.join(derived)}\n" if derived else "")
+                  + "\n" + done.human)
+    done.data.update({"pr": pr, "pr_action": how, "head": head, "checks": checks,
+                      "comment": posted.data.get("action"), "auto_ticked": derived})
+    return done
+
+
+def _bundle_ready(ctx, plan: dict, who: str,
+                  here: Path) -> tuple[Optional[dict], Optional[str], Optional[Result]]:
+    """The refusals: the `open_pr` step and the commit to push, or why nothing is attempted.
+
+    The PR-open evidence gate comes first, the same gate `comment` runs on a first post. A
+    change whose verification, review and human checklist are not on the record has nothing
+    to open a PR with, so it is refused and never marked `failed`.
+    """
+    pid = plan["id"]
+
+    def no(why: str, **data) -> tuple[None, None, Result]:
+        text = f"{pid}: refusing to run the Open PR bundle — {why}"
+        return None, None, Result(ok=False, human=text,
+                                  data=dict({"error": text, "plan": pid}, **data))
+
+    if not isinstance(plan.get("change"), dict):
+        return no("it has no change record, so there is nowhere to read the PR-open evidence "
+                  "from or to record the PR on")
+    steps = [s for s in (plan.get("steps") or ())
+             if isinstance(s, dict) and _kind_of(s) == "open_pr"]
+    if not steps:
+        return no("it has no `open_pr` step for the bundle to complete")
+    if len(steps) > 1:
+        return no(f"it has {len(steps)} `open_pr` steps, and a plan has at most one",
+                  steps=[s.get("id") for s in steps])
+    bad = _preconditions_before_pr(plan)
+    if bad:
+        path = _path(ctx, plan)
+        if path:
+            bad.human += f"\n\nthe plan is {path} — edit it there, then `sb plugin plans validate`"
+        return None, None, bad
+    step = steps[0]
+    owner = _owner(step)
+    if owner and owner != who:
+        return None, None, _denied(
+            step, f"{step['id']} is owned by {owner}, not you — only its owner runs the Open PR "
+                  f"bundle; `take {pid}/{step['id']} --steal` takes it, which tells them",
+            owner=owner)
+    branch = str(plan.get("branch") or "").strip()
+    if not branch:
+        return no("it has no primary branch recorded, and the PR's head must be that branch")
+    current, _ = _branch(here, clock=_Budget())
+    if current != branch:
+        return no(f"this checkout is on {current or 'no branch'}, but the plan's primary branch "
+                  f"is {branch} — the PR's head must be the plan's branch",
+                  branch=branch, checked_out=current)
+    status = _git(here, "status", "--porcelain", "--untracked-files=no")
+    if status is None or status.returncode:
+        return no("git could not say whether the tracked tree is clean")
+    if status.stdout.strip():
+        return no("the tracked tree has uncommitted changes, and the checks must run on the "
+                  "exact commit that is pushed — commit or drop them first")
+    got = _git(here, "rev-parse", "HEAD")
+    head = _sha(got.stdout) if got is not None and got.returncode == 0 else None
+    if head is None:
+        return no("git could not name the commit at HEAD")
+    return step, head, None
+
+
+def _required_checks(ctx) -> tuple[list[str], Optional[Result]]:
+    """The repo's `[plans] required_checks`, or a refusal naming the setting to write.
+
+    Empty is refused rather than read as nothing to run. The shipped default is empty because
+    switchboard cannot know a product repo's test command (see `defaults/settings.toml`), and
+    "checks green" on zero checks is the claim this bundle exists to stop.
+    """
+    example = '[plans]\n  required_checks = ["python -m pytest tests"]'
+    try:
+        got = config_mod.setting("plans.required_checks", repo=_here(ctx))
+    except config_mod.ConfigError as e:
+        why = f"cannot read the Open PR bundle's local required checks: {e}"
+        return [], Result(ok=False, human=why, data={"error": why})
+    if not isinstance(got, list) or not all(isinstance(c, str) for c in got):
+        why = (f"`[plans] required_checks` must be a list of command strings, e.g.\n\n"
+               f"  {example}")
+        return [], Result(ok=False, human=why, data={"error": why})
+    checks = [c.strip() for c in got if c.strip()]
+    if not checks:
+        why = ("refusing to run the Open PR bundle — no local required checks are configured, "
+               "and the bundle never reports checks green on zero checks. Set this repo's own "
+               f"`plans.required_checks` in .switchboard/settings.toml, e.g.\n\n  {example}\n\n"
+               "adding lint, build or type checks as further entries.")
+        return [], Result(ok=False, human=why,
+                          data={"error": why, "missing": "plans.required_checks"})
+    for c in checks:
+        try:
+            shlex.split(c)
+        except ValueError as e:
+            why = f"`[plans] required_checks` entry {c!r} is not a command line: {e}"
+            return [], Result(ok=False, human=why, data={"error": why})
+    return checks, None
+
+
+def _run_check(here: Path, cmd: str) -> Optional[tuple[str, str]]:
+    """One required check in the checkout, with no shell. None when it passed; otherwise the
+    one-line reason and the tail of its output."""
+    try:
+        got = subprocess.run(shlex.split(cmd), cwd=str(here), stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"`{cmd}` could not be run: {e}", ""
+    if got.returncode == 0:
+        return None
+    tail = ((got.stdout or "") + (got.stderr or "")).splitlines()[-_CHECK_TAIL:]
+    last = next((ln.strip() for ln in reversed(tail) if ln.strip()), "")
+    return (f"`{cmd}` exited {got.returncode}: {last}",
+            "\n".join(_flat(ln) for ln in tail))
+
+
+def _git(here: Path, *argv: str, env: Optional[dict] = None):
+    """One git command in the checkout, or None when git could not be run at all."""
+    try:
+        return subprocess.run(["git", "-C", str(here), *argv], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _bundle_pr(ctx, plan: dict, branch: str, args,
+               body: Optional[str]) -> tuple[int, str, Optional[Result]]:
+    """The one primary PR for this branch, as `(number, "reused" | "opened", refusal)`.
+
+    The live PR on the record first. A closed or merged one there is not the live PR the
+    at-most-one invariant counts, so a fresh one may replace it. Then an open PR whose head is
+    this branch, which catches a PR that opened in a run that died before recording it. Only
+    when neither exists is one opened.
+    """
+    def bad(why: str) -> tuple[int, str, Result]:
+        return 0, "", Result(ok=False, human=why, data={"error": why})
+
+    change = plan.get("change") if isinstance(plan.get("change"), dict) else {}
+    recorded = (_pr_int(change["pr"].get("number")) if isinstance(change.get("pr"), dict)
+                else None)
+    if recorded is not None:
+        pull, refused = _pull(ctx, recorded)
+        if refused:
+            return 0, "", refused
+        if str(pull.get("state") or "") == "open" and not pull.get("merged"):
+            ref = pull["head"].get("ref") if isinstance(pull.get("head"), dict) else None
+            if ref != branch:
+                return bad(f"PR {recorded} on the record has {_flat(ref or 'no branch')} as its "
+                           f"head, not the plan's {branch} — correct `change.pr` first")
+            return recorded, "reused", None
+
+    listed, refused = _github(ctx, [f"repos/{{owner}}/{{repo}}/pulls?state=open&per_page=100"
+                                    f"&head={{owner}}:{urllib.parse.quote(branch, safe='/')}"])
+    if refused:
+        return 0, "", refused
+    try:
+        rows = json.loads(listed.stdout or "[]")
+    except json.JSONDecodeError as e:
+        return bad(f"GitHub returned an unreadable pull request listing: {e}")
+    rows = [r for r in (rows if isinstance(rows, list) else ())
+            if isinstance(r, dict) and isinstance(r.get("head"), dict)
+            and r["head"].get("ref") == branch]
+    if len(rows) > 1:
+        return bad(f"refusing to guess: {len(rows)} open PRs have {branch} as their head "
+                   f"({', '.join(str(r.get('number')) for r in rows)})")
+    if rows:
+        found = _pr_int(rows[0].get("number"))
+        if found is None:
+            return bad(f"GitHub listed an open PR for {branch} with no number")
+        return found, "reused", None
+
+    base = str(getattr(args, "base", None) or "").strip()
+    if not base:
+        repo, refused = _github(ctx, ["repos/{owner}/{repo}"])
+        if refused:
+            return 0, "", refused
+        try:
+            base = str(json.loads(repo.stdout or "{}").get("default_branch") or "")
+        except (json.JSONDecodeError, AttributeError):
+            base = ""
+        if not base:
+            return bad("GitHub named no default branch to open the PR against — pass `--base`")
+    title = (str(getattr(args, "title", None) or "").strip()
+             or _flat(plan.get("title") or branch))
+    made, refused = _github(
+        ctx, ["--method", "POST", "repos/{owner}/{repo}/pulls", "--input", "-"],
+        payload={"title": title, "head": branch, "base": base,
+                 "body": body if body is not None else _pr_description(plan)})
+    if refused:
+        return 0, "", refused
+    try:
+        number = _pr_int(json.loads(made.stdout or "{}").get("number"))
+    except (json.JSONDecodeError, AttributeError):
+        number = None
+    if number is None:
+        return bad("GitHub opened the pull request but returned no number — record it on "
+                   "`change.pr.number` so the retry reuses it")
+    return number, "opened", None
+
+
+def _pr_description(plan: dict) -> str:
+    """A short PR description drawn from the change record, for a PR opened without `--body`.
+    The record's own fields, shortened by nothing; the full record is the comment below it."""
+    change = plan.get("change") if isinstance(plan.get("change"), dict) else {}
+    lines: list[str] = []
+    for key, label in (("request", "Request"), ("cause", "Cause"), ("solution", "Solution"),
+                       ("scope", "Scope"), ("limitations", "Limitations")):
+        value = change.get(key)
+        if isinstance(value, str) and value.strip():
+            lines += [f"**{label}.** {value.strip()}", ""]
+    lines.append(f"The change record, plan-{_num(_PLAN_ID, plan.get('id'))}, is posted on this "
+                 f"PR as a comment: its verification, its review, and what a person still has "
+                 f"to check.")
+    return "\n".join(lines)
+
+
+def _bundle_record_pr(ctx, plan_id: str, pr: int, head: str) -> None:
+    """Put the PR and the head just pushed onto `change.pr`, re-reading first.
+
+    Written before the comment is attempted, so a failed comment still leaves the PR on the
+    record for the retry to reuse. A `comment_id` is kept only while the PR is the same one.
+    """
+    doc, seal = _read_logged(ctx)
+    plan = _find(doc, plan_id)
+    if plan is None or not isinstance(plan.get("change"), dict):
+        return
+    change = plan["change"]
+    was = change.get("pr") if isinstance(change.get("pr"), dict) else {}
+    kept = dict(was) if _pr_int(was.get("number")) == pr else {}
+    kept.update({"number": pr, "head": head})
+    change["pr"] = kept
+    _write(ctx.state_dir, doc, seal)
+
+
+def _bundle_failed(ctx, plan_id: str, sid: str, who: str, reason: Optional[str], verb: str,
+                   op: str, detail: str, *, head: str, pr: Optional[int] = None,
+                   output: str = "") -> Result:
+    """Record a sub-operation failure on the `open_pr` step, and say how to recover.
+
+    `progress` becomes `failed` and `failure` is `{op, detail, at}`: which sub-operation to fix
+    before `step retry`. Re-reads first, because the PR record may have been written between
+    this call and the bundle's first read.
+    """
+    short = _clip(_flat(detail), MAX_TEXT - 60)
+    doc, seal = _read_logged(ctx)
+    plan = _find(doc, plan_id)
+    step = _in_plan(plan, sid) if plan is not None else None
+    if step is not None:
+        moved = _progress(step, FAILED, _clip(f"{op} failed: {short}", 200))
+        step["failure"] = {"op": op, "detail": short, "at": int(time.time())}
+        _log(ctx, plan, who, verb, reason, f"{moved} at `{op}` on {head[:12]}", step=sid)
+        _write(ctx.state_dir, doc, seal)
+    lines = [f"{plan_id}: the Open PR bundle FAILED at `{op}` — {sid} is now `{FAILED}`.",
+             f"  {short}"]
+    if output:
+        lines += ["", output, ""]
+    if pr is not None:
+        lines.append(f"PR {pr} is open and on the record; the retry reuses it.")
+    lines.append(f"Fix what failed (commit it, if it was code), then "
+                 f"`sb plugin plans step retry {plan_id}/{sid}`.")
+    return Result(ok=False, human="\n".join(lines),
+                  data={"error": f"{op} failed: {short}", "plan": plan_id, "step": sid,
+                        "failed": op, "pr": pr, "head": head})
 
 
 def _one_step(ctx, given: str, *, markdown: bool = False, full: bool = False) -> Result:
