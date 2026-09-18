@@ -313,7 +313,18 @@ def still_going(a) -> bool:
     every idle ancestor at the same instant — which is the flicker as Andrew actually sees
     it, a column blinking rather than one row. Too soon to call it a stop is not a stop.
     """
-    if a.finished or a.gone:
+    # `a.gone and not a.restorable`, the same narrowing `board.wants_you` makes and for
+    # the same rule: §9 says `waiting on child` requires a child still `live` OR
+    # `restorable`, so a descendant awaiting restore is still work out below and still
+    # excuses the ancestor idling above it. The case this actually changes is a BLOCKED
+    # restorable descendant, whose `display_state` stays `blocked`: without the narrowing
+    # it would drop out of the subtree's work-in-flight and withdraw the excuse from an
+    # idle ancestor above it. A merely-WORKING restorable descendant already reads `idle`
+    # once its pane is gone (`display_state`), so the RUNNING test below returns False for
+    # it either way — and a live ancestor over any restorable child is already excused
+    # upstream by `status.collect`'s `live_parent`, which keeps restorable rows in for the
+    # same reason. A snapshot too old to carry liveness behaves exactly as it did before.
+    if a.finished or (a.gone and not a.restorable):
         return False
     if a.inferred_summons and not a.settled:
         return True
@@ -956,7 +967,11 @@ def _row(row, mark: Optional[tuple[str, int]], inner: int, w_name: int, w_state:
     # whole way across, the name struck through. The strike is decoration on top of the
     # glyph, the red and the word GONE in the tail — a terminal that ignores it loses
     # nothing that carries meaning.
-    doomed = bool(row.gone)
+    # Struck through and red the whole way across is "the row a future clear-them-all key
+    # would sweep", which a restorable agent is precisely not: `sb restore` is what it
+    # wants, not a sweep. Same narrowing as `board.marker`, which draws AWAITING RESTORE in
+    # this row's tail. Old snapshots carry no liveness and read exactly as before.
+    doomed = bool(row.gone and not row.restorable)
     g = board.glyph(row)
     indent = board.INDENT * row.depth
     label = _pad(indent + clip_name(row.name, max(1, w_name - _vlen(indent))), w_name)

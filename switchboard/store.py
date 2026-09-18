@@ -2680,6 +2680,31 @@ def mark_undeliverable(db: sqlite3.Connection, mid: int) -> None:
     db.commit()
 
 
+def reannounce_for(db: sqlite3.Connection, name: str) -> int:
+    """Put this agent's held backlog back in `unseen()`. -> how many rows moved.
+
+    The inverse of the two holds above, and `restore`'s alone. Mail for an agent with no
+    pane is stamped `delivered_at` so the doorbell stops chasing a ring that cannot happen
+    (`mark_unannounceable`, `mark_undeliverable`) — a claim about the PANE, not about the
+    agent, and a restored agent has a pane again. Un-stamping is what makes the backlog
+    news once more, so `flush_pending` announces it instead of leaving a returning agent
+    to think of running `sb inbox` for itself (migration_sb_v2.md §9: "Messages and
+    answers held for a non-live agent are delivered on restore").
+
+    `read_at IS NULL` is the whole scope. A message the agent already read is not news, and
+    re-announcing it would cost it a turn to find nothing new — the mistake `unseen` exists
+    to avoid.
+    """
+    cur = db.execute(
+        "UPDATE messages SET delivered_at=NULL, undeliverable_at=NULL "
+        "WHERE to_agent=? AND read_at IS NULL "
+        "AND (delivered_at IS NOT NULL OR undeliverable_at IS NOT NULL)",
+        (name,),
+    )
+    db.commit()
+    return cur.rowcount
+
+
 def mark_delivered(db: sqlite3.Connection, to_agent: str) -> int:
     cur = db.execute(
         "UPDATE messages SET delivered_at=? WHERE to_agent=? AND delivered_at IS NULL",

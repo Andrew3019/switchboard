@@ -56,8 +56,8 @@ from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
-from .status import (GONE_CONFIRM_GRACE, GONE_STATE, REAPABLE, RUNNING, WAIT_EXCUSE_GRACE,
-                     fmt_age, working_again)
+from .status import (GONE_CONFIRM_GRACE, GONE_STATE, REAPABLE, RUNNING,
+                     WAIT_EXCUSE_GRACE, fmt_age, is_closed, working_again)
 from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
@@ -188,17 +188,32 @@ LIFECYCLE_PROMPTS = (
      "children up to report here"),
 )
 
-# How far back `restore_sweep` calls a death RECENT, in seconds. This is what makes the
-# sweep need no argument: it means "whatever went down just now and has not been dealt
-# with", never "everything that has ever failed" — resurrecting a week of ordinary crashed
-# work is `sb restore <name>`'s job, one row at a time, with a person deciding each.
+# HOW FAR BACK THE AUTOMATIC SWEEP CALLS A DEATH RECENT, in seconds — and the automatic
+# half only. Both halves used to share one `SWEEP_RECENT`, which is why the paragraphs
+# below are about what a TYPED sweep stopped doing before they are about what this bounds.
 #
-# Ten minutes rather than one: the window is not the crash, it is how long a human takes
-# to notice a herdr restart, find the command and type it, and a cohort that has aged out
-# by then is a cohort the command never recovers. The cost of the other end is bounded and
-# visible — an unrelated crash inside the same ten minutes is offered, named on its own
-# line, and `--dry-run` shows the whole list before anything spawns.
-SWEEP_RECENT = 600
+# `SWEEP_RECENT` used to bound the whole command's
+# cohort to deaths inside the last ten minutes, on the reasoning that the window was not the
+# crash but how long a human takes to notice one. migration_sb_v2.md §9 rules the other way,
+# and for the case the window was always wrong about: "Restore operates from durable
+# Task/Agent state, not heuristics such as how recently an agent was used: an agent
+# belonging to an open Task is eligible however old it is." A long-lived session that went
+# down before breakfast is exactly the agent a person most wants back, and it was the one
+# the window silently dropped. The cohort is enumerated from durable state instead — see
+# `_crash_cohort` — and the bound that replaces the window is the Task lifecycle proxy
+# `status.is_closed`: an agent somebody closed is never offered.
+#
+# THE AUTOMATIC HALF KEEPS THE WINDOW, and that is deliberate rather than an oversight.
+# §9's "however old it is" is about what restore can DO; the collector's unattended sweep
+# is the narrower thing §9 separately calls "explicit environment recovery after a crash or
+# restart", and a person typing the command is the one trusted to mean it. Without a window
+# the cluster test below is the only bound left, and it is a test on the cohort rather than
+# a filter of it — two unrelated deaths that happened to fall two minutes apart last month
+# would read as a restart and take the whole store's worth of old rows back up with them.
+# Ten minutes rather than one, for the reason it always was: the window is not the crash,
+# it is how long a human takes to notice a restart and let the collector act. A typed sweep
+# reaches every one of the rows this drops.
+AUTO_RESTORE_RECENT = 600
 
 # What tells a fleet-wide herdr restart from a single pane dying, for the AUTOMATIC sweep
 # only (`restore_sweep(auto=True)`; a human typing the command is trusted to mean it and is
@@ -215,8 +230,10 @@ SWEEP_RECENT = 600
 # `RESTART_WINDOW` is wider than a tick on purpose: at the moment the sweep runs, a real
 # restart's cohort is part still mid-debounce and part already confirmed, and `_crash_time`
 # puts both back on the crash-instant clock to within about a `gone_confirm_grace`. Two
-# minutes absorbs that spread while staying far under `SWEEP_RECENT`, so two unrelated
-# deaths minutes apart inside the same ten-minute window do not read as one event.
+# minutes absorbs that spread while staying narrow enough that two unrelated deaths minutes
+# apart do not read as one event. It is now the ONLY time bound on the automatic half —
+# the cohort itself has none (see `_crash_cohort`) — so it bounds what may be resumed
+# unattended, not what a person may ask for.
 RESTART_MIN_COHORT = 2
 RESTART_WINDOW = 120.0
 
@@ -8678,11 +8695,26 @@ class Broker:
         # back with it and hold the restored agent's mail forever. NULL is the honest
         # reading: no edge observed, so `status` and `_busy` fall back to herdr until the
         # first prompt fires `UserPromptSubmit`.
+        # `absent_since` goes with them, and it is not tidiness. Since wave 4 that stamp
+        # is KEPT rather than cleared for a restorable absence (`status._confirmed_gone`),
+        # so it is the record of a session that is gone — and this agent's is not any more.
+        # Left behind, the next sweep would still read it as a recorded crash and report
+        # `already running` about a row it should not have considered at all.
         self.db.execute(
-            "UPDATE agents SET ended_at=NULL, state='working', turn=NULL WHERE name=?",
+            "UPDATE agents SET ended_at=NULL, state='working', turn=NULL, "
+            "absent_since=NULL WHERE name=?",
             (name,))
         self.db.commit()
-        store.log_event(self.db, kind="restore", agent=name)
+        # WHAT IT WAS HOLDING IS NEWS AGAIN (§9: "Messages and answers held for a
+        # non-live agent are delivered on restore"). Its unread mail never went anywhere —
+        # `sb inbox` has always handed it over — but everything written while the pane was
+        # gone had `delivered_at` stamped so the doorbell would stop chasing a pane that
+        # was not there (`flush_pending`, `_clear_unreadable_mail`). Left stamped, a
+        # restored agent would have to think to run `sb inbox`; un-stamping it puts the
+        # backlog back in `unseen()`, so the next `flush_pending` announces it into the
+        # pane that now exists. Unread only: a message it already read is not news.
+        held = store.reannounce_for(self.db, name)
+        store.log_event(self.db, kind="restore", agent=name, held=held or None)
         self._reseed_on_restore(a)
         return name
 
@@ -8758,15 +8790,12 @@ class Broker:
         The inner `restore` is therefore called with `me=None`: the boundary was enforced
         once, by construction, in the query that built the scope.
 
-        **Selection, and why not `absent_since` alone.** `absent_since` is a debounce
-        value, not a record: `status._record_gone` clears it the moment the absence is
-        confirmed (`state='failed'`, `ended_at` set) and the collector's own reaping sweep
-        (`sb reconcile`) confirms it unattended within about a minute. By the time a
-        person notices a restart and types a command, most of the cohort has already self-confirmed and
-        `absent_since` is back to NULL — selecting on it alone finds an empty fleet and
-        reports "nothing to restore" about a board full of dead panes. So it is the union
-        of both halves: rows still mid-debounce, and rows already confirmed gone within
-        `SWEEP_RECENT`.
+        **Selection: durable state, not recency.** §9 is explicit that restore works from
+        durable Task/Agent state rather than "heuristics such as how recently an agent was
+        used", so the cohort is every row in scope whose session is gone and that nobody
+        closed — however old. See `_crash_cohort`, which also says what the ten-minute
+        window that used to bound this dropped, and why nothing that restored before stops
+        restoring.
 
         **Order.** Parents before children, so a restored child's mail has a live pane to
         land in. Independent trees are independent and may fall in any order.
@@ -8809,12 +8838,11 @@ class Broker:
             scope = self._descendants(me)
 
         out = RestoreSweepResult()
-        # A typed sweep (human or agent — anything but the automatic half) also passes
-        # `live_now`, which lets `_crash_cohort` add rows the store still thinks are alive
-        # but herdr no longer lists — the whole-machine crash case, where the collector
-        # died before it could mark any death. `auto` never passes it: the automatic half
-        # keeps the confirmed-death debounce (see below).
-        cohort = self._crash_cohort(scope, live_now=None if auto else live_now)
+        # `debounced` is the automatic half's extra bar and the whole of what separates the
+        # two cohorts: `auto` acts only on a crash the COLLECTOR recorded, a typed sweep
+        # also on one herdr's list shows directly — the whole-machine crash case, where the
+        # collector died before it could mark anything.
+        cohort = self._crash_cohort(scope, live_now, debounced=auto)
         if auto and not self._looks_like_restart(cohort):
             # The automatic half declines a cohort that is not restart-shaped and restores
             # NOTHING — see `_looks_like_restart` and `[restore] auto`. Logged so a fleet
@@ -8872,47 +8900,63 @@ class Broker:
                         failed=[n for n, _ in out.failed])
         return out
 
-    def _crash_cohort(self, scope, live_now=None) -> list:
+    def _crash_cohort(self, scope, live_now, *, debounced: bool = False) -> list:
         """The rows a sweep offers to bring back, parents first. See `restore_sweep`.
 
-        Two halves, unioned, because the cohort is racing the collector: a row is either
-        still inside its absence debounce (`absent_since` set, no `ended_at` yet) or has
-        already been confirmed gone by the reaping sweep (`state='failed'`, `ended_at`
-        set).
-        Which half a given row is in depends only on how long ago the crash was and when
-        the collector last ticked — a distinction the person typing the command has no
-        way to know and no reason to care about.
+        ENUMERATED FROM DURABLE STATE, not from a recency window. §9: "Restore operates
+        from durable Task/Agent state, not heuristics such as how recently an agent was
+        used: an agent belonging to an open Task is eligible however old it is." So the
+        cohort is every row in scope whose runtime session is gone and that NOBODY CLOSED
+        — `status.is_closed`, the durable proxy for "belongs to an open Task" until the
+        first-class Task object lands (#332/#333). An agent that went down before
+        breakfast comes back exactly like one that went down a minute ago.
 
-        A THIRD source, for a typed sweep only (`live_now` passed — human or agent, never
-        `auto`): a row the store still thinks is alive (`REAPABLE`, `ended_at` NULL) that
-        herdr no longer lists. Both halves above are things the COLLECTOR wrote, and a
-        whole-machine crash kills the collector before it writes either — so after a reboot
-        the dead agents sit `working` with no `absent_since` and no `failed`, and the
-        two-half union finds an empty fleet on a board full of dead panes. Herdr not listing
-        a REAPABLE row IS that death, seen directly (`REAPABLE` is the same "could this be
-        alive" set `_record_gone` acts on). It skips the collector's debounce, which the
-        automatic half must not — so `auto` passes no `live_now` and never reaches this
-        branch; whoever typed the command is asserting the crash and is trusted to
-        (`restore_sweep`). An agent's own typed sweep reaches this branch too, bounded by
-        the same `scope` (`_descendants(me)`) that already keeps it out of other trees.
-        `live_now` is only ever a real herdr reading here: `restore_sweep` raises on
-        `_agent_states()` == None before building any cohort, so an unreachable herdr never
-        round-trips to "restore them all".
+        WHAT THIS DROPPED, said plainly because it is a behaviour change: the old cohort
+        was a union of rows still inside their absence debounce, rows confirmed `failed`
+        within `SWEEP_RECENT`, and (typed only) rows the store thought alive that herdr no
+        longer listed. Every one of those is a SUBSET of this, so nothing that used to
+        restore stops restoring; what is added is everything the ten-minute window used to
+        drop on the floor.
 
-        Rows with no session id stay IN: they cannot be restored, and the caller has to
-        name them rather than skip them, which it can only do if they are here.
+        THE TWO ROWS THAT ARE HERE AND CANNOT COME BACK are here on purpose. A row with no
+        session id, and one whose checkout was removed, are `not restorable` in
+        `status.liveness`'s terms — but a row that silently does not appear reads exactly
+        like a row that came back, so they stay in the cohort and `restore_sweep` NAMES
+        them in `unrestorable`/`failed` instead.
+
+        A ROW HERDR STILL LISTS is kept only when the store carries a recorded crash for it
+        (`absent_since`, or a `failed` state). That is the hiccup case — `_record_gone`'s
+        inference from one `agent list` that came back short — and the sweep has to report
+        `already running` about it rather than drop it, which it can only do if it is here.
+        An ordinary live agent is not in the cohort at all and is never resumed into a
+        second pane.
+
+        `debounced` is the automatic half's two extra bars (`restore_sweep(auto=True)`).
+        The row must carry the COLLECTOR's own recorded crash rather than one live reading
+        — a whole-machine crash kills the collector before it writes either, so those rows
+        are invisible to `auto` and wait for a typed sweep, deliberately, since "herdr does
+        not list it" on a single reading is exactly what the automatic half must never
+        resume on. And that crash must be RECENT (`AUTO_RESTORE_RECENT`), which is the one
+        place the window §9 removed still applies and the constant says why.
         """
-        cutoff = store.now() - SWEEP_RECENT
-        picked = [a for a in scope
-                  if (a["ended_at"] is None and _column(a, "absent_since"))
-                  or (a["state"] == GONE_STATE and (a["ended_at"] or 0) >= cutoff)]
-        if live_now is not None:
-            seen = {a["name"] for a in picked}
-            picked += [a for a in scope
-                       if a["name"] not in seen
-                       and a["ended_at"] is None
-                       and a["state"] in REAPABLE
-                       and a["name"] not in live_now]
+        picked = []
+        for a in scope:
+            if is_closed(a):
+                continue
+            recorded = bool(_column(a, "absent_since")) or a["state"] == GONE_STATE
+            if debounced and not recorded:
+                continue
+            if debounced:
+                # The automatic half's own recency bound — see `AUTO_RESTORE_RECENT` for
+                # why it is here and not on the typed path. A row whose crash cannot be
+                # placed on the clock at all is dropped rather than treated as now, the
+                # same choice `_looks_like_restart` makes about the same value.
+                when = self._crash_time(a)
+                if when is None or store.now() - when > AUTO_RESTORE_RECENT:
+                    continue
+            if a["name"] in live_now and not recorded:
+                continue
+            picked.append(a)
         return self._parents_first(picked)
 
     def _crash_time(self, a) -> Optional[float]:
@@ -8920,12 +8964,17 @@ class Broker:
 
         A cohort is racing the collector (see `_crash_cohort`), so its members carry the
         crash moment in two different columns on two different clocks, and telling a
-        simultaneous event from a coincidence needs them on one. A row still mid-debounce
+        simultaneous event from a coincidence needs them on one. A row with no `ended_at`
         has `absent_since` — the moment herdr first stopped listing it, which IS the crash
-        instant. A row already confirmed has that cleared and an `ended_at` set at
+        instant. A row that was written off has that cleared and an `ended_at` set at
         CONFIRMATION, about a `gone_confirm_grace` later; subtracting the grace puts it back
-        beside the mid-debounce rows, so a fleet whose deaths are half confirmed and half
-        still debouncing still reads as the one instant it was.
+        beside the others, so a fleet whose deaths are half confirmed and half still
+        debouncing still reads as the one instant it was.
+
+        Since wave 4 the first branch covers more than a mid-debounce row: a RESTORABLE
+        absence is never written off and KEEPS its `absent_since` (`status._confirmed_gone`,
+        §9), so that column is now the durable record of when the session went away rather
+        than a counter that resets. This reads it the same way either way.
         """
         absent = _column(a, "absent_since")
         if a["ended_at"] is None:
@@ -9219,6 +9268,49 @@ class Broker:
             return True
         return self._name_bound(who) is False
 
+    def _awaiting_restore(self, who: str) -> bool:
+        """Is this agent's session CONFIRMED gone while the agent is still ours to restore?
+
+        The doorbell's reading of `status.liveness`'s `restorable` (§9), narrowed to the one
+        thing the doorbell needs to know: there is no pane to ring, and this is not a row
+        anybody closed, so the mail waits for `sb restore` rather than being written off.
+        Asked only AFTER `_finished_and_unreachable`, which owns every row that ended — so
+        what reaches here is a `working` or `blocked` row whose pane went away under it.
+
+        **CONFIRMED, and that word is the whole safety of this.** One `agent list` that
+        comes back short is a hiccup — a herdr restart mid-answer, a machine under load —
+        and the store's own history has three agents marked failed in one night's startups
+        because something believed a single short reading (`status.GONE_CONFIRM_GRACE`).
+        Acting on one reading here costs something subtler and worse than a false death: it
+        stamps a LIVE agent's pending mail `delivered_at`, which takes it out of
+        `store.unseen()` for good, so the doorbell never rings for that backlog again and
+        the agent is never told. So this asks the debounce, not the reading: `absent_since`
+        set and older than `GONE_CONFIRM_GRACE` is the same bar `status._confirmed_gone`
+        clears before it will believe an absence, and wave 4 made that column durable for a
+        restorable row precisely so it can be read here.
+
+        `_name_bound` is asked as well and last: the stamp must not land on an agent that is
+        absent in the record and listed again right now, and a name herdr answers to is the
+        one thing that settles that. None is "herdr could not be asked", which is never this.
+        It is `_name_bound` and not membership of `_agent_states()` for
+        `_finished_and_unreachable`'s reason: an evicted pane is still listed under its own
+        name.
+
+        The two row guards below are cheap and both matter. `is_closed` keeps `done` and
+        cleaned-up rows out; they are the other method's. A row with no `pane_id` never had
+        a pane to lose — which is also every claim mid-spawn, since `delegate` writes the
+        row before herdr is called. The spawn window needs no guard of its own here: the
+        only writer of `absent_since` is `status.collect`'s reap path, which stamps it for
+        rows `gone` was true of, and `gone` already excludes `spawning`.
+        """
+        a = store.get_agent(self.db, who)
+        if a is None or not a["pane_id"] or is_closed(a):
+            return False
+        absent = _column(a, "absent_since")
+        if not absent or (store.now() - float(absent)) < GONE_CONFIRM_GRACE:
+            return False
+        return self._name_bound(who) is False
+
     def _busy(self, who: str) -> bool:
         """Is this agent mid-turn right now?
 
@@ -9302,6 +9394,22 @@ class Broker:
             mine = [m for m in pending if m["to_agent"] == who]
             if self._finished_and_unreachable(who):
                 self._clear_unreadable_mail(who, mine)
+                continue
+            # AND THE ROW THAT IS NOT FINISHED AND HAS NO PANE EITHER — a CONFIRMED
+            # restorable absence (§9). Its mail is neither ringable nor written off: there
+            # is nothing to ring, and the agent is coming back to read it. Confirmed and
+            # not merely absent on this reading, because the cost of being wrong here is a
+            # live agent whose doorbell never rings again — see `_awaiting_restore`.
+            # Stamping `delivered_at`
+            # and nothing else is exactly that statement — it leaves the mail unread,
+            # owed, and counted, while taking it out of `unseen()` so `flush_pending` and
+            # the collector's doorbell stop chasing a ring that cannot happen (the retry
+            # loop `_clear_unreadable_mail` documents, measured at 21 failed rings in 71
+            # seconds). `restore` un-stamps it, so the backlog is announced for real the
+            # moment there is a pane to announce it into.
+            if self._awaiting_restore(who):
+                for m in mine:
+                    store.mark_unannounceable(self.db, m["id"])
                 continue
             if self._busy(who):
                 continue

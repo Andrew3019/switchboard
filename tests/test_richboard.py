@@ -39,14 +39,15 @@ HAVE_RICH = richboard.available()
 
 def agent(name, *, depth=0, parent=None, state="working", herdr_state="working",
           alive=True, stalled=False, gone=False, unread=0, task=None, blocked_why=None,
-          workspace="api", idle=5, undelivered=0, turn="working", needs_for=None):
+          workspace="api", idle=5, undelivered=0, turn="working", needs_for=None,
+          liveness=None):
     return status.AgentStatus(
         needs_for=needs_for,
         name=name, role="worker", parent=parent, depth=depth, state=state,
         herdr_state=herdr_state, alive=alive, stalled=stalled, gone=gone, unread=unread,
         age=100, idle=idle, last_activity=0, workspace=workspace, task=task,
         blocked_why=blocked_why, summary=None, turn=turn, undelivered=undelivered,
-        undelivered_age=60 if undelivered else 0)
+        undelivered_age=60 if undelivered else 0, liveness=liveness)
 
 
 def snap(*agents):
@@ -444,6 +445,26 @@ class NeedsYouTest(unittest.TestCase):
                   blocked_why="which branch?"),
         )
         self.assertEqual(names, ["kid"])
+
+    def test_a_blocked_restorable_descendant_still_excuses_its_idle_ancestors(self):
+        """§9 counts a `restorable` child as live work, so a BLOCKED descendant awaiting
+        restore keeps its idle ancestors out of the summons exactly as a live blocked one
+        does — the single case `still_going`'s `a.gone and not a.restorable` narrowing
+        changes. A merely-working restorable descendant already reads `idle` once its pane
+        is gone and needs no special case, so the blocked one is the whole of it. Gone for
+        GOOD, the same descendant is no longer work in flight and the idle ancestor above
+        it becomes a person's to look at — which is the contrast that pins the narrowing.
+        """
+        def tree(liveness):
+            return [
+                agent("lead", stalled=True, turn="idle", idle=900),
+                agent("bridge", depth=1, parent="lead", state="done", turn="idle"),
+                agent("kid", depth=2, parent="bridge", state="blocked", turn="idle",
+                      blocked_why="which branch?", gone=True, alive=False,
+                      liveness=liveness),
+            ]
+        self.assertIn("lead", richboard.busy_below(tree(status.RESTORABLE)))
+        self.assertNotIn("lead", richboard.busy_below(tree(status.NOT_RESTORABLE)))
 
     def test_an_idleness_that_has_not_held_is_not_summoned_yet(self):
         """The flicker itself: a row between two turns, and the same row a window later.

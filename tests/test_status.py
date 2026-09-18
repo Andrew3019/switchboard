@@ -72,6 +72,21 @@ class StatusTest(unittest.TestCase):
         """
         return store.now() + int(status.STALLED_FLOOR) + seconds
 
+    def no_checkout(self, *names):
+        """Make these rows NOT RESTORABLE — the half of an absence that is a real end.
+
+        Liveness is three-valued now (`status.liveness`, migration_sb_v2.md §9): a session
+        herdr no longer lists is `restorable` while its checkout is still on disk, and only
+        the other half is written off. A test about what an absence WRITES therefore has to
+        say which half it is about, and the durable difference is the checkout — the one
+        thing `restore` cannot rebuild, and the refusal it already had ("restore is gone
+        once the worktree is; the push is the recovery path").
+        """
+        gone = str(Path(self.tmp.name) / "removed-checkout")
+        for n in names:
+            self.db.execute("UPDATE agents SET cwd=? WHERE name=?", (gone, n))
+        self.db.commit()
+
     def confirm_gone(self, h=None, *, at=None):
         """Collect twice, a confirmation window apart — what it now takes to record a death.
 
@@ -647,8 +662,14 @@ class StatusTest(unittest.TestCase):
     def test_a_gone_agent_is_recorded_as_ended(self):
         """Nothing else ever closes a row that died abnormally. `sb done` is the agent's
         own, and `sb cleanup` only touches rows that are already finished — so without
-        this the row claims `working` for good and no sweep can reach it."""
+        this the row claims `working` for good and no sweep can reach it.
+
+        NOT RESTORABLE is the half this is about: the checkout went with the session, so
+        `sb restore` would refuse it and nothing in the system can bring this agent back
+        (§9). The restorable half is `test_a_restorable_absence_writes_nothing_at_all`.
+        """
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        self.no_checkout("w1")
         snap = self.confirm_gone()
         self.assertTrue(self.by_name(snap)["w1"].gone)   # still reported as observed
 
@@ -673,6 +694,7 @@ class StatusTest(unittest.TestCase):
         store.create_agent(self.db, name="lead", role="lead", session_id="s1")
         store.create_agent(self.db, name="w1", role="worker", parent="lead",
                            session_id="s2", task="rewrite the parser")
+        self.no_checkout("w1")            # the not-restorable half: this is a real end
         self.confirm_gone(FakeHerdr([alive("lead")]))
 
         [m] = store.unread_for(self.db, "lead", mark=False)
@@ -691,6 +713,7 @@ class StatusTest(unittest.TestCase):
         store.create_agent(self.db, name="lead", role="lead", session_id="s1")
         store.create_agent(self.db, name="w1", role="worker", parent="lead",
                            session_id="s2", task="rewrite the parser")
+        self.no_checkout("w1")            # the not-restorable half: this is a real end
         h = FakeHerdr([alive("lead")])
         self.confirm_gone(h)
         for _ in range(3):
@@ -705,6 +728,7 @@ class StatusTest(unittest.TestCase):
         event, exactly as it was before the ping existed. The one case a person still has
         to see on the board."""
         store.create_agent(self.db, name="top", role="lead", session_id="s1")
+        self.no_checkout("top")           # the not-restorable half: this is a real end
         self.confirm_gone()
         self.assertEqual(self.row("top")["state"], status.GONE_STATE)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
@@ -719,6 +743,7 @@ class StatusTest(unittest.TestCase):
         store.create_agent(self.db, name="w1", role="worker", parent="lead",
                            session_id="s2", task="rewrite the parser")
         store.set_state(self.db, "w1", "blocked")
+        self.no_checkout("w1")            # the not-restorable half: this is a real end
 
         self.confirm_gone(FakeHerdr([alive("lead")]))
         self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
@@ -849,6 +874,7 @@ class StatusTest(unittest.TestCase):
 
     def test_absence_past_the_window_is_recorded(self):
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        self.no_checkout("w1")            # the not-restorable half: this is a real end
         self.confirm_gone()
         self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
         self.assertIsNone(self.row("w1")["absent_since"])   # the count is over, not running
@@ -858,6 +884,7 @@ class StatusTest(unittest.TestCase):
         been dying for a minute — it was there — and adding the two gaps together would
         confirm a death that never happened."""
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        self.no_checkout("w1")            # the not-restorable half: this is a real end
         now = store.now()
         half = int(status.GONE_CONFIRM_GRACE / 2) + 1
         status.collect(self.db, FakeHerdr([]), now=now)
@@ -897,6 +924,7 @@ class StatusTest(unittest.TestCase):
         on sight is what shipped before the column and is the right fallback: a row nothing
         can ever record as gone is a row `sb cleanup` can never reach."""
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        self.no_checkout("w1")            # the not-restorable half: this is a real end
         self.db.execute("ALTER TABLE agents DROP COLUMN absent_since")
         self.db.commit()
         status.collect(self.db, FakeHerdr([]))
@@ -926,6 +954,7 @@ class StatusTest(unittest.TestCase):
         confirmation window and sat `working` for as long as the stranger ran."""
         store.create_agent(self.db, name="w1", role="worker", session_id="ours",
                            terminal_id="term_ours")
+        self.no_checkout("w1")            # the not-restorable half: this is a real end
         self.confirm_gone(FakeHerdr([alive("w1", terminal="term_theirs")]))
         self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
 
@@ -950,6 +979,196 @@ class StatusTest(unittest.TestCase):
             self.db, FakeHerdr([alive("w1", session="theirs")])))["w1"]
         self.assertFalse(a.alive)
 
+    # -- three-valued liveness: a restart is not a death (v2 wave 4, #322) ------
+    #
+    # migration_sb_v2.md §9: "Liveness has three values: `live`, `not live, restorable`
+    # (the session is gone but can be reconstructed — a machine restart, a killed pane),
+    # and `not restorable` (the session is gone for good)." Every absence used to be the
+    # third one.
+
+    def test_a_restorable_absence_writes_nothing_at_all(self):
+        """The whole of #322 in one row. Its pane is gone and its checkout is not, so the
+        agent can be reconstructed — and §9 says such a row "keeps its identity, assignments
+        and last derived status, waiting to be restored". So nothing is written: not the
+        state, not an end, not a ping to anybody. `sb restore` is what ends this wait.
+
+        `absent_since` is KEPT rather than cleared on confirmation, which is the one §9
+        durable field that genuinely was not persisted before: with no verdict to write,
+        the moment the session went away is the record, not a counter to reset.
+        """
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1",
+                           pane_id="w1:p0")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2", pane_id="w1:p1", cwd=self.tmp.name)
+        snap = self.confirm_gone(FakeHerdr([alive("lead")]))
+
+        a = self.by_name(snap)["w1"]
+        self.assertEqual(a.liveness, status.RESTORABLE)
+        self.assertTrue(a.restorable)
+        self.assertFalse(a.not_restorable)
+        row = self.row("w1")
+        self.assertEqual(row["state"], "working")          # not `failed`, not ended
+        self.assertIsNone(row["ended_at"])
+        self.assertIsNotNone(row["absent_since"])          # the durable record of the gap
+        self.assertEqual(store.unread_for(self.db, "lead", mark=False), [])
+        self.assertEqual(store.recent_events(self.db, agent="w1"), [])
+
+    def test_a_restorable_child_is_not_stalled_and_still_excuses_its_parent(self):
+        """The flood §9 exists to prevent: "suppressing stall detection for it is what
+        stops a machine restart flooding `Needs You` with false stalls", and `waiting on
+        child` "requires a child that is still `live` or `restorable`" — which this child
+        is. So the parent goes on being idle WITH a reason, indefinitely, rather than being
+        released into a stall the moment the machine came back up.
+        """
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1",
+                           pane_id="w1:p0")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2", pane_id="w1:p1", cwd=self.tmp.name)
+        h = FakeHerdr([alive("lead", "idle")])
+        at = self.past_the_floor()
+        self.confirm_gone(h, at=at)
+        by = self.by_name(status.collect(self.db, h, now=at + 999))
+
+        self.assertFalse(by["w1"].stalled)                 # its pane is gone, not stuck
+        self.assertFalse(by["w1"].needs_human)             # and it is nobody's decision
+        self.assertFalse(by["lead"].stalled)
+        self.assertEqual(by["lead"].idle_excuse, "waiting on children")
+
+    def test_a_not_restorable_child_is_ended_and_releases_its_parent(self):
+        """The other half, and it moves in the opposite direction on every point. §9: a
+        not-restorable agent's "work has genuinely stopped and cannot resume itself", so
+        Switchboard raises an attention item and "treats any parent that was `waiting on
+        child` on it as no longer waiting, so the parent's own idleness begins to derive
+        normally rather than the dead child masking it forever".
+
+        The checkout is what makes this half: restore already refuses a row whose checkout
+        is gone, so there is no command left that could bring this agent back.
+        """
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1",
+                           pane_id="w1:p0")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2", pane_id="w1:p1",
+                           task="rewrite the parser")
+        # Two things held for it, one of them a Question — the shape §9 wrote the item's
+        # wording for. See `test_the_not_restorable_item_counts_what_is_held_after_the_mail_is_written_off`
+        # for the half of this that only breaks once the backlog has been written off.
+        store.put_message(self.db, from_agent="lead", to_agent="w1", kind="tell",
+                          body="the fixture moved")
+        store.put_message(self.db, from_agent="lead", to_agent="w1", kind="ask",
+                          body="which branch?", needs_reply=True)
+        self.no_checkout("w1")
+        h = FakeHerdr([alive("lead", "idle")])
+        at = self.past_the_floor()
+        self.confirm_gone(h, at=at)
+        by = self.by_name(status.collect(self.db, h, now=at + 999))
+
+        self.assertEqual(self.row("w1")["state"], status.GONE_STATE)   # terminal, as before
+        self.assertIsNotNone(self.row("w1")["ended_at"])
+        self.assertTrue(by["w1"].not_restorable)
+        self.assertTrue(by["w1"].needs_human)
+        # The item, worded as §9 words it, with the count of what it is holding — and
+        # the count asserted as a NUMBER rather than interpolated off the row, which is how
+        # this passed at zero while the line was telling a human nothing was held.
+        lines = status._attention(status.collect(self.db, h, now=at + 999))
+        [item] = [ln for ln in lines if "not restorable" in ln]
+        self.assertIn("is not restorable — 2 Steps/Questions held", item)
+        self.assertIn("NEEDS YOU", lines)
+        # And the parent is no longer excused by it: its own idleness derives normally.
+        self.assertIsNone(by["lead"].idle_excuse)
+        self.assertTrue(by["lead"].stalled)
+
+    def test_the_not_restorable_item_counts_what_is_held_after_the_mail_is_written_off(self):
+        """The count §9 asks for is what the agent is HOLDING, and it has to survive the
+        thing that happens to a not-restorable row a moment later.
+
+        Such a row is `failed` + ended + unreachable, which is exactly
+        `Broker._finished_and_unreachable`, so the next `sb` command anybody runs writes its
+        whole backlog off (`_clear_unreadable_mail` → `mark_undeliverable`). `unread`
+        deliberately stops counting written-off mail — it feeds `needs_human`, and a demand
+        nothing can clear is the queue that fills up for good — so an item counted off
+        `unread` read "0 Steps/Questions held" in precisely the scenario the sentence exists
+        for. `held` is the same mailbox counted without that exclusion.
+
+        The write-off is simulated here the way it happens: `undeliverable_at` stamped on
+        the backlog. `test_broker` drives the real `flush_pending` path end to end.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1",
+                           pane_id="w1:p1", task="rewrite the parser")
+        for body in ("the fixture moved", "which branch?"):
+            store.put_message(self.db, from_agent="lead", to_agent="w1", kind="tell",
+                              body=body)
+        self.no_checkout("w1")
+        self.confirm_gone()
+        self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
+
+        a = self.by_name(status.collect(self.db, FakeHerdr([])))["w1"]
+        self.assertEqual((a.unread, a.held), (2, 2))          # nothing written off yet
+
+        for m in self.db.execute("SELECT id FROM messages").fetchall():
+            store.mark_undeliverable(self.db, m["id"])
+
+        a = self.by_name(status.collect(self.db, FakeHerdr([])))["w1"]
+        self.assertEqual(a.unread, 0)                         # no claim on a person left
+        self.assertEqual(a.held, 2)                           # but the agent still holds it
+        [item] = [ln for ln in status._attention(status.collect(self.db, FakeHerdr([])))
+                  if "not restorable" in ln]
+        self.assertIn("is not restorable — 2 Steps/Questions held", item)
+
+    def test_a_not_restorable_child_releases_the_excuse_before_the_write_lands(self):
+        """`waiting on child` is keyed on LIVENESS, not on the terminal write that follows
+        it. Before wave 4 the excuse survived until `_record_gone` had rewritten the child's
+        state — a whole confirmation grace of a parent excused by a child that was already
+        gone for good. One reading is now enough to stop the excuse, while the write still
+        waits for the debounce it always did."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1",
+                           pane_id="w1:p0")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2", pane_id="w1:p1")
+        self.no_checkout("w1")
+        h = FakeHerdr([alive("lead", "idle")])
+        by = self.by_name(status.collect(self.db, h, now=self.past_the_floor()))
+
+        self.assertEqual(self.row("w1")["state"], "working")     # nothing written yet
+        self.assertIsNone(by["lead"].idle_excuse)
+
+    def test_a_herdr_that_cannot_be_asked_has_no_opinion_about_restorability(self):
+        """None is not a quieter `not restorable`. An unreachable herdr observed nothing,
+        so no row is classified, no parent is released and no attention item is raised —
+        the reading `collect`'s `alive` has always carried as None."""
+        store.create_agent(self.db, name="lead", role="lead", session_id="s1",
+                           pane_id="w1:p0")
+        store.create_agent(self.db, name="w1", role="worker", parent="lead",
+                           session_id="s2", pane_id="w1:p1")
+        self.no_checkout("w1")
+        by = self.by_name(status.collect(
+            self.db, FakeHerdr(error=HerdrError("down", "no server")),
+            now=self.past_the_floor()))
+
+        self.assertIsNone(by["w1"].liveness)
+        self.assertFalse(by["w1"].not_restorable)
+        self.assertFalse(by["w1"].gone)                   # nothing was observed at all
+        self.assertEqual(self.row("w1")["state"], "working")
+        # And the child is still one its parent may be waiting on: a reading nobody could
+        # take must not release an excuse.
+        self.assertIn("lead", {r["parent"] for r in self.db.execute(
+            "SELECT parent FROM agents WHERE name='w1'").fetchall()})
+
+    def test_a_closed_agent_is_never_an_attention_item(self):
+        """Somebody decided this one was finished. It is un-restorable like every other
+        ended row, and raising an item about it would summon a person to every agent that
+        ever ran — which is the whole reason `not_restorable` asks whether anybody closed
+        the row and not merely whether it can come back."""
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1",
+                           pane_id="w1:p1")
+        store.set_state(self.db, "w1", "done")
+        self.no_checkout("w1")
+        a = self.by_name(status.collect(self.db, FakeHerdr([])))["w1"]
+
+        self.assertTrue(a.closed)
+        self.assertEqual(a.liveness, status.NOT_RESTORABLE)
+        self.assertFalse(a.not_restorable)
+        self.assertFalse(a.needs_human)
+
     # -- reap=False: a reader that outlives its own code ------------------
 
     def test_a_readout_can_see_the_drift_without_writing_it(self):
@@ -969,6 +1188,7 @@ class StatusTest(unittest.TestCase):
         """`reap=False` defers the write, it does not veto it: the next `sb status` — a
         short-lived process on current code — still closes a genuinely dead row."""
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        self.no_checkout("w1")            # the not-restorable half: this is a real end
         status.collect(self.db, FakeHerdr([]), reap=False)
         self.confirm_gone()
         self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
@@ -996,6 +1216,7 @@ class StatusTest(unittest.TestCase):
 
     def test_a_reaped_agent_reads_as_ended_on_the_next_look(self):
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        self.no_checkout("w1")            # the not-restorable half: this is a real end
         self.confirm_gone()
         a = self.by_name(status.collect(self.db, FakeHerdr([])))["w1"]
         self.assertEqual(a.state, status.GONE_STATE)
@@ -1722,7 +1943,12 @@ class ReconcileReapsTest(unittest.TestCase):
         db = store.connect(self.repo)
         store.create_agent(db, name="lead", role="lead", session_id="s0")
         store.create_agent(db, name="w1", role="worker", parent="lead", session_id="s1",
-                           task="rewrite the parser")
+                           task="rewrite the parser",
+                           # NOT RESTORABLE, so the absence is a real end and `reconcile`
+                           # has something to record: its checkout went with the session
+                           # (`status.liveness`, §9). A restorable one is written off by
+                           # nothing, which is `StatusTest`'s own pair of tests.
+                           cwd=str(Path(self.tmp.name) / "removed-checkout"))
         db.execute("UPDATE agents SET created_at = ?",
                    (store.now() - int(status.SPAWN_GRACE) - 1,))
         db.commit()
