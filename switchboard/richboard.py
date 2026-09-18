@@ -316,10 +316,14 @@ def still_going(a) -> bool:
     # `a.gone and not a.restorable`, the same narrowing `board.wants_you` makes and for
     # the same rule: §9 says `waiting on child` requires a child still `live` OR
     # `restorable`, so a descendant awaiting restore is still work out below and still
-    # excuses the ancestor idling above it. Without this a reboot reads every lead on the
-    # tree as stalled here while `sb status` says, correctly, that each is waiting on its
-    # children — `status.collect`'s `live_parent` keeps restorable rows in for this reason.
-    # A snapshot too old to carry liveness behaves exactly as it did before.
+    # excuses the ancestor idling above it. The case this actually changes is a BLOCKED
+    # restorable descendant, whose `display_state` stays `blocked`: without the narrowing
+    # it would drop out of the subtree's work-in-flight and withdraw the excuse from an
+    # idle ancestor above it. A merely-WORKING restorable descendant already reads `idle`
+    # once its pane is gone (`display_state`), so the RUNNING test below returns False for
+    # it either way — and a live ancestor over any restorable child is already excused
+    # upstream by `status.collect`'s `live_parent`, which keeps restorable rows in for the
+    # same reason. A snapshot too old to carry liveness behaves exactly as it did before.
     if a.finished or (a.gone and not a.restorable):
         return False
     if a.inferred_summons and not a.settled:

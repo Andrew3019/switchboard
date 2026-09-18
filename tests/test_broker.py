@@ -4170,6 +4170,14 @@ class BrokerTest(unittest.TestCase):
         """
         store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
                            cwd=str(self.repo), pane_id="w1:p1")
+        # Past SPAWN_GRACE with `absent_since` still NULL: this is the negative half of the
+        # gate — a long-lived row seen absent in ONE reading, not yet a confirmed absence.
+        # Without the backdate the row is 0s old and any spawn-window guard would excuse it
+        # before the single-reading path could stamp the mail, so the test would pass even
+        # against code that acts on one reading — pinning nothing.
+        self.db.execute("UPDATE agents SET created_at=? WHERE name=?",
+                        (store.now() - int(status.SPAWN_GRACE) - 1, "kid"))
+        self.db.commit()
         store.put_message(self.db, from_agent="lead", to_agent="kid", kind="tell",
                           body="stop, the fixture moved")
         self.h.states_by_name = {}                     # the short reading
