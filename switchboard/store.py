@@ -2113,8 +2113,8 @@ def set_turn(db: sqlite3.Connection, name: str, turn: Optional[str]) -> None:
 
     Deliberately NOT folded into `set_state`. The two columns answer different questions
     (see the schema note) and every path that writes one would have to guess at the other:
-    `sb block` sets state=blocked from inside a turn that is still running, and the turn
-    does not end until the hook says so.
+    `sb done` writes a terminal `state` from inside a turn that is still running, and the
+    turn does not end until the hook says so.
 
     Fails soft on a store too old to have the column, for `log_event`'s reason: this runs
     inside a hook, and a hook that raises is a hook that costs an agent its turn.
