@@ -3155,21 +3155,37 @@ def _ci(ctx, head: str) -> Optional[dict]:
     merge is green, and for no other reason: nothing in this file reads it back, no verb
     waits on it, and a red one refuses nothing.
 
-    Three words out of GitHub's four: `success` is green, `failure`/`error` are red, and
-    `pending` is pending. A commit with no checks configured at all comes back from this
-    endpoint as `pending` with an empty list, which is honest — nothing has said anything.
+    CHECK RUNS AND NOT THE COMMIT-STATUS ENDPOINT, and that is a correction rather than a
+    choice. `commits/:sha/status` is the legacy Statuses API; GitHub Actions publishes CHECK
+    RUNS, which it does not report at all — so against this repo's own green pull request it
+    answers `pending`, forever. A `ci` fact that reads pending on every green PR is worse
+    than no fact, so this reads `check-runs` and reduces the list itself.
+
+    Three words. Any run that finished badly is red, any run still going is pending, and a
+    commit every run passed on is green. A commit with NO check runs is `pending` too, which
+    is honest: nothing has said anything about it yet, and a repo that runs no checks has no
+    green to report.
     """
     if not head:
         return None
-    got, bad = _github(ctx, [f"repos/{{owner}}/{{repo}}/commits/{head}/status"])
+    got, bad = _github(ctx, [f"repos/{{owner}}/{{repo}}/commits/{head}/check-runs",
+                             "--paginate"])
     if bad or got is None:
         return None
     try:
-        rollup = json.loads(got.stdout or "{}")
-    except json.JSONDecodeError:
+        runs = json.loads(got.stdout or "{}").get("check_runs")
+    except (json.JSONDecodeError, AttributeError):
         return None
-    state = str((rollup or {}).get("state") or "")
-    word = {"success": "green", "failure": "red", "error": "red"}.get(state, "pending")
+    if not isinstance(runs, list) or not runs:
+        return {"state": "pending", "head": head, "at": int(time.time())}
+    bad_ends = ("failure", "timed_out", "cancelled", "action_required", "stale")
+    if any(str(r.get("conclusion") or "") in bad_ends for r in runs if isinstance(r, dict)):
+        word = "red"
+    elif any(str(r.get("status") or "") != "completed" for r in runs
+             if isinstance(r, dict)):
+        word = "pending"
+    else:
+        word = "green"
     return {"state": word, "head": head, "at": int(time.time())}
 
 

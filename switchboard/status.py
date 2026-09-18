@@ -1732,8 +1732,12 @@ def _stopped_owners(agents: list, duties, woken: dict, now: int) -> None:
             continue
         if not (owner.not_restorable or owner.derived_state in (COMPLETED, STALLED)):
             continue
-        owner.stopped_step = (f"{step.get('plan')}/{step.get('step')} "
-                              f"{step.get('name')}").strip()
+        # `<plan>/<step>` first, because that is what somebody TYPES to act on it, and the
+        # display name after it only where it is one — a step whose author left it nameless
+        # falls back to its own id, and `p-1/step-4 step-4` says the id twice.
+        sid, label = str(step.get("step") or ""), str(step.get("name") or "")
+        owner.stopped_step = (f"{step.get('plan')}/{sid}"
+                              + (f" {label}" if label and label != sid else ""))
         sent = woken.get(owner.name)
         owner.step_attention = bool(
             owner.not_restorable or (sent is not None and now - sent >= ATTENTION_TIMEOUT))
