@@ -3691,7 +3691,10 @@ def summary_bits(snap: Snapshot) -> list[str]:
     c = snap.counts
     bits = [f"{c['alive']} alive"]
     for key, word in (("stalled", "stalled"), ("gone", "gone"),
-                      ("blocked", "blocked"), ("at_prompt", "at a prompt")):
+                      # The COUNT key stays `blocked` — it is the published envelope's
+                      # name and `panel` reads it back — while the WORD follows the row,
+                      # which says ASKING since #325.
+                      ("blocked", "asking you"), ("at_prompt", "at a prompt")):
         if c[key]:
             bits.append(f"{c[key]} {word}")
     if c["unread"]:
