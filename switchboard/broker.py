@@ -7288,8 +7288,13 @@ class Broker:
             # loses nothing, because the open row is what both readouts are driven from.
             self._surface(me, body)
         else:
+            # NOT `needs_reply`. That flag exists to make the recipient's inbox say
+            # "answer this with `sb tell`", which is the one thing that does NOT close a
+            # Question — the line would be telling them to do the wrong thing. The body
+            # carries the right verb and the row carries the obligation: the asker's own
+            # idle turn is explained by the open question itself (`status.collect`).
             store.put_message(self.db, from_agent=me, to_agent=who, kind="tell",
-                              body=self._question_line(qid, body), needs_reply=True)
+                              body=self._question_line(qid, body))
             self._ring(who, f"{tag(me)} {self._say('notify.mail')}", mode=NORMAL)
         return {"id": qid, "asker": me, "target": who}
 

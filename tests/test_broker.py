@@ -1900,6 +1900,9 @@ class BrokerTest(unittest.TestCase):
         [m] = store.unread_for(self.db, "orch", mark=False)
         self.assertIn("which branch?", m["body"])
         self.assertIn(str(q["id"]), m["body"])       # it can be answered without a lookup
+        # NOT `needs_reply`: that line tells the reader to answer with `sb tell`, which is
+        # the one thing that does not close a Question.
+        self.assertEqual(m["needs_reply"], 0)
         # Nothing is on the human's board while an agent still owes the answer.
         self.assertEqual([a.name for a in status.collect(self.db, self.h,
                                                          needs_me=True).agents

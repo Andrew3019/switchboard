@@ -2907,6 +2907,33 @@ def escalate_question(db: sqlite3.Connection, qid: int) -> None:
     db.commit()
 
 
+def askers_awaiting_an_agent(db: sqlite3.Connection,
+                             only: Optional[str] = None) -> set[str]:
+    """Agents with an open Question aimed at ANOTHER AGENT that could still answer it.
+
+    The agent-targeted half of `open_questions_by_asker`, and it exists for the same
+    reason: an obligation held against somebody who can never discharge it explains
+    nothing. So the join requires BOTH ends to be live — an asker whose row has ended is
+    not waiting (#325's dead-asker rule), and a target whose row has ended will never
+    answer, which is the condition `hooks`/`status._awaiting_reply` already applies to an
+    unanswered `--needs-reply` message.
+
+    Never raises on a store that predates the table, for `open_questions_by_asker`'s reason.
+    """
+    scope = " AND q.asker = ?" if only is not None else ""
+    params: list[Any] = [Q_OPEN, Q_HUMAN] + ([only] if only is not None else [])
+    try:
+        rows = db.execute(
+            "SELECT q.asker AS asker FROM questions q "
+            " JOIN agents a ON a.name = q.asker "
+            " JOIN agents t ON t.name = q.target "
+            f" WHERE q.state = ? AND q.target <> ? AND a.ended_at IS NULL "
+            f"   AND t.ended_at IS NULL{scope}", params).fetchall()
+    except sqlite3.OperationalError:            # a store older than the table
+        return set()
+    return {r["asker"] for r in rows}
+
+
 def open_questions(db: sqlite3.Connection, *, asker: Optional[str] = None,
                    target: Optional[str] = None) -> list[sqlite3.Row]:
     """Open Questions, narrowed by asker and/or target. Newest last."""

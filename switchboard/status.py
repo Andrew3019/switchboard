@@ -1936,6 +1936,8 @@ def collect(
     activity = _last_activity(db, only)
     awaiting_reply = _awaiting_reply(db, only)
     why = _human_questions(db, only)
+    # The agent-targeted half of the same object — see `_agent_questions`.
+    asked_agents = _agent_questions(db, only)
     summaries = _last_summaries(db, only)
     # WHAT EVERY AGENT OWNS, from whichever plugins derive it (§6, Appendix A Step). One
     # call for the whole fleet, and an empty answer on a caller with no repo — see
@@ -2188,6 +2190,7 @@ def collect(
                   else wait_excuse if wait_excuse
                   else "waiting on children" if name in live_parent
                   else "waiting on a reply" if name in awaiting_reply
+                  else "waiting on an answer from another agent" if name in asked_agents
                   # THE TWO STEP-SHAPED OBLIGATIONS (§6), in Appendix A's own order —
                   # `waiting on agent` above `awaiting external`. They join the ladder
                   # rather than sitting beside it, which is what keeps `stalled` exactly
@@ -2227,7 +2230,8 @@ def collect(
             # fact, so the two cannot come apart again.
             child=(name in live_parent or (wait_is_fresh and wait_mode in ("any", "all"))),
             awaiting_task=awaiting,
-            agent=(name in awaiting_reply or name in plan_peers),
+            agent=(name in awaiting_reply or name in plan_peers
+                   or name in asked_agents),
             external=(name in awaiting_external
                       or (wait_is_fresh and wait_mode == "background")))
         agents.append(AgentStatus(
@@ -3066,6 +3070,19 @@ def _human_questions(db: sqlite3.Connection, only: Optional[str] = None) -> dict
     """
     from . import store                      # local: keeps this module importable alone
     return store.open_questions_by_asker(db, store.Q_HUMAN, only)
+
+
+def _agent_questions(db: sqlite3.Connection, only: Optional[str] = None) -> set[str]:
+    """Agents waiting on an ANSWER FROM ANOTHER AGENT. -> their names.
+
+    The other half of the Question object, and the reason it is a separate read: a question
+    put to an agent is not a claim on a person, so it must never reach `blocked_why` or the
+    board's NEEDS YOU. What it does do is explain the asker's idle turn, exactly as an
+    unanswered `tell --needs-reply` does — `waiting on agent` in Appendix A's words — which
+    is what stops an agent that asked and stopped reading STALLED.
+    """
+    from . import store                      # local: keeps this module importable alone
+    return store.askers_awaiting_an_agent(db, only)
 
 
 def _last_summaries(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, str]:

@@ -1450,6 +1450,23 @@ class StatusTest(unittest.TestCase):
         rows = self.by_name(status.collect(
             self.db, FakeHerdr([alive("kid", "idle"), alive("lead", "working")])))
         self.assertFalse(rows["kid"].blocked)
+        self.assertIsNone(rows["kid"].blocked_why)
+        # It explains the ASKER's idle turn instead, in Appendix A's own word.
+        self.assertEqual(rows["kid"].derived_state, status.WAITING_ON_AGENT)
+        self.assertFalse(rows["kid"].stalled)
+
+    def test_a_question_nobody_is_left_to_answer_explains_nothing(self):
+        """Same rule at the other end: a target whose row has ended will never answer, so
+        the asker is an ordinary silent agent from there on."""
+        store.create_agent(self.db, name="lead", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           session_id="s2")
+        store.create_question(self.db, asker="kid", target="lead", body="which branch?")
+        store.set_state(self.db, "lead", "done")
+        later = store.now() + int(status.STALL_THRESHOLD) + 1
+        rows = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("kid", "idle"), alive("lead", "idle")]), now=later))
+        self.assertTrue(rows["kid"].stalled)
 
     def test_a_root_awaiting_its_first_task_is_still_waiting_on_a_human(self):
         """The second way into `WAITING_ON_HUMAN`, unchanged by #325."""
