@@ -7279,6 +7279,16 @@ class Broker:
             # The tree boundary, exactly as `tell` applies it and before anything is
             # written: a question is a message plus a row, and neither may cross it.
             self.require_same_tree(me, who)
+        else:
+            # A question that RESOLVED to the human obeys the human cap whatever the literal
+            # target was, and this is the only place the true target is known. `cli._validate`
+            # caps a literal `human` with `validate.reason`, but `parent` from a ROOT agent
+            # resolves here to HUMAN carrying an agent-message's 40k cap — which is exactly
+            # the C6 hole (a whole report flattened onto a board row) the question cap exists
+            # to close. So the cap is enforced off the resolved target, not the typed word;
+            # a non-root agent's `parent` resolves to a real agent above and keeps the long
+            # cap. Idempotent on the literal-`human` path (already reason-checked in the CLI).
+            body = validate.reason(body, "question")
         qid = store.create_question(self.db, asker=me, target=who, body=body,
                                     target_literal=target)
         store.log_event(self.db, kind="question_asked", agent=me, question=qid,

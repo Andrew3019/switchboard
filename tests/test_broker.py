@@ -1917,6 +1917,22 @@ class BrokerTest(unittest.TestCase):
                                                          needs_me=True).agents
                           if a.blocked], ["kid"])
 
+    def test_a_root_agents_parent_question_obeys_the_human_cap(self):
+        """C6 again, by the back door. `parent` from a ROOT agent resolves to the human, so a
+        question typed at `parent` that would flatten a whole report onto a board row must be
+        refused exactly as a literal `human` one is. The cap follows the RESOLVED target, not
+        the typed word — `cli._validate` can only see the word, so `broker.ask` enforces it
+        once resolution has run. A non-root agent's `parent` reaches a real agent and keeps
+        the ordinary long message cap."""
+        store.create_agent(self.db, name="root", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="root", pane_id="w1:p1")
+        long = "x" * 3000
+        with self.assertRaises(broker_mod.validate.Invalid):
+            self.b.ask("parent", long, me="root")          # root's parent IS the human
+        self.assertEqual(store.open_questions(self.db, asker="root"), [])   # nothing written
+        q = self.b.ask("parent", long, me="kid")           # a real agent above — allowed
+        self.assertEqual(q["target"], "root")
+
     def test_a_question_whose_asker_is_gone_is_dropped(self):
         """#325 in as many words: "if its asker is gone, it's dropped". No timer and no
         auto-clear — the row stays open and simply stops summoning anybody."""
