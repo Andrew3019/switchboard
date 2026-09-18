@@ -711,6 +711,10 @@ _STEP_ID = re.compile(r"^(?:s(?:tep)?-)?(\d+)$", re.IGNORECASE)
 # came from declares `"completion": "system"` (Andrew, #314 A4 — a repo's own `deploy` kind can
 # be one Switchboard completes on observing the fact).
 _KIND_SYSTEM = ("open_pr", "merge")
+# The two system kinds by name, for the code that cares WHICH of them it is holding rather
+# than only that it is one — the Open PR bundle, `observe`, and `derive.py`'s Appendix A
+# states. Unpacked from the tuple above so there is one list of system kinds, not two.
+OPEN_PR_KIND, MERGE_KIND = _KIND_SYSTEM
 _KIND_JUDGMENT = ("implement", "review", "research", "design")
 _STEP_KINDS = _KIND_SYSTEM + _KIND_JUDGMENT
 SYSTEM, JUDGMENT = "system", "judgment"
@@ -722,6 +726,33 @@ DEFAULT_KIND = "implement"
 # on-the-fly step with no def gets `DEFAULT_KIND`.
 _DEF_KIND = {"implementation": "implement", "review": "review",
              "create-pr": "open_pr", "merge": "merge"}
+
+# How long ONE `gh api` call is given, and how long one of `observe`'s is.
+#
+# THE SECOND NUMBER IS SMALLER ON PURPOSE. `GH_TIMEOUT` is the budget for a call a person is
+# waiting on — `merge`, `comment`, the Open PR bundle — where the only thing worse than slow
+# is giving up on a round trip that was about to succeed. `observe` is nobody's foreground:
+# it runs unattended on a timer, it makes two calls per plan, and its whole run has to fit
+# inside a bound the collector will actually wait for (`collector.OBSERVE_TIMEOUT`). A call
+# that has not answered in ten seconds is one this poll should drop and the next one should
+# retry, because dropping it costs a minute of staleness and waiting on it costs the rest of
+# the plans in the batch.
+GH_TIMEOUT, OBSERVE_GH_TIMEOUT = 30, 10
+
+# HOW MANY OPEN-PR PLANS ONE `observe` VISITS, and the whole of what bounds its wall time.
+#
+# The bound has to be a property of the RUN and not of the fleet, because the collector gives
+# the command a fixed number of seconds and a fleet grows. Without a cap, a repo simply
+# accumulated open-PR plans until `plans × 2 × per-call` crossed that timeout, at which point
+# the child was killed mid-flight, phase 3 never ran, NOTHING from the poll landed, and every
+# subsequent tick repeated the same doomed walk — §7's "polling is the correctness floor"
+# silently stopping for good, on exactly the busy fleet the design treats as normal.
+#
+# Eight, against `OBSERVE_GH_TIMEOUT`: the worst case is 8 × 2 × 10 s = 160 s, which
+# `collector.OBSERVE_TIMEOUT` is sized over. At the ~1 s a healthy `gh api` actually takes it
+# is ~16 s, so the cap is not what decides the common case — it is what stops the rare one
+# being unbounded. What is NOT visited this run is not skipped: see `_observe_order`.
+OBSERVE_BATCH = 8
 
 # Long enough for a real sentence, short enough that a plan stays readable when it is shown.
 # Anything longer wants a brief, and briefs are files a checkpoint can point at.
@@ -841,6 +872,10 @@ def register(reg):
                       help="close the review step as the PR opens although its recorded "
                            "reviewer worked on the implementation; recorded as self-reviewed"),
               reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "observe", observe, audience="both",
+        help="poll GitHub for the remote facts no local event announces — a PR merged or "
+             "closed, and the head's check state — and move what they settle")
     reg.command(
         "step", step_verb, audience="both",
         help="`step retry <step>` — re-run a failed Open PR bundle, idempotently: the checks "
@@ -2872,9 +2907,13 @@ def _pr_int(value: Any) -> Optional[int]:
     return int(text) if re.fullmatch(r"[1-9]\d*", text) else None
 
 
-def _pull(ctx, pr: int) -> tuple[dict, Optional[Result]]:
-    """The pull request as GitHub holds it right now — head, state and branch."""
-    got, bad = _github(ctx, [f"repos/{{owner}}/{{repo}}/pulls/{pr}"])
+def _pull(ctx, pr: int, *, timeout: int = GH_TIMEOUT) -> tuple[dict, Optional[Result]]:
+    """The pull request as GitHub holds it right now — head, state and branch.
+
+    `timeout` is the caller's budget for the one call. It is the foreground one by default
+    and `OBSERVE_GH_TIMEOUT` from the poller, which has a whole batch to get through.
+    """
+    got, bad = _github(ctx, [f"repos/{{owner}}/{{repo}}/pulls/{pr}"], timeout=timeout)
     if bad:
         return {}, bad
     try:
@@ -2969,8 +3008,9 @@ def _record_landing(ctx, plan_id: str, who: str, reason: Optional[str], *,
     _write(ctx.state_dir, doc, seal)
 
 
+
 def _github(ctx, argv: list[str], *, body: Optional[str] = None,
-            payload: Optional[dict] = None):
+            payload: Optional[dict] = None, timeout: int = GH_TIMEOUT):
     """One bounded `gh api` call, returned as `(process, refusal)`.
 
     JSON goes through stdin so a full plan is neither shell-expanded nor exposed as an
@@ -2988,7 +3028,7 @@ def _github(ctx, argv: list[str], *, body: Optional[str] = None,
         got = subprocess.run(["gh", "api", *argv], cwd=str(_here(ctx)),
                              input=json.dumps(payload) if payload is not None else None,
                              stdin=subprocess.DEVNULL if payload is None else None,
-                             capture_output=True, text=True, timeout=30)
+                             capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
         why = f"could not reach GitHub through gh: {e}"
         return None, Result(ok=False, human=why, data={"error": why})
@@ -3034,6 +3074,256 @@ def open_pr(ctx, args) -> Result:
     comment, so it can put a done step back to `failed`, exactly as the design says.
     """
     return _bundle(ctx, args.plan, args, verb="open-pr")
+
+
+def observe(ctx, args) -> Result:
+    """Poll GitHub for the remote facts no local event announces, and move what they settle.
+
+    THE CORRECTNESS FLOOR OF THE DERIVATION TICK (migration_sb_v2.md §7): "Remote facts reach
+    Switchboard by webhook where the host provides one and by polling on the tick otherwise;
+    a webhook is an optimization, polling is the correctness floor." Nothing local fires when
+    a person merges a pull request in a browser, so without this a landed change sits on
+    every board as `Needs Human Review` until somebody types a verb — which is the state the
+    whole wave exists to stop an agent having to declare.
+
+    THREE FACTS AND NOTHING ELSE. A PR observed MERGED closes the plan's `merge`-kind step,
+    which is what takes the Plan to `complete` (Appendix A: "a `merge`-kind Step whose PR is
+    observed merged → `complete` from any state"). A PR observed CLOSED WITHOUT MERGING puts
+    the `open_pr`-kind step back to `failed` ("a system Step whose remote fact was later
+    observed false (PR closed)"), which is the one direction a completed system step may move
+    in. And the head's check rollup is recorded as a plan-level `ci` fact — a fact and NOT a
+    step and NOT a merge precondition (§4), so nothing here gates on it and nothing waits.
+
+    IT DOES NOT LAND ANYTHING AND MUST NOT. `change.landing` is the landing AUTHORITY's
+    record — who authorised this merge and against which head — and an observation is not an
+    authorisation. `merge` still writes it when `merge` runs; this only records that the
+    world moved, so a merge somebody did in a browser reads as done without a machine
+    inventing a person's approval for it. That is also why the step closes with the `auto-tick`
+    action, like every other fact this file works out for itself.
+
+    EVERY PLAN IN THE REPO, not this worktree's. A pull request is a fact about the repo, and
+    this runs from the collector's cwd — whichever checkout that happens to be — so scoping
+    it to `_here` would leave every other worktree's PR unobserved for as long as nobody
+    stood in it.
+
+    NEVER RAISES AND NEVER REFUSES. It runs unattended on a timer with nobody to read a
+    refusal, so a `gh` that will not answer, a PR that has vanished and a plan whose record
+    is half-written are each one plan skipped, reported in `data` and nowhere else.
+
+    THREE PHASES, AND THE MIDDLE ONE HOLDS NOTHING. This plugin ships `LOCK = False` on a
+    stated, accepted basis: two writers on one plan is a last-writer-wins race, tolerable
+    only because in ordinary operation the window is one local read-mutate-write and is
+    effectively instantaneous. A verb that read every plan in the repo, then spent up to
+    thirty seconds per open PR inside `gh`, then wrote what it had read at the start, would
+    not be paying that accepted cost — it would be widening it by three orders of magnitude,
+    against a store several worktrees write to, from a poller each of them runs. A tick
+    another agent made while this waited on GitHub would be silently reverted.
+
+    So the slow half is done against a LIST OF FACTS and not against the document: read the
+    ids and PR numbers, drop the document, ask GitHub, then re-read and apply. The window
+    that is actually exposed is the third phase — one read, one mutate, one write, no
+    subprocess between them — which is the same window `tick` has and the one the plugin's
+    design accepted. `_derive` re-reads for exactly this reason and says so.
+
+    A plan that disappeared or was landed while GitHub was being asked is simply not there
+    to apply the fact to, which the re-read gets for free: the second `_find` misses, or
+    `_observing` no longer names a PR, and the fact is dropped rather than resurrected onto
+    a plan that has moved past it.
+
+    ONE RUN IS BOUNDED AND THE REST CARRIES OVER. Phase 2 visits at most `OBSERVE_BATCH`
+    plans, least-recently-observed first (`_observe_order`), and stamps `observed_at` on each
+    one it reaches. That is what makes the run's worst-case wall time a property of this file
+    rather than of how many pull requests a repo happens to have open — the collector gives
+    the command a fixed number of seconds, and a command that could need more than that, on a
+    fleet that grows, eventually gets killed on every single tick and lands nothing at all.
+    Nothing is skipped: what is not visited this run has the oldest stamp next run, so every
+    open-PR plan is reached within `ceil(n / OBSERVE_BATCH)` polls.
+    """
+    who = ctx.agent or "human"
+    # PHASE 1 — what to ask about. The document is dropped at the end of this block and
+    # nothing below reads it; only ids and numbers survive into the slow half.
+    doc, _seal = _read_logged(ctx)
+    asking = _observe_order(doc["plans"])
+    waiting = max(0, len(asking) - OBSERVE_BATCH)
+    asking = asking[:OBSERVE_BATCH]
+    del doc, _seal
+
+    # PHASE 2 — GitHub. Seconds per plan, and the store is not held open across any of it.
+    facts: list[tuple] = []
+    skipped: list[dict] = []
+    for pid, pr, head in asking:
+        pull, bad = _pull(ctx, pr, timeout=OBSERVE_GH_TIMEOUT)
+        if bad:
+            # Stamped anyway, via an empty fact below — a plan whose PR cannot be fetched
+            # must not become the permanently-oldest entry that wins every batch for ever
+            # while the plans behind it are never reached.
+            skipped.append({"plan": pid, "pr": pr,
+                            "error": str((bad.data or {}).get("error") or "")[:200]})
+            facts.append((pid, pr, None, None))
+            continue
+        facts.append((pid, pr, pull,
+                      _ci(ctx, str(pull.get("head", {}).get("sha") or head or ""),
+                          timeout=OBSERVE_GH_TIMEOUT)))
+
+    # PHASE 3 — apply, against the store as it is NOW.
+    doc, seal = _read_logged(ctx)
+    moved: list[dict] = []
+    changed = False
+    for pid, pr, pull, fact in facts:
+        plan = _find(doc, pid)
+        if plan is None:
+            continue                    # landed, deleted or renumbered while we asked
+        # BEFORE the facts are applied and whether or not there were any, because this is
+        # the fairness record and not a result: a plan GitHub refused to talk about has been
+        # visited, and must go to the back of the queue like every other one.
+        #
+        # It costs a file write per visited plan per run, and that is the price of the cap
+        # being fair rather than a rotation that could starve the same plans for ever. It is
+        # strictly CHEAPER than what it replaced: every open-PR plan in the repo used to be
+        # rewritten every minute because `ci`'s timestamp always differed (see `_ci_fact`),
+        # and this is at most `OBSERVE_BATCH` of them.
+        plan["observed_at"] = int(time.time())
+        changed = True
+        if pull is None:
+            continue
+        why = f"PR #{pr} observed {'merged' if pull.get('merged') else pull.get('state')}"
+        if pull.get("merged"):
+            for step in _of_kind(plan, MERGE_KIND):
+                if str(step.get("progress") or "") != OPEN:
+                    continue
+                _log(ctx, plan, who, DERIVED, why, _progress(step, DONE, None),
+                     step=step.get("id"))
+                moved.append({"plan": pid, "step": step.get("id"),
+                              "to": DONE, "why": why})
+                changed = True
+        elif str(pull.get("state") or "") == "closed":
+            for step in _of_kind(plan, OPEN_PR_KIND):
+                if str(step.get("progress") or "") != DONE:
+                    continue
+                step["progress"] = FAILED
+                step["failure"] = {"op": "pull request", "detail": why}
+                _log(ctx, plan, who, DERIVED, why, f"{step['id']} done → {FAILED}",
+                     step=step.get("id"))
+                moved.append({"plan": pid, "step": step.get("id"),
+                              "to": FAILED, "why": why})
+                changed = True
+        # Compared WITHOUT `at`, which is the reading and not the fact. Every `_ci` call
+        # stamps a fresh `at`, so comparing whole dicts made every observation a change and
+        # rewrote every open-PR plan's file every minute for ever — churn on a store several
+        # worktrees share, saying nothing.
+        if fact is not None and _ci_fact(fact) != _ci_fact(plan.get("ci")):
+            plan["ci"] = fact
+    if changed:
+        _write(ctx.state_dir, doc, seal)
+    human = "; ".join(f"{m['plan']}/{m['step']} → {m['to']} ({m['why']})" for m in moved)
+    return Result(human=human or "nothing observed",
+                  data={"moved": moved, "skipped": skipped,
+                        "visited": [pid for pid, _pr, _head in asking],
+                        "waiting": waiting})
+
+
+def _observe_order(plans: list) -> list[tuple]:
+    """The open-PR plans `observe` should ask about, least-recently-observed first.
+
+    -> `[(plan_id, pr_number, recorded_head), ...]`.
+
+    THE FAIRNESS RULE, and the whole of it. `observed_at` is stamped on every plan a run
+    reaches, so the ones a capped run did not get to sort ahead of the ones it did on the
+    next run, and a plan that has never been observed at all sorts ahead of everything. No
+    cursor, no global marker, no new document-level shape: the ordering key is a scalar on
+    the plan it describes, which is also the only thing that stays right when plans are
+    added, landed or deleted between runs.
+
+    Tie-broken on the plan's own number so that a run is deterministic — several plans
+    stamped in the same second are visited in a fixed order rather than dict order, which is
+    what makes the carry-over testable.
+    """
+    out = []
+    for plan in plans:
+        if not isinstance(plan, dict):
+            continue
+        pr, head = _observing(plan)
+        if pr is None:
+            continue
+        try:
+            at = int(plan.get("observed_at") or 0)
+        except (TypeError, ValueError):
+            at = 0                      # a hand-edit put something else there; never seen
+        out.append((at, _num(_PLAN_ID, plan.get("id")) or 0, str(plan.get("id")), pr, head))
+    out.sort()
+    return [(pid, pr, head) for _at, _n, pid, pr, head in out]
+
+
+def _ci_fact(given: Any) -> tuple:
+    """A CI reading without its timestamp — what makes two of them the same fact."""
+    if not isinstance(given, dict):
+        return ()
+    return (str(given.get("state") or ""), str(given.get("head") or ""))
+
+
+def _observing(plan: dict) -> tuple[Optional[int], Optional[str]]:
+    """The PR this plan is still waiting on, and its recorded head. `(None, None)` if none.
+
+    A plan is worth a `gh` call when it has opened a pull request and nothing has landed it:
+    before the first, there is no remote fact to observe, and after the second the plan's own
+    record already says how it ended. `merge` writing `landing` is therefore also what stops
+    this paying for a plan forever.
+    """
+    change = plan.get("change")
+    if not isinstance(change, dict) or isinstance(change.get("landing"), dict):
+        return None, None
+    pr = change.get("pr")
+    if not isinstance(pr, dict):
+        return None, None
+    return _pr_int(pr.get("number")), _sha(pr.get("head"))
+
+
+def _of_kind(plan: dict, kind: str) -> list[dict]:
+    """This plan's steps of one KIND — never of one name. See `_KIND_SYSTEM`."""
+    return [s for s in (plan.get("steps") or ())
+            if isinstance(s, dict) and _kind_of(s) == kind]
+
+
+def _ci(ctx, head: str, *, timeout: int = GH_TIMEOUT) -> Optional[dict]:
+    """The combined check state of one commit, as a plan-level fact. None if it cannot be got.
+
+    A FACT AND NOT A GATE (§4, "Remote CI is neither a Step nor a merge precondition"). It is
+    recorded because a person reading a board wants to know whether the PR they are about to
+    merge is green, and for no other reason: nothing in this file reads it back, no verb
+    waits on it, and a red one refuses nothing.
+
+    CHECK RUNS AND NOT THE COMMIT-STATUS ENDPOINT, and that is a correction rather than a
+    choice. `commits/:sha/status` is the legacy Statuses API; GitHub Actions publishes CHECK
+    RUNS, which it does not report at all — so against this repo's own green pull request it
+    answers `pending`, forever. A `ci` fact that reads pending on every green PR is worse
+    than no fact, so this reads `check-runs` and reduces the list itself.
+
+    Three words. Any run that finished badly is red, any run still going is pending, and a
+    commit every run passed on is green. A commit with NO check runs is `pending` too, which
+    is honest: nothing has said anything about it yet, and a repo that runs no checks has no
+    green to report.
+    """
+    if not head:
+        return None
+    got, bad = _github(ctx, [f"repos/{{owner}}/{{repo}}/commits/{head}/check-runs",
+                             "--paginate"], timeout=timeout)
+    if bad or got is None:
+        return None
+    try:
+        runs = json.loads(got.stdout or "{}").get("check_runs")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if not isinstance(runs, list) or not runs:
+        return {"state": "pending", "head": head, "at": int(time.time())}
+    bad_ends = ("failure", "timed_out", "cancelled", "action_required", "stale")
+    if any(str(r.get("conclusion") or "") in bad_ends for r in runs if isinstance(r, dict)):
+        word = "red"
+    elif any(str(r.get("status") or "") != "completed" for r in runs
+             if isinstance(r, dict)):
+        word = "pending"
+    else:
+        word = "green"
+    return {"state": word, "head": head, "at": int(time.time())}
 
 
 def step_verb(ctx, args) -> Result:
@@ -4230,8 +4520,8 @@ def name_step(ctx, args) -> Result:
 # What a READ adds to a plan and its steps — derived live, resolved from the library, or
 # computed from the store — and never stores. A document carrying them back carries nothing.
 _VIEW_PLAN = frozenset({"version", "condition", "worktree", "roles", "tokens", "incomplete",
-                        "advisories", "file"})
-_VIEW_STEP = frozenset({"owner_status"})
+                        "advisories", "file", "landing"})
+_VIEW_STEP = frozenset({"owner_status", "state"})
 # SYSTEM-HELD: what the store and the verbs own. An agent's document never overrides these,
 # so an edit read before a tick cannot un-tick the step by handing the old progress back.
 # `kind` and `def` on a step are not in here because a CHANGE to either is refused rather than
@@ -7911,10 +8201,26 @@ def _viewed(shown: dict, live: _Live, *, tokens: bool = False) -> dict:
     one thing here that costs a subprocess per agent (see `_Live.tokens`). `list` renders a
     board and must not pay it; a terminal `show` has nowhere to draw it either.
     """
-    steps = [dict(s, kind=_kind_of(s), owner_status=live.owner(s.get("owner")))
+    # THE APPENDIX A DERIVED STATES (§6, #324), from the one place they are computed. A
+    # reader of `show` and `status.collect` read the same function over the same document —
+    # `derive.py` — so a step that `awaiting external` excuses its owner for cannot draw
+    # `open` here while the fleet's readout calls it `blocked`.
+    # Imported here and not at the top: `derive` imports this module's own vocabulary, so a
+    # module-level import either way round is a cycle. Local, it is resolved after both
+    # modules exist — the same shape `status.collect` uses for `store`.
+    from . import derive
+    derived = derive.step_states(shown)
+    steps = [dict(s, kind=_kind_of(s), owner_status=live.owner(s.get("owner")),
+                  state=derived.get(str(s.get("id") or "")))
              for s in (shown.get("steps") or ())]
     condition, where = live.condition(shown)
-    out = dict(shown, steps=steps, condition=condition, worktree=where)
+    # `landing` BESIDE `condition` and not instead of it: they are different axes and both
+    # are real. `condition` is whether anybody is at work on this plan (live/dormant/
+    # finished/abandoned); `landing` is where the CHANGE has got to (`in progress` /
+    # `Needs Human Review` / `complete`). A dormant plan with a PR out is both, and
+    # collapsing the two would lose whichever one the reader happened to want.
+    out = dict(shown, steps=steps, condition=condition, worktree=where,
+               landing=derive.plan_condition(shown, derived))
     # The agents that actually MOVED this plan — the `by` of every tick and skip — which is
     # the same join both stats want and is read once for the two of them.
     who = [c["by"] for c in _closings(out).values() if c.get("by")]
@@ -8308,6 +8614,7 @@ def _step_lines(steps: list) -> list[str]:
     where it is, and a skipped step whose reason is twenty lines down in the changelog is
     the absence this design exists to avoid — `show` is the place a plan is read in full.
     """
+    from . import derive                  # local, for `_viewed`'s reason: `derive` imports us
     out = []
     for s in steps:
         # Nine, because an id is `step-<n>` now and `s-<n>` on a plan made before that:
@@ -8330,6 +8637,15 @@ def _step_lines(steps: list) -> list[str]:
             bits.append(f"[{_flat(_defkey(s))}]")
         if s.get("obliged_by"):
             bits.append(f"obliged by {_flat(s['obliged_by'])}")
+        # THE DERIVED STATE, and only where it says something the stored word does not.
+        # `progress` is in the column at the front of this line and is what somebody TYPED;
+        # this is what Switchboard concludes (`derive.step_states`). They agree on most
+        # steps — an `open` step that is eligible is `active` and saying both would be the
+        # same fact twice — so the two readings the stored word cannot express are the only
+        # ones drawn: `pending`, which is "open but not yours to start yet", and `blocked`,
+        # which is a merge waiting on a person and the reason its owner is not stalled.
+        if s.get("state") in (derive.PENDING, derive.BLOCKED):
+            bits.append(_flat(s["state"]))
         if s.get("gate"):
             # The word on the line and the sentence below it. A lead scanning a plan needs
             # to see WHICH steps end in a human without reading every exit condition, and

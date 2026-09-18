@@ -2700,3 +2700,225 @@ class AwaitingKeypressTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DerivationEngineTest(unittest.TestCase):
+    """Wave 5's three claims (#324), each stated as the thing that used to go wrong.
+
+    All three are about the SAME question asked of a quiet agent — is this silence worth a
+    person's attention — and the derivation engine's whole job is that the answer is read
+    off what the agent owns and awaits rather than off having watched it stop.
+
+    The plans plugin is reached through the real seam (`obligations._load`, the real
+    `derive.agent_obligations`, a real file on disk in the format the plugin reads). What is
+    stubbed is only WHERE that plugin and its state directory are, because resolving those
+    needs a git checkout and these tests have a temp directory. Nothing about the derivation
+    itself is faked, and `FakeHerdr` is untouched.
+    """
+
+    PLUGIN = Path(__file__).resolve().parent.parent / "defaults" / "plugins" / "plans"
+
+    # `StatusTest`'s fixture and its two helpers, not its subclass: inheriting it would
+    # re-run its whole hundred-test body under this name for nothing.
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = store.connect(path=Path(self.tmp.name) / "state.db")
+
+    def tearDown(self):
+        self.db.close(); self.tmp.cleanup()
+
+    def by_name(self, snap):
+        return {a.name: a for a in snap.agents}
+
+    def past_the_floor(self, seconds=1):
+        return store.now() + int(status.STALLED_FLOOR) + seconds
+
+    def with_plans(self, *plans) -> Path:
+        """Put these plan documents where the seam will find them. -> the repo to pass.
+
+        Format 1 (`plans.json`), which is the shape the plugin reads when nothing has been
+        migrated — written by hand here rather than through `create` so that the fixture is
+        the document under test and not whatever the current `create` happens to compose.
+        """
+        from switchboard import obligations
+
+        state = Path(self.tmp.name) / "plugins" / "plans"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "plans.json").write_text(json.dumps({"plans": list(plans)}))
+        _mod, hook = obligations._load("plans", self.PLUGIN)
+        self.enterContext(mock.patch.object(
+            obligations, "hooks", lambda repo: [("plans", hook, state)]))
+        return Path(self.tmp.name)
+
+    @staticmethod
+    def plan(*steps, pr=None, landing=None, pid="p-1"):
+        change = {"path": "shaped", "pr": pr, "landing": landing}
+        return {"id": pid, "title": "a job", "steps": list(steps), "change": change}
+
+    @staticmethod
+    def step(sid, kind, *, owner=None, progress="open", deps=()):
+        return {"id": sid, "name": sid, "kind": kind, "owner": owner,
+                "progress": progress, "deps": list(deps)}
+
+    # -- (a) an open obligation is a reason, not a stall ---------------------
+
+    def test_an_agent_holding_an_open_obligation_is_waiting_and_not_stalled(self):
+        """A merge step whose PR is open is `blocked`, so its owner is `awaiting external`.
+
+        THE BUG THIS IS: before the derivation engine, an agent that opened a pull request
+        and stopped — which is exactly what the protocol tells it to do — read as an
+        ordinary silent agent the moment its turn ended, and went to `sb status --needs-me`
+        beside genuinely dead ones. Nothing about the PR was visible from the agent's row,
+        because the obligation lived in a plugin's plan file and `collect` had never been
+        able to see one.
+
+        The `pending` half is asserted in the same test on purpose: Appendix A says
+        "`pending` Steps are not actionable owned work and do not defeat `awaiting
+        external`", so a step the owner cannot start yet must not turn this into `working`.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        repo = self.with_plans(self.plan(
+            self.step("step-1", "open_pr", owner="w1", progress="done"),
+            self.step("step-2", "merge", owner="w1", deps=("step-1",)),
+            self.step("step-3", "implement", owner="w1", deps=("step-2",)),
+            pr={"number": 7, "head": "abc1234"}))
+
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=self.past_the_floor(), repo=repo))["w1"]
+        self.assertFalse(a.stalled)
+        self.assertFalse(a.needs_human)
+        self.assertEqual(a.derived_state, status.AWAITING_EXTERNAL)
+        self.assertEqual(a.idle_excuse, "awaiting an external event")
+
+        # And the moment the merge lands, the obligation is gone and the silence is its own
+        # again: nothing else on this row changed, so this is the derivation and not a flag.
+        repo = self.with_plans(self.plan(
+            self.step("step-1", "open_pr", owner="w1", progress="done"),
+            self.step("step-2", "merge", owner="w1", progress="done", deps=("step-1",)),
+            self.step("step-3", "implement", owner="w1", deps=("step-2",)),
+            pr={"number": 7, "head": "abc1234"}))
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=self.past_the_floor(), repo=repo))["w1"]
+        self.assertTrue(a.stalled)
+        self.assertEqual(a.derived_state, status.STALLED)
+
+    # -- (b) the threshold is what decides ----------------------------------
+
+    def test_unexplained_idleness_stalls_only_once_it_is_past_stall_threshold(self):
+        """`stall_threshold` is a repo-configurable term and not a second name for the floor.
+
+        Patched rather than read at its shipped value, and that is the point of the test:
+        the default is `stalled_floor`'s own number, so a test that only used the default
+        would pass whether or not the term existed at all. With it raised, the row is idle,
+        unexplained and NOT yet stalled — which is the behaviour a repo turning this up is
+        buying — and it stalls at the threshold and not before.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        h = FakeHerdr([alive("w1", "idle")])
+        with mock.patch.object(status, "STALL_THRESHOLD", 600.0):
+            early = self.by_name(status.collect(
+                self.db, h, now=store.now() + 60))["w1"]
+            late = self.by_name(status.collect(
+                self.db, h, now=store.now() + 601))["w1"]
+
+        self.assertFalse(early.stalled)
+        self.assertEqual(early.derived_state, status.WORKING)
+        self.assertEqual(early.idle_excuse, "idle, but not yet for stall_threshold")
+        self.assertTrue(late.stalled)
+        self.assertEqual(late.derived_state, status.STALLED)
+        self.assertIsNone(late.idle_excuse)      # stalled is exactly "idle and no excuse"
+
+    # -- (c) a restart is not a fleet of stalls ------------------------------
+
+    def test_a_restorable_absence_does_not_stall_and_keeps_its_derived_state(self):
+        """Appendix A: "A `not live, restorable` agent keeps its last derived status rather
+        than decaying — `stall_threshold` does not run against it".
+
+        The case is a machine restart: herdr lists nobody, every checkout is still on disk,
+        and every agent in the fleet is `not live, restorable`. If the clock ran against
+        those rows, the first collect after a reboot would put the whole fleet in front of a
+        person at once — the flood §9 exists to prevent — and every one of those items would
+        be about an agent that one `sb restore` brings back.
+
+        Read a week on, not a second: the point is that no amount of elapsed time does it,
+        which a reading just past the threshold could not tell from a debounce.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1",
+                           cwd=self.tmp.name)
+        store.create_agent(self.db, name="w2", role="worker", session_id="s2",
+                           cwd=self.tmp.name)
+        a_week = store.now() + 7 * 24 * 3600
+        with mock.patch.object(status, "STALL_THRESHOLD", 600.0):
+            rows = self.by_name(status.collect(self.db, FakeHerdr([]), now=a_week))
+
+        for name in ("w1", "w2"):
+            with self.subTest(agent=name):
+                a = rows[name]
+                self.assertEqual(a.liveness, status.RESTORABLE)
+                self.assertFalse(a.stalled)
+                self.assertFalse(a.needs_human)
+                self.assertEqual(a.derived_state, status.WORKING)
+
+    # -- what a review found: the two the three above did not reach ----------
+
+    def test_a_declared_wait_that_expired_stops_explaining_the_derived_row(self):
+        """`derived_state` and `stalled` are one verdict, including past the wait's grace.
+
+        THE BUG THIS PINS. `agents.wait_mode` is the DECLARATION and is cleared only by
+        `sb reconcile` (`Broker.wake_expired_waits`), never by `collect`. A declaration that
+        outlived `WAIT_EXCUSE_GRACE` with no reconcile behind it — no collector running, or
+        a wake prompt that kept failing into an unreachable pane — sits on the row
+        indefinitely. Read raw, it went on explaining a row that `stalled` and `idle_excuse`
+        had already, correctly, given up on, so the one field this wave adds said `awaiting
+        external` on a row whose `stalled` was true. Both halves are asserted here because
+        the invariant is that they agree, not that either is right on its own.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_wait(self.db, "w1", "background")
+        h = FakeHerdr([alive("w1", "idle")])
+
+        fresh = self.by_name(status.collect(self.db, h, now=self.past_the_floor()))["w1"]
+        self.assertFalse(fresh.stalled)
+        self.assertEqual(fresh.derived_state, status.AWAITING_EXTERNAL)
+
+        # Nothing clears `wait_mode` — which is the case this is about — and the clock moves
+        # past the grace the declaration was worth.
+        at = store.now() + int(status.WAIT_EXCUSE_GRACE) + 1
+        expired = self.by_name(status.collect(self.db, h, now=at))["w1"]
+        self.assertTrue(expired.stalled)
+        self.assertIsNone(expired.idle_excuse)
+        self.assertEqual(expired.derived_state, status.STALLED)
+
+    def test_a_wake_is_timed_from_the_step_it_was_sent_about(self):
+        """`attention_timeout` runs per Step, not per agent.
+
+        An agent keeps holding steps after it stops: it is poked about one, that one
+        resolves, and it stops again later still holding another. Keyed on the agent alone,
+        the second step inherits the first one's timestamp — an old wake puts a step that
+        has never been poked in front of a person at once. Keyed on the step, the second one
+        starts its own clock, which is the only reading that means anything.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_state(self.db, "w1", "done")
+        repo = self.with_plans(self.plan(
+            self.step("step-1", "implement", owner="w1"),
+            self.step("step-2", "review", owner="w1", deps=("step-1",))))
+        # A wake about a step this agent no longer holds, old enough to have timed out.
+        store.log_event(self.db, kind="step_wake_sent", agent="w1", step="p-1/step-9")
+        self.db.execute("UPDATE events SET created_at = created_at - ? "
+                        "WHERE kind='step_wake_sent'", (int(status.ATTENTION_TIMEOUT) + 1,))
+        self.db.commit()
+
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=self.past_the_floor(), repo=repo))["w1"]
+        self.assertEqual(status.step_ref(a.stopped_step), "p-1/step-1")
+        self.assertFalse(a.step_attention)     # step-1 has never been woken about
+
+        # The same wake, now about the step it is actually holding, does time it out.
+        self.db.execute("UPDATE events SET payload = ? WHERE kind='step_wake_sent'",
+                        (json.dumps({"step": "p-1/step-1"}),))
+        self.db.commit()
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=self.past_the_floor(), repo=repo))["w1"]
+        self.assertTrue(a.step_attention)
+        self.assertTrue(a.needs_human)

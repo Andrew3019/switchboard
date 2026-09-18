@@ -362,6 +362,55 @@ TURN_DOUBT_GRACE = config.setting("timeouts.turn_doubt_grace")
 # `collect` for why that is the honest arrangement and not a stack of two debounces.
 STALLED_FLOOR = config.setting("timeouts.stalled_floor")
 
+# THE TERM THAT DECIDES A STALL (§6, Appendix A `stalled`): how long an agent with none of
+# the explained-idle rows applying must have done nothing before that is read as a stall.
+# Repo-configurable, and `defaults/settings.toml` carries the whole argument for why it
+# ships at `stalled_floor`'s own value and why the two are not one number.
+#
+# NOT A SECOND FLOOR. `STALLED_FLOOR` is an EXCUSE in the ladder below ("just finished a
+# turn"), which is what keeps `stalled` exactly "idle and no excuse"; this is a duration
+# term applied to the row that has no excuse left. They are spelled apart because they
+# answer different questions, and a repo that raises one must be able to leave the other.
+STALL_THRESHOLD = config.setting("timeouts.stall_threshold")
+
+# How long a wake delivered to a stopped owner may go unacted on before the Step it still
+# holds is put in front of a person (§6, "a stopped owner does not hide an incomplete
+# Step"). Deliberately NOT `STALL_THRESHOLD`: §7 says tuning stall detection must not change
+# how long an unprocessed obligation survives.
+ATTENTION_TIMEOUT = config.setting("timeouts.attention_timeout")
+
+# APPENDIX A'S AGENT ROWS, as named states rather than as the loose phrases `idle_excuse`
+# has always carried. Seven words, and the tuple order IS the evaluation order the table
+# specifies — "Only one applies at a time; rows are evaluated top-to-bottom, so an explained
+# idle always beats `stalled`".
+#
+# DERIVED AND NOT STORED, like every other reading on this row. The store's `state` column is
+# still the four-word self-report it always was (`working | blocked | done | failed`) and
+# nothing here rewrites it; this is what Switchboard CONCLUDES about an agent from what it
+# owns and awaits, which is a different fact and belongs in a different field.
+#
+# IT SITS BESIDE `idle_excuse` RATHER THAN REPLACING IT. The phrases are what two readouts
+# already draw and what every existing test pins; this is the canonical vocabulary §6, `sb
+# context` and the browser have to agree on. The two are computed from one expression in
+# `collect` for `idle_excuse`'s own reason — so no reader can find a row that is `stalled`
+# here and says why it is idle there.
+WORKING = "working"
+WAITING_ON_CHILD = "waiting on child"
+WAITING_ON_HUMAN = "waiting on human"
+WAITING_ON_AGENT = "waiting on agent"
+AWAITING_EXTERNAL = "awaiting external"
+COMPLETED = "completed"
+STALLED = "stalled"
+DERIVED_STATES = (WORKING, WAITING_ON_CHILD, WAITING_ON_HUMAN, WAITING_ON_AGENT,
+                  AWAITING_EXTERNAL, COMPLETED, STALLED)
+
+# The two derived Step words `collect` has an opinion about, spelled here rather than
+# imported from the plans plugin: sb must not depend on a plugin's module for a string, and
+# `switchboard/obligations.py` is the seam that keeps the dependency pointing the other way.
+# `blocked` is the one that excuses an owner (`awaiting external`); `active` and `failed`
+# are the two that are incomplete work somebody has to be doing.
+STEP_ACTIVE, STEP_BLOCKED, STEP_FAILED = "active", "blocked", "failed"
+
 # An explicit wait explains an idle turn, but not forever. The stored timestamp makes the
 # excuse ageable without mutating state from this read-only module; after this window the
 # row is ordinary STALLED and reaches the same needs-human path as any other silent agent.
@@ -449,6 +498,13 @@ DONE_TO_THE_AGENT = (
     # the poke reset the idle clock of the silence it was sent to break — the row read
     # `idle 0s` and not stalled immediately after being woken.
     "wait_expiry_pinged", "wait_expiry_ping_failed",
+    # The stopped-owner wake is the same sentence a third time (§6): `Broker
+    # .wake_stopped_owners` writes these against the agent it poked about a Step it still
+    # holds, and `ATTENTION_TIMEOUT` is timed from that poke. Counting one as the agent's own
+    # activity would reset the idle clock of the silence the poke was sent to break AND
+    # restart the very timeout the poke starts — the row would read `idle 0s`, stop being a
+    # stopped owner, and be woken again on the next tick, forever.
+    "step_wake_sent", "step_wake_failed",
 )
 
 # Not an agent, and not a mailbox holder: nothing is ever addressed to the human. The name
@@ -654,6 +710,33 @@ class AgentStatus:
     # is not restorable either, and raising an item about every one of them would summon a
     # person to every agent that ever finished.
     closed: bool = False
+    # THE APPENDIX A ROW THIS AGENT IS ON — one of `DERIVED_STATES`, or None on a row
+    # nobody derived it for. Set in `collect` from the same expression `idle_excuse` and
+    # `stalled` come from, so the three cannot disagree: `stalled` is true exactly when this
+    # is `STALLED`, and every other value names the obligation that explains the idleness.
+    #
+    # Defaulted and last, for `turn`'s reason: a hand-built row in a test and a snapshot
+    # published by a collector running older code both have to construct. None reads as "no
+    # opinion" everywhere, which is what a row from before this existed is entitled to.
+    derived_state: Optional[str] = None
+    # THE INCOMPLETE STEP A STOPPED OWNER IS STILL HOLDING (§6, "a stopped owner does not
+    # hide an incomplete Step") — `"<plan>/<step> <name>"`, or None when this agent has not
+    # stopped or holds no such Step.
+    #
+    # `active` or `failed` only. A `blocked` Step is deliberately excluded: its owner is by
+    # definition reactivatable and the Plan's own `Needs Human Review` item already
+    # represents that wait, so counting it here would put one PR in the queue twice.
+    #
+    # Non-None is what `sb reconcile` wakes on. Being woken is NOT the attention item —
+    # `step_attention` below is — because an ordinary Step-to-Step handoff to an agent that
+    # has reported `done` is exactly this shape, and summoning a person to every one of them
+    # would poison the queue with the fleet's normal working rhythm.
+    stopped_step: Optional[str] = None
+    # Whether that Step has reached `Needs You`: the owner cannot be woken at all (not
+    # restorable), or the wake was delivered and nothing has happened for
+    # `ATTENTION_TIMEOUT`. One more OR'd condition into `needs_human`, with `stopped_step`
+    # as its explanation string — the shape that queue already has, rather than a second one.
+    step_attention: bool = False
 
     @property
     def restorable(self) -> bool:
@@ -1087,10 +1170,18 @@ class AgentStatus:
         reaches it. Its restorable sibling is deliberately NOT here — that one is waiting
         for a command, not for a decision, and putting a whole restarted fleet in this
         queue is the flood §9 exists to prevent.
+
+        `step_attention` is the stopped-owner backstop (§6): this agent has stopped while
+        still owning an `active` or `failed` Step, and either it cannot be woken at all or
+        the wake it was sent has gone unacted on past `ATTENTION_TIMEOUT`. It is the one
+        condition here that is about work rather than about the agent, and it is here rather
+        than in a queue of its own for the reason every other row is: the queue is a
+        fleet-wide filter over this boolean plus a per-row explanation, and it is already
+        general enough. The wake comes first and is not this — see `stopped_step`.
         """
         return (self.blocked or self.at_prompt or self.unread > 0
                 or self.waiting_to_be_rung or self.stalled or self.signal_drift
-                or self.not_restorable)
+                or self.not_restorable or self.step_attention)
 
     @property
     def inferred_summons(self) -> bool:
@@ -1182,6 +1273,11 @@ class AgentStatus:
             # `closed` needs columns this row does not carry — and `panel.agent_from_dict`
             # reads exactly the dataclass's own field names back.
             "liveness", "closed", "held",
+            # Derived in `collect` and carried for the same reason `liveness` is: a
+            # renderer reading a published envelope cannot recompute any of the three.
+            # `derived_state` needs the whole fleet's obligations, and the two Step fields
+            # need a plugin's state directory — neither of which a board may open.
+            "derived_state", "stopped_step", "step_attention",
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
@@ -1540,6 +1636,213 @@ def _match(row, agent, tracks_terminal: bool):
     return agent
 
 
+def _bound_waits(agents: list, awaited_children: dict, plan_peers: dict,
+                 awaiting_reply: dict) -> None:
+    """Break a derived wait whose every subject is itself getting nowhere (§6).
+
+    THE LOOPHOLE THIS CLOSES. A derived wait is an obligation, and an obligation held
+    against an agent that is itself parked explains nothing: a chain of leads each waiting
+    on the lead below it, all the way down to one stalled worker, used to read as a fleet
+    of patiently-waiting agents with a single quiet row at the bottom that nobody was
+    looking at. §6: "It is also bounded, to stop a chain of parked agents mutually
+    explaining itself all the way up."
+
+    TWO THINGS HAVE TO BE TRUE, both of them. The waiter must be idle past
+    `STALL_THRESHOLD` — a wait that has only just begun is not evidence of anything — and
+    EVERY agent it awaits must be unproductive. One awaited agent that is working, or that
+    is waiting for a reason already in a person's queue, holds the wait: "A child that is
+    idle for a *surfaced* reason (it is `waiting on human`, or `awaiting external`) does not
+    break the parent's wait, because that reason is already in the queue; only an
+    unproductive, unexplained-or-chained child does."
+
+    ONE LEVEL AND NOT A FIXPOINT, which is #324's own Not-in-scope. Every reading below is
+    the subject's PROVISIONAL row — what it derived before this pass ran — so two agents
+    waiting on each other both break on the same pass and neither is resolved against the
+    other's post-break verdict. Iterating to a fixpoint would break longer rings too and is
+    exactly the recursion that was left out; a longer ring breaks on the pass after the one
+    that breaks its innermost link, which is one derivation tick later.
+
+    An EMPTY awaited set is not a bound and never breaks anything, and neither is a DECLARED
+    wait. `sb waiting` is a first-class declaration with an expiry of its own —
+    `WAIT_EXCUSE_GRACE`, and DESIGN-TRUTH pins that stall detection recognises each
+    declaration for its window — so a row carrying one is left to that mechanism whatever its
+    children are doing. Two opinions about one declaration is how the fleet comes to say
+    "waiting" on one readout and "stalled" on the next.
+    """
+    was = {a.name: a.derived_state for a in agents}
+    live = {a.name: a for a in agents}
+
+    def unproductive(name: str, chained: tuple) -> bool:
+        other = live.get(name)
+        # Not in the snapshot, or gone for good: an obligation held against an agent that
+        # cannot come back is no explanation at all (§6, the dead-asker escape).
+        return other is None or other.not_restorable or was.get(name) in chained
+
+    for a in agents:
+        if (a.stalled or a.idle_excuse is None or a.wait_excuse is not None
+                or a.idle < STALL_THRESHOLD):
+            continue
+        if a.derived_state == WAITING_ON_CHILD:
+            # The table's own pair: a child that is `stalled` or is itself `waiting on
+            # child` is the chain this exists to cut. Nothing else about a child breaks it.
+            awaited, chained = awaited_children.get(a.name, ()), (STALLED, WAITING_ON_CHILD)
+        elif a.derived_state == WAITING_ON_AGENT:
+            # `waiting on agent` is bounded "the same way", and the ring it has to cut is
+            # its own: agents waiting on each other are each `waiting on agent`, so that
+            # word joins `stalled` and the child chain in the unproductive set here.
+            awaited = sorted(set(plan_peers.get(a.name, ()))
+                             | set(awaiting_reply.get(a.name, ())))
+            chained = (STALLED, WAITING_ON_CHILD, WAITING_ON_AGENT)
+        else:
+            continue
+        if not awaited or not all(unproductive(n, chained) for n in awaited):
+            continue
+        a.stalled, a.idle_excuse, a.derived_state = True, None, STALLED
+
+
+def _stopped_owners(agents: list, duties, woken: dict, now: int) -> None:
+    """A stopped owner does not hide an incomplete Step (§6). -> nothing; rows are stamped.
+
+    EVALUATED ON EVERY READING and not only at a transition, which is the sentence §6 spends
+    a line on: "an owner that goes `stalled` while already holding an `active` Step is caught
+    like one that stopped earlier". There is no edge to hook — the owner did not do anything
+    when it stopped, that is what stopping is — so the only honest place for this is the
+    recompute that runs anyway.
+
+    `blocked` Steps are excluded, and the exclusion is load-bearing rather than tidy: a
+    `blocked` Step is a `Merge` whose PR is waiting on a person, its owner is by definition
+    reactivatable, and the Plan's `Needs Human Review` item is already that wait in the
+    queue. Including it would put one pull request in front of a person twice, under two
+    different headings, for as long as it took them to merge it.
+
+    TWO STAGES, and only the second one is an attention item. `stopped_step` says the Step
+    wants its owner woken — an ordinary Step-to-Step handoff to an agent that reported `done`
+    is exactly this shape, and it must stay inside the agent tree. `step_attention` is what
+    reaches a person: the owner cannot be woken at all, or a wake was delivered and nothing
+    happened for `ATTENTION_TIMEOUT`.
+    """
+    if not duties.steps:
+        return
+    rows = {a.name: a for a in agents}
+    for step in duties.steps:
+        if str(step.get("state") or "") not in (STEP_ACTIVE, STEP_FAILED):
+            continue
+        owner = rows.get(str(step.get("owner") or ""))
+        if owner is None or owner.stopped_step is not None:
+            continue
+        if not (owner.not_restorable or owner.derived_state in (COMPLETED, STALLED)):
+            continue
+        # `<plan>/<step>` first, because that is what somebody TYPES to act on it, and the
+        # display name after it only where it is one — a step whose author left it nameless
+        # falls back to its own id, and `p-1/step-4 step-4` says the id twice.
+        sid, label = str(step.get("step") or ""), str(step.get("name") or "")
+        owner.stopped_step = (f"{step.get('plan')}/{sid}"
+                              + (f" {label}" if label and label != sid else ""))
+        sent = woken.get((owner.name, step_ref(owner.stopped_step)))
+        owner.step_attention = bool(
+            owner.not_restorable or (sent is not None and now - sent >= ATTENTION_TIMEOUT))
+
+
+def step_ref(label: Optional[str]) -> str:
+    """The `<plan>/<step>` half of a `stopped_step` label — what somebody types.
+
+    A label is `"p-1/step-4 review"`: the reference first, then the step's display name
+    where it has one. Everything that has to MATCH two mentions of one step — the wake's
+    event and the timeout read against it — keys on the reference alone, because a display
+    name is renamed freely and a wake whose key changed under it would start its clock
+    again with nothing having happened.
+    """
+    return str(label or "").split(" ", 1)[0]
+
+
+def _step_wakes(db: sqlite3.Connection,
+                only: Optional[str] = None) -> dict[tuple[str, str], int]:
+    """When each Step's owner was last woken about it. -> (agent, `<plan>/<step>`) -> epoch.
+
+    The clock `ATTENTION_TIMEOUT` runs against, and it is read off the event log rather than
+    stored on a row for the reason every other timing here is: the wake IS an event, and a
+    column would be a second copy of it that could disagree. `Broker.wake_stopped_owners`
+    is the only writer.
+
+    KEYED ON THE STEP AND NOT ONLY THE AGENT. An agent keeps holding steps after it stops —
+    it completes one, stops again later still holding another — and an agent-keyed clock
+    hands the second step the first one's timestamp: an old wake makes a step that has never
+    been poked reach `Needs You` at once, and a recent one hides a step that has. Each wake
+    times the step it was actually sent about.
+
+    Scoped by `only` on the single-agent fast path, like every other scan in this file, so
+    `sb inspect` hits `idx_events_agent` rather than grouping the fleet's whole event table.
+    Read in Python rather than by a SQL `GROUP BY`, because the step is inside the payload
+    JSON — the same thing `_block_reasons` does with `why`, ordered by `id` so the last row
+    read is the latest.
+    """
+    scope = " AND agent = ?" if only is not None else ""
+    params = (only,) if only is not None else ()
+    out: dict[tuple[str, str], int] = {}
+    for r in db.execute(
+        "SELECT agent, payload, created_at FROM events "
+        f"WHERE kind='step_wake_sent' AND agent IS NOT NULL{scope} ORDER BY id", params
+    ):
+        try:
+            ref = step_ref((json.loads(r["payload"] or "{}") or {}).get("step"))
+        except json.JSONDecodeError:
+            continue
+        if ref:
+            out[(r["agent"], ref)] = int(r["created_at"])
+    return out
+
+
+def _derived_row(row, *, idle: bool, excuse: Optional[str], turn: Optional[str],
+                 alive: Optional[bool], child: bool, awaiting_task: bool,
+                 agent: bool, external: bool) -> str:
+    """Which Appendix A row this agent is on — one of `DERIVED_STATES`.
+
+    THE LADDER IS THE TABLE, read top to bottom, and the whole of what that ordering buys is
+    the table's own sentence: "an explained idle always beats `stalled`". So every row that
+    NAMES an obligation is tested before the one that says nothing explains this.
+
+    `working` is first and means what the table says — actively taking turns or running
+    tools. A row that is not parked is working whatever else is true of it: an agent with a
+    live child, a pending reply and three owned Steps is not *waiting* on any of them while
+    it is mid-turn, it is at work, and drawing "waiting on child" over a running agent is the
+    misread `idle_excuse` already refuses to make.
+
+    `blocked` IS `waiting on human`, and it is tested above `waiting on child` rather than in
+    the table's position for it. `sb block` is an agent that stopped to ask a person and
+    stays stopped until answered — the single most specific thing that can be true about why
+    a row is not moving — and a lead that blocked while a child of its own happens to be
+    alive is waiting on the person, not on the child. The table's ordering is about which
+    derived obligation outranks which; a stored, declared stop outranks all of them.
+
+    `completed` sits BELOW the waiting rows, exactly as the table puts it, and that is not a
+    detail: an agent that called `sb done` and left a question open displays `waiting on
+    agent`, while every rule elsewhere that says "completed" still means it called `sb done`
+    (Appendix A says so in as many words). This is a READING; `state` is untouched.
+
+    The tail is the honest one. A row inside `SPAWN_GRACE` or inside the anti-flicker floor
+    has an excuse that is not an obligation — it is "ask again shortly" — and calling that
+    `stalled` would be false while calling it a wait would invent an obligation nobody has.
+    It reads `working`, which is what the row is entitled to claim from what was observed.
+    """
+    blocked = row["state"] == "blocked" and not working_again(row["state"], turn, alive)
+    finished = row["state"] in FINISHED and not working_again(row["state"], turn, alive)
+    if not (idle or blocked or finished):
+        return WORKING
+    if blocked:
+        return WAITING_ON_HUMAN
+    if child:
+        return WAITING_ON_CHILD
+    if awaiting_task:
+        return WAITING_ON_HUMAN
+    if agent:
+        return WAITING_ON_AGENT
+    if external:
+        return AWAITING_EXTERNAL
+    if finished:
+        return COMPLETED
+    return STALLED if excuse is None else WORKING
+
+
 def collect(
     db: sqlite3.Connection,
     h: Optional[Herdr] = None,
@@ -1633,6 +1936,20 @@ def collect(
     awaiting_reply = _awaiting_reply(db, only)
     why = _block_reasons(db, only)
     summaries = _last_summaries(db, only)
+    # WHAT EVERY AGENT OWNS, from whichever plugins derive it (§6, Appendix A Step). One
+    # call for the whole fleet, and an empty answer on a caller with no repo — see
+    # `obligations` for the seam and for why sb asks a plugin rather than opening its files.
+    #
+    # Imported HERE and not at the top, for `store`'s reason one line up: this module is
+    # imported by both boards, and the seam reaches `plugins`, which reaches `store`.
+    from . import obligations as obligations_mod
+    duties = obligations_mod.collect_facts(repo)
+    # When each stopped owner was last poked about a Step it still holds. Read off the same
+    # event log everything else is, and NOT counted as the agent's own activity — see
+    # `DONE_TO_THE_AGENT`, where `step_wake_sent` is listed for exactly `wait_expiry_pinged`'s
+    # reason: a poke that reset the clock of the silence it was sent to break would make the
+    # timeout it starts unreachable.
+    woken = _step_wakes(db, only) if duties.steps else {}
 
     # THE CAPABILITY SIDE OF EVERY ROW, in two reads for the whole fleet rather than two
     # per agent: this runs on every draw of a board that redraws every two seconds.
@@ -1716,10 +2033,58 @@ def collect(
     #
     # An unreachable herdr (`liveness` None) changes nothing: None is not NOT_RESTORABLE,
     # so the set is exactly what it was before this existed.
-    live_parent = {row["parent"] for row in rows
-                   if row["parent"] and row["state"] in ("working", "blocked")
-                   and row["ended_at"] is None
-                   and liveness_of.get(row["name"]) != NOT_RESTORABLE}
+    awaited_children: dict[str, list[str]] = {}
+    for row in rows:
+        if (row["parent"] and row["state"] in ("working", "blocked")
+                and row["ended_at"] is None
+                and liveness_of.get(row["name"]) != NOT_RESTORABLE):
+            awaited_children.setdefault(row["parent"], []).append(row["name"])
+    live_parent = set(awaited_children)
+    # THE TWO STEP-SHAPED OBLIGATIONS (§6). Both are statements about ONE agent read off the
+    # whole fleet's steps, which is why `obligations.Facts` carries every step rather than
+    # only the owned ones.
+    #
+    # `awaiting_external` is Appendix A verbatim: "idle owning ≥1 `blocked` Step and no
+    # `active` Step". `pending` steps do not defeat it — they are not work this agent can
+    # act on — and that falls out of testing for `active` rather than for "incomplete".
+    #
+    # `plan_peers` is the second half of `waiting on agent`: "owning a Plan end-to-end whose
+    # only incomplete Steps are owned by other `live`/`restorable` agents". THERE IS NO
+    # END-TO-END-OWNER FIELD to read — no plan document records one — so this is the step
+    # ownership derivation that stands in for it: an agent that owns at least one step of a
+    # plan (it is on the job), owns nothing incomplete of its own there (it has nothing to
+    # do), and whose plan still has incomplete steps owned by somebody else, is waiting on
+    # those somebodies. A recorded end-to-end owner would narrow it and is #329/#335
+    # territory; until one exists, this is what the plan actually says.
+    liveish = {name for name, v in liveness_of.items() if v != NOT_RESTORABLE}
+    awaiting_external: set[str] = set()
+    plan_peers: dict[str, set[str]] = {}
+    if duties.steps:
+        by_plan: dict[str, list[dict]] = {}
+        for step in duties.steps:
+            by_plan.setdefault(str(step.get("plan") or ""), []).append(step)
+        owned_states: dict[str, set[str]] = {}
+        for step in duties.steps:
+            owner = step.get("owner")
+            if owner:
+                owned_states.setdefault(owner, set()).add(str(step.get("state") or ""))
+        awaiting_external = {who for who, states in owned_states.items()
+                             if STEP_BLOCKED in states and STEP_ACTIVE not in states}
+        for pid, steps in by_plan.items():
+            incomplete = [s for s in steps
+                          if str(s.get("state") or "") in (STEP_ACTIVE, STEP_FAILED)]
+            others = {str(s.get("owner")) for s in incomplete if s.get("owner")}
+            if not others:
+                continue
+            for who in duties.owners.get(pid, ()):
+                # Nothing incomplete of its own here, and every agent that DOES hold this
+                # plan's incomplete work can still come back to it. An awaited owner that is
+                # not restorable is no explanation at all — §6's "an end-to-end owner whose
+                # driving agents all become not restorable falls through to the stopped-owner
+                # and stalled derivations rather than waiting on the dead forever".
+                rest = others - {who}
+                if who not in others and rest and rest <= liveish:
+                    plan_peers.setdefault(who, set()).update(rest)
     absent_since: dict[str, Optional[int]] = {}
     doubt_since: dict[str, Optional[int]] = {}
     agents = []
@@ -1814,13 +2179,45 @@ def collect(
                   else wait_excuse if wait_excuse
                   else "waiting on children" if name in live_parent
                   else "waiting on a reply" if name in awaiting_reply
+                  # THE TWO STEP-SHAPED OBLIGATIONS (§6), in Appendix A's own order —
+                  # `waiting on agent` above `awaiting external`. They join the ladder
+                  # rather than sitting beside it, which is what keeps `stalled` exactly
+                  # "idle and no excuse" with two more things now able to excuse a row.
+                  else "waiting on another agent's step" if name in plan_peers
+                  else "awaiting an external event" if name in awaiting_external
                   else "starting up" if starting
                   # LAST, so a row that has a reason of its own says that reason instead:
                   # every excuse above is a fact about the agent, and this one is only
                   # "not long enough to mean anything yet". See STALLED_FLOOR.
                   else "just finished a turn" if idle_for < STALLED_FLOOR
+                  # THE THRESHOLD TERM (§6, Appendix A `stalled`: "no activity for
+                  # `stall_threshold`"). Unreachable at the shipped default, where the
+                  # threshold IS the floor and the line above has already caught everything
+                  # shorter; a repo that raises `timeouts.stall_threshold` is what brings it
+                  # into play. It is an excuse and not a separate term for the floor's own
+                  # reason — `stalled` stays "idle and no excuse" and no reader can find a
+                  # row that is stalled and also says why it is idle.
+                  else "idle, but not yet for stall_threshold"
+                  if idle_for < STALL_THRESHOLD
                   else None)
         idle = bool(running and turn_over and alive is not False)
+        derived = _derived_row(
+            row, idle=idle, excuse=excuse, turn=turn, alive=alive,
+            # `wait_is_fresh` and not `wait_mode`, and the distinction is the whole of a
+            # bug this had: `wait_mode` is the DECLARATION, and only `sb reconcile` ever
+            # clears it (`Broker.wake_expired_waits`). A declaration that outlived
+            # `WAIT_EXCUSE_GRACE` with no reconcile behind it — no collector running, or a
+            # wake prompt that kept failing into an unreachable pane — stays on the row
+            # indefinitely. Read raw, it went on explaining a row that `stalled` and
+            # `idle_excuse` had already, correctly, given up on: the one field this wave
+            # exists to add said `awaiting external` beside `stalled: true`. The ladder
+            # above reads `wait_excuse`, which is None past the grace; this reads the same
+            # fact, so the two cannot come apart again.
+            child=(name in live_parent or (wait_is_fresh and wait_mode in ("any", "all"))),
+            awaiting_task=awaiting,
+            agent=(name in awaiting_reply or name in plan_peers),
+            external=(name in awaiting_external
+                      or (wait_is_fresh and wait_mode == "background")))
         agents.append(AgentStatus(
             name=name,
             role=row["role"],
@@ -1860,6 +2257,11 @@ def collect(
             # happening would be a note about nothing, and a working agent that happens to
             # have children is working, not waiting on them.
             idle_excuse=excuse if idle else None,
+            # THE SAME VERDICT IN APPENDIX A'S VOCABULARY. Computed from the same `excuse`
+            # above, so `derived_state == STALLED` is true exactly when `stalled` is — and
+            # unlike `idle_excuse` it is set on every row, because "working" and "completed"
+            # are answers a canonical vocabulary has to be able to give.
+            derived_state=derived,
             wait_expired=wait_expired and idle and excuse is None,
             wait_excuse=wait_excuse,
             # `unended` and not `running`, so a BLOCKED agent whose pane has gone is a death
@@ -1904,6 +2306,16 @@ def collect(
             # what is drawn from them, and `_capability_sets` for why NULL is not empty.
             **_capability_sets(row, caps, templates),
         ))
+
+    # THE TWO PASSES THAT NEED EVERY ROW FIRST (§6). Both are here rather than in the loop
+    # because both are statements about one row read against OTHER rows' finished verdicts —
+    # the same reason `live_parent` is computed in the pre-pass above, one level further on.
+    # The order matters and is the only order that works: bounding can CREATE a stall, and
+    # the backstop asks whether an owner has stopped, which a fresh stall is one way to have
+    # done. Everything downstream — the keypress probe, the debounce, the reap — then reads
+    # one settled verdict rather than a provisional one.
+    _bound_waits(agents, awaited_children, plan_peers, awaiting_reply)
+    _stopped_owners(agents, duties, woken, now)
 
     # Every row is built before this and none is changed by it except in the one field it
     # stamps. It goes here, after the loop, because it needs the finished `stalled` verdict
@@ -2551,8 +2963,9 @@ def _last_activity(db: sqlite3.Connection, only: Optional[str] = None) -> dict[s
     return seen
 
 
-def _awaiting_reply(db: sqlite3.Connection, only: Optional[str] = None) -> set[str]:
-    """Agents that asked a question and have not been answered. -> their names.
+def _awaiting_reply(db: sqlite3.Connection,
+                    only: Optional[str] = None) -> dict[str, set[str]]:
+    """Agents that asked a question and have not been answered. -> asker -> who it asked.
 
     The sharpest case the eager stall got wrong. `sb tell <who> "..." --needs-reply` is how
     the protocol says to ask another agent something, and it says in the same breath that
@@ -2592,9 +3005,17 @@ def _awaiting_reply(db: sqlite3.Connection, only: Optional[str] = None) -> set[s
     the board and the collector arrive here on a READ-ONLY connection and cannot migrate a
     store older than either column. A store without `needs_reply` has no questions to find
     and excuses nobody — which is the behaviour it has always had.
+
+    A MAPPING RATHER THAN A SET, since wave 5, and every existing reader is untouched by
+    that: `name in awaiting_reply` reads the keys exactly as it read the set. The values are
+    WHO each asker is waiting on, which is what `waiting on agent` has to bound itself
+    against (§6: "it breaks if every agent it awaits is itself `stalled` or waiting, so a
+    ring of agents cannot mutually explain each other"). The recipient's own liveness is
+    already half-checked by the `ended_at IS NULL` join above; the other half — whether that
+    agent is itself getting anywhere — is a derived reading and belongs to `collect`.
     """
     if not _has_column(db, "messages", "needs_reply"):
-        return set()
+        return {}
     deliverable = ("AND q.undeliverable_at IS NULL "
                    if _has_column(db, "messages", "undeliverable_at") else "")
     # `only` scopes to the one asker a single-agent reader (`inspect`) cares about, so the
@@ -2602,8 +3023,9 @@ def _awaiting_reply(db: sqlite3.Connection, only: Optional[str] = None) -> set[s
     # `collect`'s note.
     scope = "AND q.from_agent = ? " if only is not None else ""
     params = (only,) if only is not None else ()
-    return {r["from_agent"] for r in db.execute(
-        "SELECT DISTINCT q.from_agent FROM messages q "
+    out: dict[str, set[str]] = {}
+    for r in db.execute(
+        "SELECT DISTINCT q.from_agent, q.to_agent FROM messages q "
         "  JOIN agents a ON a.name = q.to_agent "
         f" WHERE q.needs_reply = 1 {deliverable}{scope}"
         "   AND a.ended_at IS NULL "
@@ -2612,7 +3034,9 @@ def _awaiting_reply(db: sqlite3.Connection, only: Optional[str] = None) -> set[s
         "                      AND r.to_agent = q.from_agent "
         "                      AND r.id <> q.id AND r.created_at >= q.created_at)",
         params
-    )}
+    ):
+        out.setdefault(r["from_agent"], set()).add(r["to_agent"])
+    return out
 
 
 def _block_reasons(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, str]:
@@ -3345,6 +3769,19 @@ def _attention(snap: Snapshot) -> list[str]:
                 out.append(f"  {a.name:<{w}}  idle {fmt_age(a.idle)} on a screen herdr "
                            f"cannot read  →  press a key in its pane: "
                            f"sb inspect {a.name}")
+            elif a.step_attention and a.stopped_step:
+                # ABOVE `stalled`, because the two can be true of one row and this is the
+                # one that says what is actually at stake. A stalled agent is a row nobody
+                # is moving; a stalled agent still holding an unfinished Step is a piece of
+                # a plan nobody is moving, and the Step is what a person needs to see —
+                # they may hand it to someone else rather than nurse this agent back.
+                #
+                # The wake has already been tried and has not worked (that is what
+                # `step_attention` means), so the advice is not "poke it" — it is the
+                # ownership verb, which is what actually clears the item.
+                out.append(f"  {a.name:<{w}}  stopped holding {a.stopped_step}"
+                           f"  →  hand it on: sb plugin plans take "
+                           f"{a.stopped_step.split(' ')[0]} --steal")
             elif a.stalled:
                 # After the mail branches, which are the more actionable read of the same
                 # agent: mail nobody announced is fixed by ringing it, and this is not.

@@ -1216,7 +1216,13 @@ class TheAutoRestoreTrigger(PanelTest):
     def test_it_never_starts_in_the_same_tick_as_a_reap(self):
         """The reconciler records a death and this brings the dead back. Two `sb`
         processes doing that at once over the same rows can write the second answer after
-        the first, so a tick that spawned a reap spawns nothing else."""
+        the first, so a tick that spawned a reap spawns no RESTORE.
+
+        Stated against the restore and not against "spawns nothing else", because the
+        remote-fact poller shares this tick and deliberately does not share the exclusion:
+        it writes a plugin's plan files and never an agent row, so it cannot be the second
+        answer this is about. The two the rule covers are the only two that write the same
+        rows."""
         state = collector.State(pid=1, started_at=0.0)
         snap = self._dead("w1")
         snap.agents[0].gone = True             # a reap is due for the same row
@@ -1225,7 +1231,8 @@ class TheAutoRestoreTrigger(PanelTest):
              mock.patch.object(collector.panel, "publish", lambda *a, **kw: None):
             collector.tick(self.paths, state, None, None)
 
-        self.assertEqual([a[1] for a in self.ran], ["reconcile"])
+        self.assertIn("reconcile", [a[1] for a in self.ran])
+        self.assertNotIn("restore", [a[1] for a in self.ran])
         self.assertEqual(state.restores, 0)
 
 

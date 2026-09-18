@@ -6952,6 +6952,12 @@ class LandingMergeTest(PlansSandbox):
                 box["deleted"] = target.rsplit("/heads/", 1)[-1]
                 return subprocess.CompletedProcess(argv, 0, "", "")
             if "/pulls/" in target:
+                # The one instant a test can stage something CONCURRENT: the caller is
+                # blocked on this subprocess, which is where a real `gh` round trip spends
+                # its seconds. Absent — which it is for every test but the one that sets it
+                # — this fake behaves exactly as it always did.
+                if callable(box.get("on_pull")):
+                    box["on_pull"]()
                 return subprocess.CompletedProcess(argv, 0, json.dumps(
                     {"number": int(target.rsplit("/", 1)[-1]), "state": state,
                      "merged": box["merged"],
@@ -7557,3 +7563,162 @@ def _plans():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ObserveTest(PlansSandbox):
+    """`observe` — the derivation tick's polling half (migration_sb_v2.md §7, #324).
+
+    BORROWS `LandingMergeTest`'s `github()` fixture rather than building a second one: this
+    verb asks the same endpoint about the same pull request, and two fakes of one API is how
+    a test comes to pass against an argv the plugin no longer builds. Borrowed and not
+    inherited, because inheriting it would re-run that class's whole landing suite under
+    this name for nothing.
+    """
+
+    HEAD = LandingMergeTest.HEAD
+    github = LandingMergeTest.github
+
+    def a_plan_with_an_open_pr(self) -> None:
+        """A plan standing where `observe` has something to do: PR open, nothing landed."""
+        self.ok("plugin", "plans", "create", "a job", "--display", "board: a job",
+                "--step", "build = write it", "--lib", "create-pr", "--lib", "merge")
+        doc = self._doc()
+        plan = doc["plans"][0]
+        for step in plan["steps"]:
+            if step.get("kind") != "merge":
+                step["progress"] = "done"
+        plan["change"] = {"path": "shaped", "pr": {"number": 42, "head": self.HEAD},
+                          "landing": None}
+        self._save(doc)
+
+    def test_a_merge_nobody_typed_still_closes_the_merge_step(self):
+        """The whole reason this verb exists: a person merges in a browser, no local event
+        fires, and without a poll the plan reads `Needs Human Review` for ever."""
+        self.a_plan_with_an_open_pr()
+        before = self.data("plugin", "plans", "show", "p-1")
+        self.assertEqual(before["landing"], "Needs Human Review")
+        self.assertEqual([s["state"] for s in before["steps"]][-1], "blocked")
+
+        with self.github(merged=True, state="closed"):
+            self.ok("plugin", "plans", "observe")
+
+        after = self.data("plugin", "plans", "show", "p-1")
+        self.assertEqual(after["landing"], "complete")
+        self.assertTrue(all(s["state"] == "complete" for s in after["steps"]))
+
+    def test_a_pr_observed_closed_puts_the_open_pr_step_back_to_failed(self):
+        """Appendix A, Step `failed`: "a system Step whose remote fact was later observed
+        false (PR closed)". The one direction a completed system step may move in."""
+        self.a_plan_with_an_open_pr()
+        with self.github(merged=False, state="closed"):
+            self.ok("plugin", "plans", "observe")
+
+        after = self.data("plugin", "plans", "show", "p-1")
+        opened = next(s for s in after["steps"] if s["kind"] == "open_pr")
+        self.assertEqual(opened["state"], "failed")
+        self.assertEqual(after["landing"], "in progress")
+
+    def test_it_re_reads_the_store_after_asking_github_and_keeps_a_concurrent_write(self):
+        """A tick made while `observe` was waiting on GitHub must survive it.
+
+        THE BUG THIS PINS. This plugin ships `LOCK = False` on the accepted basis that two
+        writers on one plan is last-writer-wins over a window of one local read-mutate-write.
+        `observe` asks GitHub — up to thirty seconds per open pull request — and the first
+        version of it read every plan BEFORE that and wrote them after, turning an
+        instantaneous window into a tens-of-seconds one, against a store several worktrees
+        write to, from a poller each of them runs. Anything another agent ticked in between
+        was silently reverted, with nothing in the plan to say it had ever been there.
+
+        The concurrent write is staged from inside the fake's `/pulls/` handler, which is
+        exactly the instant `observe` is blocked on the subprocess — so this fails against a
+        read-then-ask-then-write ordering and passes against ask-then-re-read-then-write.
+        """
+        self.a_plan_with_an_open_pr()
+
+        def somebody_else_ticks():
+            doc = self._doc()
+            doc["plans"][0].setdefault("notes", []).append(
+                {"text": "written while observe was waiting on github",
+                 "by": "another-agent", "at": 1})
+            self._save(doc)
+
+        with self.github(merged=True, state="closed") as gh:
+            gh.box["on_pull"] = somebody_else_ticks
+            self.ok("plugin", "plans", "observe")
+
+        after = self._doc()["plans"][0]
+        self.assertEqual([n["text"] for n in after.get("notes") or []],
+                         ["written while observe was waiting on github"])
+        # And `observe`'s own fact landed too — the re-read is not a way of dropping it.
+        merge = next(s for s in after["steps"] if s.get("kind") == "merge")
+        self.assertEqual(merge["progress"], "done")
+
+    def many_plans_with_open_prs(self, n: int) -> list[str]:
+        """`n` plans each recording an open, unlanded PR. -> their ids, in creation order."""
+        for i in range(n):
+            self.ok("plugin", "plans", "create", f"job {i}",
+                    "--display", f"board: job {i}", "--step", "build = write it",
+                    "--lib", "create-pr", "--lib", "merge")
+        doc = self._doc()
+        for i, plan in enumerate(doc["plans"]):
+            plan["change"] = {"path": "shaped", "pr": {"number": 100 + i,
+                                                       "head": self.HEAD}, "landing": None}
+        self._save(doc)
+        return [p["id"] for p in doc["plans"]]
+
+    def test_one_run_is_capped_and_the_rest_is_picked_up_by_the_next(self):
+        """A run's wall time is a property of this file, not of how many PRs are open.
+
+        THE BUG THIS PINS. The collector gives `observe` a fixed number of seconds. Uncapped,
+        a repo simply accumulated open-PR plans until `plans × 2 × per-call latency` crossed
+        that timeout — at which point the child was killed mid-flight and, because nothing is
+        written until the whole batch has been asked about, NOTHING from the poll landed.
+        Every following tick repeated the same doomed walk, so polling stopped happening at
+        all, permanently, with nothing on any screen to say so.
+
+        The cap alone would be a starvation bug wearing a fix's clothes, so the two halves
+        are asserted together: at most `OBSERVE_BATCH` per run, and the ones that waited go
+        FIRST next time. `observed_at` is what carries that across runs, and it is stamped on
+        every plan a run reaches — including one GitHub refused to answer about, which
+        otherwise stays permanently oldest and wins every batch for ever.
+        """
+        # A literal, because the plugin is not imported until the first command runs and the
+        # cap is read off the module itself — the assertions below are written against
+        # whatever it actually is, so this only has to be comfortably more than it.
+        made = self.many_plans_with_open_prs(11)
+        cap = _plans().OBSERVE_BATCH
+        self.assertLess(cap, len(made), "the cap has to bite for this test to mean anything")
+
+        with self.github(state="open"):
+            first = self.data("plugin", "plans", "observe")
+            second = self.data("plugin", "plans", "observe")
+
+        waited = len(made) - cap
+        self.assertEqual(len(first["visited"]), cap)
+        self.assertEqual(first["waiting"], waited)
+        # The ones that waited are the first of the next run, because nothing else has an
+        # older stamp than "never observed".
+        self.assertEqual(set(second["visited"][:waited]),
+                         set(made) - set(first["visited"]))
+        # And two runs reach every plan, which is `ceil(n / OBSERVE_BATCH)` for this n.
+        self.assertEqual(set(first["visited"]) | set(second["visited"]), set(made))
+
+    def test_a_plan_github_will_not_answer_about_still_goes_to_the_back_of_the_queue(self):
+        """Otherwise it is permanently the oldest, wins every batch, and starves the rest."""
+        made = self.many_plans_with_open_prs(2)
+        real_run = subprocess.run
+
+        def refuse(argv, *a, **kw):
+            argv = list(argv)
+            if argv[:2] == ["gh", "api"]:
+                return subprocess.CompletedProcess(argv, 1, "", "HTTP 502")
+            return real_run(argv, *a, **kw)
+
+        with mock.patch("subprocess.run", side_effect=refuse):
+            first = self.data("plugin", "plans", "observe")
+            second = self.data("plugin", "plans", "observe")
+
+        self.assertEqual([s["plan"] for s in first["skipped"]], made)
+        # Stamped despite the refusal, so the ordering is by visit and not by success.
+        self.assertTrue(all(p.get("observed_at") for p in self._doc()["plans"]))
+        self.assertEqual(second["visited"], first["visited"])   # both visited, both stamped
