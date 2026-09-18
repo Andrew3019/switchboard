@@ -2858,3 +2858,67 @@ class DerivationEngineTest(unittest.TestCase):
                 self.assertFalse(a.stalled)
                 self.assertFalse(a.needs_human)
                 self.assertEqual(a.derived_state, status.WORKING)
+
+    # -- what a review found: the two the three above did not reach ----------
+
+    def test_a_declared_wait_that_expired_stops_explaining_the_derived_row(self):
+        """`derived_state` and `stalled` are one verdict, including past the wait's grace.
+
+        THE BUG THIS PINS. `agents.wait_mode` is the DECLARATION and is cleared only by
+        `sb reconcile` (`Broker.wake_expired_waits`), never by `collect`. A declaration that
+        outlived `WAIT_EXCUSE_GRACE` with no reconcile behind it — no collector running, or
+        a wake prompt that kept failing into an unreachable pane — sits on the row
+        indefinitely. Read raw, it went on explaining a row that `stalled` and `idle_excuse`
+        had already, correctly, given up on, so the one field this wave adds said `awaiting
+        external` on a row whose `stalled` was true. Both halves are asserted here because
+        the invariant is that they agree, not that either is right on its own.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_wait(self.db, "w1", "background")
+        h = FakeHerdr([alive("w1", "idle")])
+
+        fresh = self.by_name(status.collect(self.db, h, now=self.past_the_floor()))["w1"]
+        self.assertFalse(fresh.stalled)
+        self.assertEqual(fresh.derived_state, status.AWAITING_EXTERNAL)
+
+        # Nothing clears `wait_mode` — which is the case this is about — and the clock moves
+        # past the grace the declaration was worth.
+        at = store.now() + int(status.WAIT_EXCUSE_GRACE) + 1
+        expired = self.by_name(status.collect(self.db, h, now=at))["w1"]
+        self.assertTrue(expired.stalled)
+        self.assertIsNone(expired.idle_excuse)
+        self.assertEqual(expired.derived_state, status.STALLED)
+
+    def test_a_wake_is_timed_from_the_step_it_was_sent_about(self):
+        """`attention_timeout` runs per Step, not per agent.
+
+        An agent keeps holding steps after it stops: it is poked about one, that one
+        resolves, and it stops again later still holding another. Keyed on the agent alone,
+        the second step inherits the first one's timestamp — an old wake puts a step that
+        has never been poked in front of a person at once. Keyed on the step, the second one
+        starts its own clock, which is the only reading that means anything.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1")
+        store.set_state(self.db, "w1", "done")
+        repo = self.with_plans(self.plan(
+            self.step("step-1", "implement", owner="w1"),
+            self.step("step-2", "review", owner="w1", deps=("step-1",))))
+        # A wake about a step this agent no longer holds, old enough to have timed out.
+        store.log_event(self.db, kind="step_wake_sent", agent="w1", step="p-1/step-9")
+        self.db.execute("UPDATE events SET created_at = created_at - ? "
+                        "WHERE kind='step_wake_sent'", (int(status.ATTENTION_TIMEOUT) + 1,))
+        self.db.commit()
+
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=self.past_the_floor(), repo=repo))["w1"]
+        self.assertEqual(status.step_ref(a.stopped_step), "p-1/step-1")
+        self.assertFalse(a.step_attention)     # step-1 has never been woken about
+
+        # The same wake, now about the step it is actually holding, does time it out.
+        self.db.execute("UPDATE events SET payload = ? WHERE kind='step_wake_sent'",
+                        (json.dumps({"step": "p-1/step-1"}),))
+        self.db.commit()
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")]),
+                                        now=self.past_the_floor(), repo=repo))["w1"]
+        self.assertTrue(a.step_attention)
+        self.assertTrue(a.needs_human)

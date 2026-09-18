@@ -3077,21 +3077,55 @@ def observe(ctx, args) -> Result:
     NEVER RAISES AND NEVER REFUSES. It runs unattended on a timer with nobody to read a
     refusal, so a `gh` that will not answer, a PR that has vanished and a plan whose record
     is half-written are each one plan skipped, reported in `data` and nowhere else.
+
+    THREE PHASES, AND THE MIDDLE ONE HOLDS NOTHING. This plugin ships `LOCK = False` on a
+    stated, accepted basis: two writers on one plan is a last-writer-wins race, tolerable
+    only because in ordinary operation the window is one local read-mutate-write and is
+    effectively instantaneous. A verb that read every plan in the repo, then spent up to
+    thirty seconds per open PR inside `gh`, then wrote what it had read at the start, would
+    not be paying that accepted cost — it would be widening it by three orders of magnitude,
+    against a store several worktrees write to, from a poller each of them runs. A tick
+    another agent made while this waited on GitHub would be silently reverted.
+
+    So the slow half is done against a LIST OF FACTS and not against the document: read the
+    ids and PR numbers, drop the document, ask GitHub, then re-read and apply. The window
+    that is actually exposed is the third phase — one read, one mutate, one write, no
+    subprocess between them — which is the same window `tick` has and the one the plugin's
+    design accepted. `_derive` re-reads for exactly this reason and says so.
+
+    A plan that disappeared or was landed while GitHub was being asked is simply not there
+    to apply the fact to, which the re-read gets for free: the second `_find` misses, or
+    `_observing` no longer names a PR, and the fact is dropped rather than resurrected onto
+    a plan that has moved past it.
     """
-    doc, seal = _read_logged(ctx)
     who = ctx.agent or "human"
-    moved: list[dict] = []
+    # PHASE 1 — what to ask about. The document is dropped at the end of this block and
+    # nothing below reads it; only ids and numbers survive into the slow half.
+    doc, _seal = _read_logged(ctx)
+    asking = [(str(plan.get("id")), *_observing(plan)) for plan in doc["plans"]]
+    asking = [(pid, pr, head) for pid, pr, head in asking if pr is not None]
+    del doc, _seal
+
+    # PHASE 2 — GitHub. Seconds per plan, and the store is not held open across any of it.
+    facts: list[tuple] = []
     skipped: list[dict] = []
-    changed = False
-    for plan in doc["plans"]:
-        pr, head = _observing(plan)
-        if pr is None:
-            continue
+    for pid, pr, head in asking:
         pull, bad = _pull(ctx, pr)
         if bad:
-            skipped.append({"plan": plan.get("id"), "pr": pr,
+            skipped.append({"plan": pid, "pr": pr,
                             "error": str((bad.data or {}).get("error") or "")[:200]})
             continue
+        facts.append((pid, pr, pull,
+                      _ci(ctx, str(pull.get("head", {}).get("sha") or head or ""))))
+
+    # PHASE 3 — apply, against the store as it is NOW.
+    doc, seal = _read_logged(ctx)
+    moved: list[dict] = []
+    changed = False
+    for pid, pr, pull, fact in facts:
+        plan = _find(doc, pid)
+        if plan is None:
+            continue                    # landed, deleted or renumbered while we asked
         why = f"PR #{pr} observed {'merged' if pull.get('merged') else pull.get('state')}"
         if pull.get("merged"):
             for step in _of_kind(plan, MERGE_KIND):
@@ -3099,7 +3133,7 @@ def observe(ctx, args) -> Result:
                     continue
                 _log(ctx, plan, who, DERIVED, why, _progress(step, DONE, None),
                      step=step.get("id"))
-                moved.append({"plan": plan.get("id"), "step": step.get("id"),
+                moved.append({"plan": pid, "step": step.get("id"),
                               "to": DONE, "why": why})
                 changed = True
         elif str(pull.get("state") or "") == "closed":
@@ -3110,10 +3144,9 @@ def observe(ctx, args) -> Result:
                 step["failure"] = {"op": "pull request", "detail": why}
                 _log(ctx, plan, who, DERIVED, why, f"{step['id']} done → {FAILED}",
                      step=step.get("id"))
-                moved.append({"plan": plan.get("id"), "step": step.get("id"),
+                moved.append({"plan": pid, "step": step.get("id"),
                               "to": FAILED, "why": why})
                 changed = True
-        fact = _ci(ctx, str(pull.get("head", {}).get("sha") or head or ""))
         if fact is not None and fact != plan.get("ci"):
             plan["ci"] = fact
             changed = True

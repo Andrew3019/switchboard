@@ -56,8 +56,9 @@ from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
+from . import status as status_mod
 from .status import (ATTENTION_TIMEOUT, GONE_CONFIRM_GRACE, GONE_STATE, REAPABLE, RUNNING,
-                     WAIT_EXCUSE_GRACE, fmt_age, is_closed, working_again)
+                     WAIT_EXCUSE_GRACE, fmt_age, is_closed, step_ref, working_again)
 from . import live
 
 # Vocabulary, read from `defaults/settings.toml` rather than written here. The two
@@ -6514,13 +6515,15 @@ class Broker:
             who, step = row.name, row.stopped_step
             if not step:
                 continue
-            sent = self.db.execute(
-                "SELECT MAX(created_at) at FROM events "
-                "WHERE kind='step_wake_sent' AND agent=?", (who,)).fetchone()
-            last = sent["at"] if sent else None
+            # KEYED ON THE STEP, matching `status._step_wakes` exactly: an agent-keyed gap
+            # would skip the first poke about a second step because an unrelated first one
+            # was poked recently. `step_ref` is the one rule for what "the same step" means.
+            ref = step_ref(step)
+            last = max((w for (name, r), w in status_mod._step_wakes(self.db, who).items()
+                        if name == who and r == ref), default=None)
             if last is not None and store.now() - last < ATTENTION_TIMEOUT:
                 continue
-            plan = step.split("/", 1)[0]
+            plan = ref.split("/", 1)[0]
             text = f"{tag('sb')} {self._say('notify.step_wake', step=step, plan=plan)}"
             try:
                 self.h.prompt(who, text)
@@ -6528,7 +6531,7 @@ class Broker:
                 store.log_event(self.db, kind="step_wake_failed", agent=who,
                                 step=step, error=str(e))
                 continue
-            store.log_event(self.db, kind="step_wake_sent", agent=who, step=step)
+            store.log_event(self.db, kind="step_wake_sent", agent=who, step=ref)
             poked.append(who)
         return poked
 

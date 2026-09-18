@@ -1738,27 +1738,58 @@ def _stopped_owners(agents: list, duties, woken: dict, now: int) -> None:
         sid, label = str(step.get("step") or ""), str(step.get("name") or "")
         owner.stopped_step = (f"{step.get('plan')}/{sid}"
                               + (f" {label}" if label and label != sid else ""))
-        sent = woken.get(owner.name)
+        sent = woken.get((owner.name, step_ref(owner.stopped_step)))
         owner.step_attention = bool(
             owner.not_restorable or (sent is not None and now - sent >= ATTENTION_TIMEOUT))
 
 
-def _step_wakes(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, int]:
-    """When each agent was last woken about a Step it still holds. -> name -> epoch.
+def step_ref(label: Optional[str]) -> str:
+    """The `<plan>/<step>` half of a `stopped_step` label — what somebody types.
+
+    A label is `"p-1/step-4 review"`: the reference first, then the step's display name
+    where it has one. Everything that has to MATCH two mentions of one step — the wake's
+    event and the timeout read against it — keys on the reference alone, because a display
+    name is renamed freely and a wake whose key changed under it would start its clock
+    again with nothing having happened.
+    """
+    return str(label or "").split(" ", 1)[0]
+
+
+def _step_wakes(db: sqlite3.Connection,
+                only: Optional[str] = None) -> dict[tuple[str, str], int]:
+    """When each Step's owner was last woken about it. -> (agent, `<plan>/<step>`) -> epoch.
 
     The clock `ATTENTION_TIMEOUT` runs against, and it is read off the event log rather than
     stored on a row for the reason every other timing here is: the wake IS an event, and a
     column would be a second copy of it that could disagree. `Broker.wake_stopped_owners`
     is the only writer.
 
+    KEYED ON THE STEP AND NOT ONLY THE AGENT. An agent keeps holding steps after it stops —
+    it completes one, stops again later still holding another — and an agent-keyed clock
+    hands the second step the first one's timestamp: an old wake makes a step that has never
+    been poked reach `Needs You` at once, and a recent one hides a step that has. Each wake
+    times the step it was actually sent about.
+
     Scoped by `only` on the single-agent fast path, like every other scan in this file, so
     `sb inspect` hits `idx_events_agent` rather than grouping the fleet's whole event table.
+    Read in Python rather than by a SQL `GROUP BY`, because the step is inside the payload
+    JSON — the same thing `_block_reasons` does with `why`, ordered by `id` so the last row
+    read is the latest.
     """
     scope = " AND agent = ?" if only is not None else ""
     params = (only,) if only is not None else ()
-    return {r["agent"]: int(r["at"]) for r in db.execute(
-        "SELECT agent, MAX(created_at) at FROM events "
-        f"WHERE kind='step_wake_sent' AND agent IS NOT NULL{scope} GROUP BY agent", params)}
+    out: dict[tuple[str, str], int] = {}
+    for r in db.execute(
+        "SELECT agent, payload, created_at FROM events "
+        f"WHERE kind='step_wake_sent' AND agent IS NOT NULL{scope} ORDER BY id", params
+    ):
+        try:
+            ref = step_ref((json.loads(r["payload"] or "{}") or {}).get("step"))
+        except json.JSONDecodeError:
+            continue
+        if ref:
+            out[(r["agent"], ref)] = int(r["created_at"])
+    return out
 
 
 def _derived_row(row, *, idle: bool, excuse: Optional[str], turn: Optional[str],
@@ -2172,10 +2203,21 @@ def collect(
         idle = bool(running and turn_over and alive is not False)
         derived = _derived_row(
             row, idle=idle, excuse=excuse, turn=turn, alive=alive,
-            child=(name in live_parent or wait_mode in ("any", "all")),
+            # `wait_is_fresh` and not `wait_mode`, and the distinction is the whole of a
+            # bug this had: `wait_mode` is the DECLARATION, and only `sb reconcile` ever
+            # clears it (`Broker.wake_expired_waits`). A declaration that outlived
+            # `WAIT_EXCUSE_GRACE` with no reconcile behind it — no collector running, or a
+            # wake prompt that kept failing into an unreachable pane — stays on the row
+            # indefinitely. Read raw, it went on explaining a row that `stalled` and
+            # `idle_excuse` had already, correctly, given up on: the one field this wave
+            # exists to add said `awaiting external` beside `stalled: true`. The ladder
+            # above reads `wait_excuse`, which is None past the grace; this reads the same
+            # fact, so the two cannot come apart again.
+            child=(name in live_parent or (wait_is_fresh and wait_mode in ("any", "all"))),
             awaiting_task=awaiting,
             agent=(name in awaiting_reply or name in plan_peers),
-            external=(name in awaiting_external or wait_mode == "background"))
+            external=(name in awaiting_external
+                      or (wait_is_fresh and wait_mode == "background")))
         agents.append(AgentStatus(
             name=name,
             role=row["role"],
