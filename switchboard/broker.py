@@ -56,7 +56,7 @@ from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
-from .status import (GONE_CONFIRM_GRACE, GONE_STATE, REAPABLE, RUNNING, SPAWN_GRACE,
+from .status import (GONE_CONFIRM_GRACE, GONE_STATE, REAPABLE, RUNNING,
                      WAIT_EXCUSE_GRACE, fmt_age, is_closed, working_again)
 from . import live
 
@@ -188,12 +188,11 @@ LIFECYCLE_PROMPTS = (
      "children up to report here"),
 )
 
-# How far back `restore_sweep` calls a death RECENT, in seconds. This is what makes the
-# sweep need no argument: it means "whatever went down just now and has not been dealt
-# with", never "everything that has ever failed" — resurrecting a week of ordinary crashed
-# work is `sb restore <name>`'s job, one row at a time, with a person deciding each.
+# HOW FAR BACK THE AUTOMATIC SWEEP CALLS A DEATH RECENT, in seconds — and the automatic
+# half only. Both halves used to share one `SWEEP_RECENT`, which is why the paragraphs
+# below are about what a TYPED sweep stopped doing before they are about what this bounds.
 #
-# WHY THERE IS NO RECENCY WINDOW HERE ANY MORE. `SWEEP_RECENT` used to bound the sweep's
+# `SWEEP_RECENT` used to bound the whole command's
 # cohort to deaths inside the last ten minutes, on the reasoning that the window was not the
 # crash but how long a human takes to notice one. migration_sb_v2.md §9 rules the other way,
 # and for the case the window was always wrong about: "Restore operates from durable
@@ -9270,34 +9269,45 @@ class Broker:
         return self._name_bound(who) is False
 
     def _awaiting_restore(self, who: str) -> bool:
-        """Is this agent's session gone while the agent itself is still ours to bring back?
+        """Is this agent's session CONFIRMED gone while the agent is still ours to restore?
 
-        The doorbell's reading of `status.liveness`'s `restorable` (§9), narrowed to the
-        one thing the doorbell needs to know: there is no pane to ring, and this is not a
-        row anybody closed, so the mail waits for `sb restore` rather than being written
-        off. Asked only AFTER `_finished_and_unreachable`, which owns every row that ended
-        — so what reaches here is a `working` or `blocked` row whose pane went away under
-        it.
+        The doorbell's reading of `status.liveness`'s `restorable` (§9), narrowed to the one
+        thing the doorbell needs to know: there is no pane to ring, and this is not a row
+        anybody closed, so the mail waits for `sb restore` rather than being written off.
+        Asked only AFTER `_finished_and_unreachable`, which owns every row that ended — so
+        what reaches here is a `working` or `blocked` row whose pane went away under it.
 
-        Three guards, and each is load-bearing:
+        **CONFIRMED, and that word is the whole safety of this.** One `agent list` that
+        comes back short is a hiccup — a herdr restart mid-answer, a machine under load —
+        and the store's own history has three agents marked failed in one night's startups
+        because something believed a single short reading (`status.GONE_CONFIRM_GRACE`).
+        Acting on one reading here costs something subtler and worse than a false death: it
+        stamps a LIVE agent's pending mail `delivered_at`, which takes it out of
+        `store.unseen()` for good, so the doorbell never rings for that backlog again and
+        the agent is never told. So this asks the debounce, not the reading: `absent_since`
+        set and older than `GONE_CONFIRM_GRACE` is the same bar `status._confirmed_gone`
+        clears before it will believe an absence, and wave 4 made that column durable for a
+        restorable row precisely so it can be read here.
 
-        - `is_closed` keeps `done` and cleaned-up rows out; they are the other method's.
-        - a row with NO `pane_id` never had a pane to lose. `delegate` writes the row
-          before herdr is called, so this is also every claim mid-spawn.
-        - the spawn window, for the residual race the line above does not cover: a pane id
-          is written the instant `agent start` returns, and `_bound_cache` may have been
-          taken before that in the same process. `status.collect` holds the same window
-          open for the same reason, and one grace is cheap next to holding a new agent's
-          first instruction.
+        `_name_bound` is asked as well and last: the stamp must not land on an agent that is
+        absent in the record and listed again right now, and a name herdr answers to is the
+        one thing that settles that. None is "herdr could not be asked", which is never this.
+        It is `_name_bound` and not membership of `_agent_states()` for
+        `_finished_and_unreachable`'s reason: an evicted pane is still listed under its own
+        name.
 
-        `_name_bound` and not membership of `_agent_states()`, for `_finished_and_unreachable`'s
-        reason: an evicted pane is still listed under its own name. None is "herdr could
-        not be asked", which is never this.
+        The two row guards below are cheap and both matter. `is_closed` keeps `done` and
+        cleaned-up rows out; they are the other method's. A row with no `pane_id` never had
+        a pane to lose — which is also every claim mid-spawn, since `delegate` writes the
+        row before herdr is called. The spawn window needs no guard of its own here: the
+        only writer of `absent_since` is `status.collect`'s reap path, which stamps it for
+        rows `gone` was true of, and `gone` already excludes `spawning`.
         """
         a = store.get_agent(self.db, who)
         if a is None or not a["pane_id"] or is_closed(a):
             return False
-        if (store.now() - (a["created_at"] or 0)) < SPAWN_GRACE:
+        absent = _column(a, "absent_since")
+        if not absent or (store.now() - float(absent)) < GONE_CONFIRM_GRACE:
             return False
         return self._name_bound(who) is False
 
@@ -9385,9 +9395,12 @@ class Broker:
             if self._finished_and_unreachable(who):
                 self._clear_unreadable_mail(who, mine)
                 continue
-            # AND THE ROW THAT IS NOT FINISHED AND HAS NO PANE EITHER — a restorable
-            # absence (§9). Its mail is neither ringable nor written off: there is nothing
-            # to ring, and the agent is coming back to read it. Stamping `delivered_at`
+            # AND THE ROW THAT IS NOT FINISHED AND HAS NO PANE EITHER — a CONFIRMED
+            # restorable absence (§9). Its mail is neither ringable nor written off: there
+            # is nothing to ring, and the agent is coming back to read it. Confirmed and
+            # not merely absent on this reading, because the cost of being wrong here is a
+            # live agent whose doorbell never rings again — see `_awaiting_restore`.
+            # Stamping `delivered_at`
             # and nothing else is exactly that statement — it leaves the mail unread,
             # owed, and counted, while taking it out of `unseen()` so `flush_pending` and
             # the collector's doorbell stop chasing a ring that cannot happen (the retry

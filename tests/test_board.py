@@ -59,7 +59,8 @@ def _has_background(text: str) -> bool:
 def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
           stalled=False, gone=False, unread=0, task=None, blocked_why=None,
           summary=None, parent=None, archived=False, undelivered=0, undelivered_age=0,
-          idle_excuse=None, wait_excuse=None, pane_id=None, workspace="api", turn=None):
+          idle_excuse=None, wait_excuse=None, pane_id=None, workspace="api", turn=None,
+          liveness=None):
     """One agent. `archived=True` sets what being absent from herdr past the spawn
     grace actually looks like, so the real `AgentStatus.archived` decides — nothing
     here mocks the predicate."""
@@ -73,6 +74,7 @@ def agent(name, *, depth=0, state="working", herdr_state="working", alive=True,
         blocked_why=blocked_why, summary=summary,
         undelivered=undelivered, undelivered_age=undelivered_age,
         idle_excuse=idle_excuse, wait_excuse=wait_excuse, pane_id=pane_id, turn=turn,
+        liveness=liveness,
     )
 
 
@@ -147,6 +149,41 @@ class GlyphTest(unittest.TestCase):
         a = agent("w", gone=True, state="blocked", unread=3)
         self.assertEqual(board.glyph(a), "✗")
         self.assertEqual(board.marker(a), "GONE — herdr has no such agent")
+
+    def test_a_restorable_row_is_awaiting_restore_and_not_the_dead_word(self):
+        """migration_sb_v2.md §9 splits a missing pane in two, and only one half is a death.
+        GONE is `status._attention`'s word for the half that cannot come back; this half has
+        its checkout and its session and one command that fixes it, so the board says so —
+        and says the same thing `sb status`'s own DRIFT line says about the same agent.
+
+        The summons goes with it. Nothing is ever written back about a restorable row, so
+        `gone` stays true for the life of it: summoning on `gone` alone put a permanent `←`
+        beside every agent a reboot took out, with no action that clears it. `needs_human`
+        already excludes this row for that reason; the board now agrees.
+        """
+        a = agent("w", gone=True, liveness=status.RESTORABLE)
+        self.assertIn("AWAITING RESTORE", board.marker(a))
+        self.assertIn("sb restore", board.marker(a))
+        self.assertNotIn("GONE", board.marker(a))
+        self.assertFalse(board.wants_you(a))
+        self.assertEqual(board._note_color(a), board.YELLOW)
+
+    def test_a_not_restorable_row_keeps_the_dead_word_and_the_summons(self):
+        """The other half is unchanged, and must be: its work has genuinely stopped, no
+        command brings it back, and a person is the only thing that can act on it."""
+        a = agent("w", gone=True, liveness=status.NOT_RESTORABLE)
+        self.assertEqual(board.marker(a), "GONE — herdr has no such agent")
+        self.assertTrue(board.wants_you(a))
+        self.assertEqual(board._note_color(a), board.RED)
+
+    def test_a_snapshot_too_old_to_carry_liveness_reads_exactly_as_before(self):
+        """A collector running older code publishes no liveness at all, and a renderer must
+        never draw a rule that snapshot did not decide. `restorable` is False there, so the
+        row falls back to the GONE it has always been."""
+        a = agent("w", gone=True)
+        self.assertIsNone(a.liveness)
+        self.assertEqual(board.marker(a), "GONE — herdr has no such agent")
+        self.assertTrue(board.wants_you(a))
 
     def test_every_glyph_has_a_colour_and_they_are_all_distinct(self):
         kinds = [agent("a", gone=True), agent("b", state="blocked"),

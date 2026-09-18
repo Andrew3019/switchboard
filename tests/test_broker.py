@@ -2798,7 +2798,13 @@ class BrokerTest(unittest.TestCase):
         [a] = status.collect(self.db, self.h, needs_me=True).agents
         self.assertFalse(a.waiting_to_be_rung)      # no claim on a person for the MAIL
         self.assertTrue(a.not_restorable)           # on the list as the §9 item instead
-        self.assertIn(f"is not restorable — {a.unread} Steps/Questions held",
+        # ONE held, asserted as a number. `unread` is 0 by now — `_clear_unreadable_mail`
+        # has written the backlog off, which is the whole point of the branch above — and
+        # interpolating it here is how this line passed while the item told a human that an
+        # agent who cannot come back was holding nothing. The item counts `held`.
+        self.assertEqual(a.unread, 0)
+        self.assertEqual(a.held, 1)
+        self.assertIn("is not restorable — 1 Steps/Questions held",
                       "\n".join(status._attention(
                           status.collect(self.db, self.h))))
 
@@ -4149,6 +4155,60 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.prompts, [])           # the lead is still waiting on it
         self.assertIsNotNone(store.wait_for(self.db, "lead"))
 
+    def test_one_short_agent_list_does_not_silence_a_live_agents_doorbell(self):
+        """The doorbell's absence test is the DEBOUNCED one, not a single reading.
+
+        One `agent list` that comes back short is a hiccup — a herdr restart mid-answer, a
+        machine under load — and this store's history has agents marked failed over exactly
+        that (`status.GONE_CONFIRM_GRACE`). Acting on one reading here is worse than a false
+        death: it stamps a LIVE agent's pending mail `delivered_at`, which takes it out of
+        `store.unseen()` for good, so the doorbell never rings for that backlog again and
+        the agent is never told what it was sent.
+
+        So a working agent missing from ONE listing keeps its ring owed, and gets it the
+        moment herdr lists it again.
+        """
+        store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
+                           cwd=str(self.repo), pane_id="w1:p1")
+        store.put_message(self.db, from_agent="lead", to_agent="kid", kind="tell",
+                          body="stop, the fixture moved")
+        self.h.states_by_name = {}                     # the short reading
+        # And the ring it prompts does not land either, which is what a listing that came
+        # back short looks like from the other end. The message must survive BOTH.
+        self.h.unreachable.add("kid")
+
+        self.restart_sb().flush_pending()
+        [m] = self.db.execute("SELECT * FROM messages").fetchall()
+        self.assertIsNone(m["delivered_at"])           # NOT stamped off one reading
+        self.assertEqual(len(store.unseen(self.db)), 1)
+        self.assertEqual(self.h.prompts, [])
+
+        self.h.states_by_name = {"kid": "idle"}        # herdr was there all along
+        self.h.unreachable.clear()
+        self.assertEqual(self.restart_sb().flush_pending(), ["kid"])
+        self.assertEqual([n for n, _ in self.h.prompts], ["kid"])
+
+    def test_a_confirmed_absence_still_holds_the_mail_it_cannot_ring(self):
+        """The other side of the same gate: once the absence is CONFIRMED — `absent_since`
+        set and older than the grace, the bar `status._confirmed_gone` clears before it will
+        believe an absence — there really is no pane, and chasing a ring that cannot happen
+        is the retry loop `_clear_unreadable_mail` documents. Held, not written off."""
+        store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
+                           cwd=str(self.repo), pane_id="w1:p1")
+        store.put_message(self.db, from_agent="lead", to_agent="kid", kind="tell",
+                          body="the fixture moved")
+        self.h.states_by_name = {}
+        # What the reap path leaves behind for a restorable row: the stamp, kept.
+        self.db.execute("UPDATE agents SET absent_since=? WHERE name=?",
+                        (store.now() - int(status.GONE_CONFIRM_GRACE) - 1, "kid"))
+        self.db.commit()
+
+        self.assertEqual(self.restart_sb().flush_pending(), [])
+        [m] = self.db.execute("SELECT * FROM messages").fetchall()
+        self.assertIsNotNone(m["delivered_at"])        # held: nothing to ring
+        self.assertIsNone(m["undeliverable_at"])       # but not written off
+        self.assertEqual(store.unseen(self.db), [])
+
     def test_held_mail_is_announced_again_when_the_agent_is_restored(self):
         """§9: "Messages and answers held for a non-live agent are delivered on restore."
 
@@ -4165,14 +4225,14 @@ class BrokerTest(unittest.TestCase):
         """
         store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
                            cwd=str(self.repo), pane_id="w1:p1")
-        # Past its spawn window: inside it, an absence proves nothing about a row herdr may
-        # simply not have registered yet (`_awaiting_restore`).
-        self.db.execute("UPDATE agents SET created_at=?",
-                        (store.now() - int(status.SPAWN_GRACE) - 1,))
-        self.db.commit()
         store.put_message(self.db, from_agent="lead", to_agent="kid", kind="tell",
                           body="the fixture moved")
         self.h.states_by_name = {}                     # its pane went away under it
+        # CONFIRMED gone, not absent on one reading — the bar the doorbell holds mail on
+        # (`_awaiting_restore`), and the stamp the reap path leaves on a restorable row.
+        self.db.execute("UPDATE agents SET absent_since=? WHERE name=?",
+                        (store.now() - int(status.GONE_CONFIRM_GRACE) - 1, "kid"))
+        self.db.commit()
 
         self.assertEqual(self.restart_sb().flush_pending(), [])
         [m] = self.db.execute("SELECT * FROM messages").fetchall()

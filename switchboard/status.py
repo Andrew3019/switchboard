@@ -635,6 +635,15 @@ class AgentStatus:
     #
     # Defaulted and last, for `turn`'s reason: a hand-built row in a test and a snapshot
     # published by a collector running older code both have to construct.
+    # EVERYTHING STILL ADDRESSED TO THIS AGENT AND UNREAD, written off or not — what it
+    # is HOLDING, as against `unread`, which is what somebody is still owed. The two differ
+    # by exactly the mail `_clear_unreadable_mail` has given up on, which is all of it for
+    # an agent that cannot come back; see `_held_counts`. Read by the `not_restorable`
+    # attention item and nothing else.
+    #
+    # Defaulted and last, for `turn`'s reason: a hand-built row in a test and a snapshot
+    # from an older collector both have to construct.
+    held: int = 0
     liveness: Optional[str] = None
     # Whether somebody DECIDED this agent was finished — `sb done`, or a `cleanup` that
     # took its pane. `is_closed()` is the rule and says why a `failed` row is not one.
@@ -1172,7 +1181,7 @@ class AgentStatus:
             # envelope cannot recompute either — `liveness` needs herdr and the filesystem,
             # `closed` needs columns this row does not carry — and `panel.agent_from_dict`
             # reads exactly the dataclass's own field names back.
-            "liveness", "closed",
+            "liveness", "closed", "held",
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
@@ -1616,6 +1625,9 @@ def collect(
 
     rows = db.execute("SELECT * FROM agents ORDER BY created_at, name").fetchall()
     unread = _unread_counts(db, only)
+    # The same mailbox counted the other way, for §9's not-restorable item — see
+    # `_held_counts` for why one number cannot serve both readers.
+    held = _held_counts(db, only)
     pending = _undelivered_counts(db, only)
     activity = _last_activity(db, only)
     awaiting_reply = _awaiting_reply(db, only)
@@ -1866,6 +1878,7 @@ def collect(
             liveness=liveness_of[name],
             closed=is_closed(row),
             unread=unread.get(name, 0),
+            held=held.get(name, 0),
             age=max(0, now - row["created_at"]),
             idle=idle_for,
             last_activity=last,
@@ -2408,6 +2421,37 @@ def _unread_counts(db: sqlite3.Connection, only: Optional[str] = None) -> dict[s
         where += " AND undeliverable_at IS NULL"
     # `only` scopes the whole aggregate to one agent so a single-agent reader (`inspect`)
     # can use `idx_msgs_inbox` instead of scanning the whole mailbox. See `collect`'s note.
+    params: tuple = ()
+    if only is not None:
+        where += " AND to_agent = ?"
+        params = (only,)
+    return {r["to_agent"]: r["n"] for r in db.execute(
+        f"SELECT to_agent, COUNT(*) n FROM messages WHERE {where} GROUP BY to_agent", params
+    )}
+
+
+def _held_counts(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, int]:
+    """Per agent: everything still addressed to it and unread, WRITTEN OFF OR NOT.
+
+    `_unread_counts` with the one exclusion removed, and the difference is the whole reason
+    this exists. That function drops mail marked undeliverable on purpose — it feeds
+    `needs_human`, and a demand on a person that nothing can ever clear is the queue that
+    fills up for good (`2026-08-09-233230`). This one is the opposite question: not "what is
+    somebody still owed" but "what is this agent HOLDING", which is what §9's not-restorable
+    item reports and which `mark_undeliverable` does not change one bit. The message is
+    still there, still unread, still that agent's — what it lost is its claim on a person.
+
+    Without this the item counted zero in exactly the case it was written for: a
+    not-restorable row is `failed` + ended + unreachable, which is
+    `Broker._finished_and_unreachable`, so the next `sb` command anybody runs writes its
+    whole backlog off and `_unread_counts` stops seeing it. The line then told a human that
+    an agent which cannot come back was holding nothing.
+
+    A Question is a `messages` row with `needs_reply` set, so held Questions are counted
+    here by construction. Steps are the plans plugin's and are not in this store at all —
+    see the item itself for what the wording promises and what a count can say today.
+    """
+    where = "read_at IS NULL"
     params: tuple = ()
     if only is not None:
         where += " AND to_agent = ?"
@@ -3250,14 +3294,21 @@ def _attention(snap: Snapshot) -> list[str]:
                 # the blocked row's "the human answers it" is an answer with nowhere to
                 # land. What is left is held work that cannot resume itself (§9, §12).
                 #
-                # The count is what this store can durably say is HELD for it. Steps and
-                # Questions are not first-class objects yet — Steps live in the plans
-                # plugin's own store and a Question is a `messages` row with `needs_reply`
-                # — so the honest number here is its unread mail, which is exactly the
-                # held-and-undeliverable backlog `sb inbox` would have handed it. The
-                # wording is §9's; when Steps and Questions become objects, the count
-                # widens to them and this line does not have to change.
-                out.append(f"  {a.name:<{w}}  is not restorable — {a.unread} "
+                # The count is what this store can durably say is HELD for it, and it
+                # is `held` and NOT `unread` — the distinction is the whole of this line
+                # being true. A not-restorable row is `failed` + ended + unreachable, so
+                # the next `sb` command writes its backlog off (`_clear_unreadable_mail`)
+                # and `unread` drops to zero; what the mail lost there was its claim on a
+                # PERSON, not its existence, and this item is about what the agent is
+                # holding. Counted off `unread` the line said "0 Steps/Questions held" in
+                # exactly the case §9 wrote the sentence for.
+                #
+                # Steps and Questions are not first-class objects yet: a Question is a
+                # `messages` row with `needs_reply` and so is already counted, and Steps
+                # live in the plans plugin's own store, which this module must not open.
+                # The wording is §9's; when Steps become objects the count widens to them
+                # and this line does not have to change.
+                out.append(f"  {a.name:<{w}}  is not restorable — {a.held} "
                            f"Steps/Questions held"
                            f"  →  its work is on its branch: sb inspect {a.name}")
             elif a.blocked:

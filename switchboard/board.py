@@ -363,7 +363,16 @@ def wants_you(a) -> bool:
     can move such an agent, which is a reason to draw the row clearly — not a
     reason to summon anybody on one frame of a screen classifier.
     """
-    return bool(a.gone or a.blocked or (a.inferred_summons and a.settled))
+    # `a.gone and not a.restorable`, and the exception is narrow on purpose. Since §9's
+    # three-valued liveness a restorable row is `gone` FOR EVER — nothing is written back
+    # about it — so summoning on `gone` alone put a permanent `←` beside every agent a
+    # reboot took out, ten of them at once, with no action that clears it but the restore
+    # nobody was being told to run. `status.needs_human` already excludes it for the same
+    # reason. The not-restorable half still summons: that one is a decision only a person
+    # can make. A snapshot too old to carry liveness reads `restorable` False and summons
+    # exactly as it did before this existed.
+    return bool((a.gone and not a.restorable) or a.blocked
+                or (a.inferred_summons and a.settled))
 
 
 def marker(a) -> str:
@@ -377,6 +386,16 @@ def marker(a) -> str:
     what it is FOR rather than announcing a stall that outlives no frame; the
     state column beside it still reads `idle` the whole time.
     """
+    # AWAITING RESTORE before GONE, because the two are one reading apart and only one of
+    # them is a death (§9). The word GONE is `status._attention`'s for the half that cannot
+    # come back; this half has a checkout and a session and one command that fixes it, so
+    # the marker carries the command — the board is Andrew's view (DESIGN-TRUTH.md: "`sb
+    # status` is for agents; `sb board` is Andrew's view of the tree"), and a row that says
+    # only GONE about an agent a single command brings back is the board telling him the
+    # wrong thing about his own fleet. The wording matches the DRIFT line in
+    # `status._attention` so the two surfaces say the same thing about one agent.
+    if a.restorable:
+        return "AWAITING RESTORE — its pane is gone, sb restore brings it back"
     if a.gone:
         return "GONE — herdr has no such agent"
     if a.at_prompt and a.settled:
@@ -458,6 +477,10 @@ def mail_note(a, *, short: bool = False) -> str:
 
 
 def _note_color(a) -> str:
+    # Red is for the row nothing can move. An agent waiting to be restored is the yellow
+    # kind of trouble the rows below it are — something to do, not something lost.
+    if a.restorable:
+        return YELLOW
     if a.gone:
         return RED
     if a.at_prompt or a.blocked or a.stalled or a.signal_drift:

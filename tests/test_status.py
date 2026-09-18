@@ -1049,6 +1049,13 @@ class StatusTest(unittest.TestCase):
         store.create_agent(self.db, name="w1", role="worker", parent="lead",
                            session_id="s2", pane_id="w1:p1",
                            task="rewrite the parser")
+        # Two things held for it, one of them a Question — the shape §9 wrote the item's
+        # wording for. See `test_the_not_restorable_item_counts_what_is_held_after_the_mail_is_written_off`
+        # for the half of this that only breaks once the backlog has been written off.
+        store.put_message(self.db, from_agent="lead", to_agent="w1", kind="tell",
+                          body="the fixture moved")
+        store.put_message(self.db, from_agent="lead", to_agent="w1", kind="ask",
+                          body="which branch?", needs_reply=True)
         self.no_checkout("w1")
         h = FakeHerdr([alive("lead", "idle")])
         at = self.past_the_floor()
@@ -1059,14 +1066,53 @@ class StatusTest(unittest.TestCase):
         self.assertIsNotNone(self.row("w1")["ended_at"])
         self.assertTrue(by["w1"].not_restorable)
         self.assertTrue(by["w1"].needs_human)
-        # The item, worded as §9 words it, with the count of what it is holding.
+        # The item, worded as §9 words it, with the count of what it is holding — and
+        # the count asserted as a NUMBER rather than interpolated off the row, which is how
+        # this passed at zero while the line was telling a human nothing was held.
         lines = status._attention(status.collect(self.db, h, now=at + 999))
         [item] = [ln for ln in lines if "not restorable" in ln]
-        self.assertIn(f"is not restorable — {by['w1'].unread} Steps/Questions held", item)
+        self.assertIn("is not restorable — 2 Steps/Questions held", item)
         self.assertIn("NEEDS YOU", lines)
         # And the parent is no longer excused by it: its own idleness derives normally.
         self.assertIsNone(by["lead"].idle_excuse)
         self.assertTrue(by["lead"].stalled)
+
+    def test_the_not_restorable_item_counts_what_is_held_after_the_mail_is_written_off(self):
+        """The count §9 asks for is what the agent is HOLDING, and it has to survive the
+        thing that happens to a not-restorable row a moment later.
+
+        Such a row is `failed` + ended + unreachable, which is exactly
+        `Broker._finished_and_unreachable`, so the next `sb` command anybody runs writes its
+        whole backlog off (`_clear_unreadable_mail` → `mark_undeliverable`). `unread`
+        deliberately stops counting written-off mail — it feeds `needs_human`, and a demand
+        nothing can clear is the queue that fills up for good — so an item counted off
+        `unread` read "0 Steps/Questions held" in precisely the scenario the sentence exists
+        for. `held` is the same mailbox counted without that exclusion.
+
+        The write-off is simulated here the way it happens: `undeliverable_at` stamped on
+        the backlog. `test_broker` drives the real `flush_pending` path end to end.
+        """
+        store.create_agent(self.db, name="w1", role="worker", session_id="s1",
+                           pane_id="w1:p1", task="rewrite the parser")
+        for body in ("the fixture moved", "which branch?"):
+            store.put_message(self.db, from_agent="lead", to_agent="w1", kind="tell",
+                              body=body)
+        self.no_checkout("w1")
+        self.confirm_gone()
+        self.assertEqual(self.row("w1")["state"], status.GONE_STATE)
+
+        a = self.by_name(status.collect(self.db, FakeHerdr([])))["w1"]
+        self.assertEqual((a.unread, a.held), (2, 2))          # nothing written off yet
+
+        for m in self.db.execute("SELECT id FROM messages").fetchall():
+            store.mark_undeliverable(self.db, m["id"])
+
+        a = self.by_name(status.collect(self.db, FakeHerdr([])))["w1"]
+        self.assertEqual(a.unread, 0)                         # no claim on a person left
+        self.assertEqual(a.held, 2)                           # but the agent still holds it
+        [item] = [ln for ln in status._attention(status.collect(self.db, FakeHerdr([])))
+                  if "not restorable" in ln]
+        self.assertIn("is not restorable — 2 Steps/Questions held", item)
 
     def test_a_not_restorable_child_releases_the_excuse_before_the_write_lands(self):
         """`waiting on child` is keyed on LIVENESS, not on the terminal write that follows
