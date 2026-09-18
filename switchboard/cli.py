@@ -539,9 +539,10 @@ def build_parser() -> argparse.ArgumentParser:
     r = cmd(
         "restore", help="bring a closed agent back with its context",
         description="Names one agent and brings it back in a fresh pane, resumed, in the "
-                    "workspace it came from. --sweep instead brings back everything that "
-                    "went down in the last few minutes and has not been dealt with — the "
-                    "one command for after a herdr restart. What --sweep can reach is "
+                    "workspace it came from. --sweep instead brings back every agent in "
+                    "your scope whose session is gone and that nobody closed, however long "
+                    "ago it went down — the one command for after a herdr restart or a "
+                    "reboot. What --sweep can reach is "
                     "your own scope, and that is the whole point to know about it: run by "
                     "a HUMAN it covers every tree in the store, which is the only way it "
                     "means 'everything'; run by an agent it covers that agent's own "
@@ -551,8 +552,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "left out of it.")
     r.add_argument("name", nargs="?", help="the agent to bring back")
     r.add_argument("--sweep", action="store_true",
-                   help="bring back everything in your scope that recently went down, "
-                        "parents before children (a second run is a no-op). A herdr "
+                   help="bring back everything in your scope whose session is gone and "
+                        "that nobody closed, parents before children (a second run is a "
+                        "no-op). There is no recency window: an old long-lived session "
+                        "restores like a fresh one. A herdr "
                         "restart also runs this by itself, once the deaths it caused are "
                         "confirmed — see `[restore] auto`")
     r.add_argument("--dry-run", action="store_true",
@@ -769,13 +772,13 @@ def _validate(args) -> None:
         # meant would spawn panes nobody asked for.
         if args.sweep and args.name is not None:
             raise validate.Invalid(
-                "`sb restore --sweep` takes no name: it is the whole recent cohort. "
+                "`sb restore --sweep` takes no name: it is the whole cohort. "
                 f"For one agent: `sb restore {args.name}`")
         if not args.sweep:
             if args.name is None:
                 raise validate.Invalid(
                     "`sb restore` needs the name of the agent to bring back — or "
-                    "`sb restore --sweep` for everything that recently went down")
+                    "`sb restore --sweep` for everything in your scope that is gone")
             args.name = validate.agent_name(args.name)
         if args.dry_run and not args.sweep:
             raise validate.Invalid("--dry-run belongs to `sb restore --sweep`")
@@ -2362,8 +2365,8 @@ def _sweep_restored(r, *, dry_run: bool) -> str:
               for n, why in r.failed]
     lines += [f"cannot restore {n}: {why}" for n, why in r.unrestorable]
     if not lines:
-        return ("nothing has gone down recently in your scope — nothing to restore. "
-                "(An agent that crashed longer ago is still `sb restore <name>`.)")
+        return ("nothing in your scope is waiting to be restored — every agent is "
+                "either running or one somebody closed.")
     verb = "would restore" if dry_run else "restored"
     lines.append(f"{verb} {len(r)} of {r.considered} considered"
                  + (f"; {len(r.unrestorable)} cannot be restored at all"

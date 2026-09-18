@@ -368,8 +368,9 @@ ignored_content_holds = false
 # restores nothing unless the crash cohort is at least `Broker.RESTART_MIN_COHORT` agents
 # that went down together inside one `Broker.RESTART_WINDOW` — so a pane closed by hand, a
 # single kill, or one dropped binding is left alone (`Broker._looks_like_restart`). It only
-# reaches what `Broker.SWEEP_RECENT` calls recent, so it is "whatever just went down", never
-# a week of old failures. And it offers each name ONCE per collector, so an agent that dies
+# reaches a crash inside `Broker.AUTO_RESTORE_RECENT`, so it is "whatever just went down",
+# never a week of old failures — the one place a recency window still applies, since a
+# TYPED `sb restore --sweep` has had none since v2 wave 4. And it offers each name ONCE per collector, so an agent that dies
 # on every resume cannot be restored in a loop.
 #
 # One thing the automatic half CANNOT do, and why the typed command still matters: the

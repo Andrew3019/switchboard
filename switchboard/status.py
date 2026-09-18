@@ -84,7 +84,10 @@ ever learns it. That write ends an agent's turn, so it belongs only to a process
 for one command: a caller that outlives the code it started with passes `reap=False` and
 gets the same flags with none of the writes. It also takes more than one reading: an
 absence is remembered (`agents.absent_since`) and has to last (`_confirmed_gone`), because
-one short `agent list` is a hiccup and used to be enough to end a live agent.
+one short `agent list` is a hiccup and used to be enough to end a live agent. And it takes
+more than a lasting absence now: only an absence classified NOT RESTORABLE is written back
+at all (`liveness`, §9). A session that is merely gone and could be brought back is not an
+end, so nothing is written for it and the row waits for `sb restore`.
 
 Three commands live here because all three are the same join, at three widths:
 
@@ -99,6 +102,7 @@ import json
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Collection, Optional
 
 from . import config
@@ -158,6 +162,25 @@ REAPABLE = tuple(config.setting("states.reapable"))
 # rows at all; a new state would have to be added to that list to work, at which point it
 # is `failed` with extra steps.
 GONE_STATE = "failed"
+
+# THE THREE VALUES LIVENESS HAS (migration_sb_v2.md §9: "Liveness has three values:
+# `live`, `not live, restorable` (the session is gone but can be reconstructed — a machine
+# restart, a killed pane), and `not restorable` (the session is gone for good)").
+#
+# Derived, never stored. There is no liveness column and there must not be one: every
+# input is already durable — herdr's own list, `absent_since`, the checkout on disk, and
+# the row's own state — and a cached fourth copy of a fact four things already answer is
+# the thing that comes to disagree with them. Switchboard owns identity and assignment;
+# the RUNTIME owns whether a session is alive (§9, "Ownership of liveness"), so this is
+# read fresh from the runtime each time it is asked, exactly as `alive` always was.
+#
+# The fourth answer is None, and it is not a quieter `not restorable`: it is "herdr could
+# not be asked at all", the reading `collect`'s `alive` has always carried as None and
+# `live.py` keeps structurally unable to conflate with an empty one. Nothing is written
+# back on it.
+LIVE = "live"
+RESTORABLE = "restorable"
+NOT_RESTORABLE = "not restorable"
 
 # The `fallback_reason` herdr writes when its detection manifest matched NO rule against a
 # pane it knows is running a known agent — it gave up and guessed idle. See
@@ -601,6 +624,56 @@ class AgentStatus:
     # inventing news.
     worktrees: int = 0
     worktrees_below: int = 0
+    # THE THREE-VALUED LIVENESS OF THIS ROW (§9) — `LIVE`, `RESTORABLE`, `NOT_RESTORABLE`,
+    # or None where herdr could not be asked. `liveness()` computes it; see there for the
+    # inputs and for why None is not a quieter `NOT_RESTORABLE`.
+    #
+    # It sits BESIDE `alive` rather than replacing it, and that is deliberate: `alive` is
+    # the raw runtime reading ("does herdr list this session"), this is what Switchboard
+    # concludes from it, and the two are different facts that different readers want. Every
+    # reader that only ever wanted the raw one is untouched.
+    #
+    # Defaulted and last, for `turn`'s reason: a hand-built row in a test and a snapshot
+    # published by a collector running older code both have to construct.
+    liveness: Optional[str] = None
+    # Whether somebody DECIDED this agent was finished — `sb done`, or a `cleanup` that
+    # took its pane. `is_closed()` is the rule and says why a `failed` row is not one.
+    #
+    # Carried rather than re-derived because the row does not have the columns to re-derive
+    # it from (`ended_at` is not on this dataclass), and because `not_restorable` — the
+    # attention item — is exactly "gone for good AND nobody closed it". A cleaned-up agent
+    # is not restorable either, and raising an item about every one of them would summon a
+    # person to every agent that ever finished.
+    closed: bool = False
+
+    @property
+    def restorable(self) -> bool:
+        """Not live, but `sb restore` can bring this exact agent back (§9)."""
+        return self.liveness == RESTORABLE
+
+    @property
+    def not_restorable(self) -> bool:
+        """Gone for good, with work nobody closed — the §12 attention item.
+
+        THREE TERMS, and each of them keeps a whole class of row out of the queue.
+
+        `liveness` is the verdict itself: the session is gone and no command can bring it
+        back — its checkout was removed under it, or it never got far enough to have a
+        session to resume.
+
+        `not closed` keeps this off every finished row. An agent that reported `done` or
+        was cleaned up is also un-restorable, and is nobody's problem; raising an item
+        about each one would summon a person to every agent that ever finished.
+
+        The last term is that the death was actually SEEN — either observed on this
+        reading (`gone`: unended, absent, and past the spawn window) or already written
+        down (`GONE_STATE`, which `gone` cannot be true for because the row has an end on
+        it now). Without it the item would outlive nothing and precede everything: a row
+        whose pane is plainly there but whose checkout was moved is not a death, and the
+        one thing this queue must never become is a list of rows that are merely odd.
+        """
+        return (self.liveness == NOT_RESTORABLE and not self.closed
+                and (self.gone or self.state == GONE_STATE))
 
     @property
     def caps_diverged(self) -> bool:
@@ -998,9 +1071,17 @@ class AgentStatus:
         its turn never ended as far as anything can tell, its pane is running no agent,
         and there is no mechanism at all that will ever touch that row again. See that
         property for why it is not simply reaped.
+
+        `not_restorable` is §12's own item type ("agents that are not restorable — their
+        held Steps/Questions cannot resume themselves"), and it is the one row here that is
+        beyond every mechanism at once: no doorbell, no stall nudge and no `sb restore`
+        reaches it. Its restorable sibling is deliberately NOT here — that one is waiting
+        for a command, not for a decision, and putting a whole restarted fleet in this
+        queue is the flood §9 exists to prevent.
         """
         return (self.blocked or self.at_prompt or self.unread > 0
-                or self.waiting_to_be_rung or self.stalled or self.signal_drift)
+                or self.waiting_to_be_rung or self.stalled or self.signal_drift
+                or self.not_restorable)
 
     @property
     def inferred_summons(self) -> bool:
@@ -1087,6 +1168,11 @@ class AgentStatus:
             "needs_for", "awaiting_keypress", "pane_id",
             "caps_held", "caps_delegable", "caps_template", "diverged_below",
             "worktrees", "worktrees_below",
+            # STORED, not derived, and both of them: a renderer reading a published
+            # envelope cannot recompute either — `liveness` needs herdr and the filesystem,
+            # `closed` needs columns this row does not carry — and `panel.agent_from_dict`
+            # reads exactly the dataclass's own field names back.
+            "liveness", "closed",
         )}
         # Derived, but part of the contract: a consumer must not have to re-derive drift
         # from a rule that lives in this file.
@@ -1098,6 +1184,8 @@ class AgentStatus:
                  signal_drift=self.signal_drift,
                  settled=self.settled,
                  turn_doubted=self.turn_doubted,
+                 restorable=self.restorable,
+                 not_restorable=self.not_restorable,
                  archived=self.archived)
         return d
 
@@ -1141,6 +1229,88 @@ class Snapshot:
 # ---------------------------------------------------------------------------
 # Collection
 # ---------------------------------------------------------------------------
+
+
+def is_closed(row) -> bool:
+    """Did somebody DECIDE this agent was finished? The closest thing to a closed Task.
+
+    Two ways, and both are a decision somebody made rather than an absence anybody
+    observed:
+
+    - the agent reported a terminal word of its own — `sb done` writes `done`;
+    - `cleanup` took its pane away — it ends the row and clears `pane_id` in the same
+      breath (`broker._stop_panes`, `broker.cleanup`), so `ended_at set AND pane_id NULL`
+      is precisely "we closed this one". `collect` already reads that pair exactly this
+      way to decline a stale herdr listing.
+
+    `failed` is deliberately NOT closed. It is `_record_gone`'s inference from an absence,
+    not anybody's decision, and the whole of §9 is that a missing runtime session never
+    ends a Switchboard agent. A row we inferred dead is still ours to bring back.
+
+    WHY THIS FUNCTION EXISTS AT ALL, stated rather than buried: §9 wants restore scope to
+    follow TASK lifecycle — an open Task restores its agents, an explicitly closed one does
+    not. The first-class Task object with that lifecycle is a later wave (#332/#333) and
+    does not exist yet, so this is the durable PROXY for "belongs to an open Task": an
+    agent nobody closed. It is deliberately the narrower reading — every row that restored
+    before still does — and the literal `Task.open/closed` gate replaces it when Task
+    arrives.
+    """
+    if row["state"] in FINISHED and row["state"] != GONE_STATE:
+        return True
+    return row["ended_at"] is not None and row["pane_id"] is None
+
+
+def liveness(row, alive: Optional[bool], *, spawning: bool = False,
+             checkouts: Optional[dict] = None) -> Optional[str]:
+    """`live` / `restorable` / `not restorable` for one row — or None if herdr was not asked.
+
+    §9's three values, derived from four durable inputs and nothing else: whether the
+    runtime still lists the session (`alive`, the caller's own reading), whether anybody
+    closed the row (`is_closed`), whether there is a session id to resume, and whether the
+    checkout is still on disk.
+
+    The last two are exactly `Broker.restore`'s own refusals, and that is the point rather
+    than a coincidence: "restorable" has to mean the thing `sb restore` can actually do,
+    or the board promises a recovery that the command then declines. Restore refuses a row
+    with no session id ("nothing to restore") and one whose checkout is gone ("restore is
+    gone once the worktree is; the push is the recovery path"), so both are `not
+    restorable` here.
+
+    `alive is None` returns None and never `not restorable`: an unreachable herdr observed
+    NOTHING, and rounding that down to "gone for good" is how a hiccup would raise an
+    attention item about a fleet that never stopped. Every caller treats None as "leave
+    this row exactly as it was".
+
+    `spawning` returns None for the same reason and is the same answer: a row `delegate`
+    has written but herdr has not started yet is absent because it has not arrived, and
+    absence proves nothing about it until `SPAWN_GRACE` is over (see `collect`, which
+    computes it). Without this a claim mid-spawn reads `not restorable` on its session-id
+    branch below — which would drop it out of its parent's `live_parent` set and summon a
+    human about an agent that is two seconds old.
+
+    `checkouts` is an optional `{path: exists}` memo for a caller classifying many rows in
+    one pass — a fleet shares a handful of checkouts between hundreds of rows, and the
+    `is_closed` short-circuit above already keeps the finished ones from ever asking.
+    """
+    if alive is None:
+        return None
+    if alive:
+        return LIVE
+    if spawning:
+        return None
+    if is_closed(row):
+        return NOT_RESTORABLE
+    if not row["session_id"]:
+        return NOT_RESTORABLE
+    where = _col(row, "cwd")
+    if where:
+        if checkouts is None:
+            checkouts = {}
+        if where not in checkouts:
+            checkouts[where] = Path(where).is_dir()
+        if not checkouts[where]:
+            return NOT_RESTORABLE
+    return RESTORABLE
 
 
 def awaiting_keypress_screen(explain: object) -> bool:
@@ -1302,6 +1472,65 @@ def _mark_awaiting_keypress(h: Optional[Herdr], agents: list[AgentStatus],
         _KEYPRESS_SEEN[a.name] = (now, a.awaiting_keypress)
 
 
+def _match(row, agent, tracks_terminal: bool):
+    """herdr's listed agent for this row, or None if that listing is not about this row.
+
+    Lifted out of `collect`'s loop unchanged so the liveness pre-pass and the row build can
+    ask it once each without two copies of the rule. The two guards are the two ways
+    herdr's answer can be about somebody else, and both are documented in place below.
+    """
+    # A NAME IS NOT AN IDENTITY. herdr's `agent list` is machine-global and every
+    # switchboard store mints names from the same small role vocabulary independently
+    # (`broker._compose_name`), so a row that died days ago in this store matches a live
+    # agent belonging to a fleet in some other checkout — and is then drawn as alive,
+    # a different ghost each time, on nothing but a shared name. Worse, the false
+    # "present again" clears the gone debounce below (`_confirmed_gone`), so the row
+    # can never be confirmed dead for as long as the stranger runs.
+    #
+    # Both sides already carry identifiers this store never compared. When one is
+    # known on both sides and the two DISAGREE, this is somebody else's agent wearing
+    # our name — not found, exactly as if herdr had never listed it. When either side
+    # is blank the question cannot be asked and the name match stands, which is the
+    # behaviour that shipped: a row mid-spawn has neither id yet (see `spawning`
+    # below), and that window is covered by grace, not by this.
+    #
+    # TERMINAL ID is the one that does the work, and the choice is measured rather
+    # than preferred. herdr's `agent list` carries no `agent_session` at all on 0.8.x
+    # — every `Agent.session_id` off that path is `""` (checked against every agent
+    # herdr listed on this machine), so a session-id comparison alone would be a
+    # guard that can never fire. `terminal_id` is on every listed agent, is unique per
+    # agent, and is the handle herdr itself documents as STABLE (`herdr.Agent`); our
+    # side writes it at the only two moments a row can acquire a pane, spawn and
+    # restore (`broker._spawn`, `broker.restore`), and 459 of this store's 463 rows
+    # carry one. `pane_id` is deliberately NOT used: herdr changes it on a pane move,
+    # so a live agent could disagree with its own row and be read as dead.
+    #
+    # The session id is compared too, for nothing it catches today: should herdr start
+    # reporting `agent_session`, it is the stronger identity and this already uses it.
+    if agent is not None and (
+            (tracks_terminal and row["terminal_id"] and agent.terminal_id
+             and agent.terminal_id != row["terminal_id"])
+            or (row["session_id"] and agent.session_id
+                and agent.session_id != row["session_id"])):
+        agent = None
+    # A PANE WE CLOSED is gone whatever herdr still lists, and this is the second way
+    # the store outranks `agent list`. `cleanup` and `_stop_panes` end the row and clear
+    # its `pane_id` in the same breath they close the pane (`broker._stop_panes`,
+    # `broker.cleanup`), so `ended_at set AND pane_id NULL` is precisely "we took this
+    # agent's pane away". herdr's own reaper can lag that close by minutes — measured at
+    # ~5 min after a mass force-close on the lore fleet, where every closed row kept
+    # `alive` and stayed drawn on the board the whole time, then vanished together the
+    # instant herdr finally reaped the batch. We hold the more authoritative fact, so we
+    # decline the stale match exactly as the identity guard above does: `alive` reads
+    # False and the row archives on the NEXT tick rather than waiting on herdr. It can
+    # only ever be a finished, pane-cleared row — a live agent always carries a `pane_id`
+    # (spawn and `restore` both set it) and a null `ended_at` — so this never hides
+    # anything still running.
+    if agent is not None and row["ended_at"] is not None and row["pane_id"] is None:
+        agent = None
+    return agent
+
+
 def collect(
     db: sqlite3.Connection,
     h: Optional[Herdr] = None,
@@ -1429,66 +1658,53 @@ def collect(
     # The stop gate already exempts the same rows itself (`hooks.stop_gate`) and is
     # deliberately left alone: its copy of this test now agrees with the flag instead of
     # correcting it.
+    # THE LIVENESS PRE-PASS (§9). The join with herdr and the three-valued verdict it
+    # produces are needed BEFORE the row build, because `live_parent` below is a fact about
+    # children that the parents' own rows then read — so it cannot be computed inside the
+    # one loop that would otherwise produce it. `_match` is the loop's own guard set,
+    # lifted out verbatim, and the row build reads `matched` rather than asking again.
+    #
+    # `checkouts` memoises the one filesystem question `liveness` can ask, per call: a
+    # fleet shares a handful of checkouts between hundreds of rows, and a closed or live
+    # row never reaches that branch at all.
+    matched = {row["name"]: _match(row, live.get(row["name"]), tracks_terminal)
+               for row, _ in ordered}
+    checkouts: dict[str, bool] = {}
+    alive_of = {name: ((agent is not None) if consulted else None)
+                for name, agent in matched.items()}
+    spawning_of = {row["name"]: (row["session_id"] is None
+                                 and (now - row["created_at"]) < SPAWN_GRACE)
+                   for row, _ in ordered}
+    liveness_of = {row["name"]: liveness(row, alive_of[row["name"]],
+                                        spawning=spawning_of[row["name"]],
+                                        checkouts=checkouts)
+                   for row, _ in ordered}
+    # `waiting on child` REQUIRES A CHILD STILL `live` OR `restorable` (§9). The state and
+    # `ended_at` half is the rule this set always had; the liveness half is what wave 4
+    # adds, and it moves in both directions at once:
+    #
+    #   restorable   stays IN, and now stays in indefinitely — its row is never rewritten
+    #                to `failed` any more (`_record_gone`), so a machine restart no longer
+    #                releases every parent in the fleet at once.
+    #   not restorable  drops out AT ONCE rather than a `gone_confirm_grace` later, when
+    #                the terminal write used to be what took it out. "The parent's own
+    #                idleness begins to derive normally rather than the dead child masking
+    #                it forever" is the sentence this implements.
+    #
+    # An unreachable herdr (`liveness` None) changes nothing: None is not NOT_RESTORABLE,
+    # so the set is exactly what it was before this existed.
     live_parent = {row["parent"] for row in rows
                    if row["parent"] and row["state"] in ("working", "blocked")
-                   and row["ended_at"] is None}
+                   and row["ended_at"] is None
+                   and liveness_of.get(row["name"]) != NOT_RESTORABLE}
     absent_since: dict[str, Optional[int]] = {}
     doubt_since: dict[str, Optional[int]] = {}
     agents = []
     for row, depth in ordered:
         name = row["name"]
-        agent = live.get(name)
-        # A NAME IS NOT AN IDENTITY. herdr's `agent list` is machine-global and every
-        # switchboard store mints names from the same small role vocabulary independently
-        # (`broker._compose_name`), so a row that died days ago in this store matches a live
-        # agent belonging to a fleet in some other checkout — and is then drawn as alive,
-        # a different ghost each time, on nothing but a shared name. Worse, the false
-        # "present again" clears the gone debounce below (`_confirmed_gone`), so the row
-        # can never be confirmed dead for as long as the stranger runs.
-        #
-        # Both sides already carry identifiers this store never compared. When one is
-        # known on both sides and the two DISAGREE, this is somebody else's agent wearing
-        # our name — not found, exactly as if herdr had never listed it. When either side
-        # is blank the question cannot be asked and the name match stands, which is the
-        # behaviour that shipped: a row mid-spawn has neither id yet (see `spawning`
-        # below), and that window is covered by grace, not by this.
-        #
-        # TERMINAL ID is the one that does the work, and the choice is measured rather
-        # than preferred. herdr's `agent list` carries no `agent_session` at all on 0.8.x
-        # — every `Agent.session_id` off that path is `""` (checked against every agent
-        # herdr listed on this machine), so a session-id comparison alone would be a
-        # guard that can never fire. `terminal_id` is on every listed agent, is unique per
-        # agent, and is the handle herdr itself documents as STABLE (`herdr.Agent`); our
-        # side writes it at the only two moments a row can acquire a pane, spawn and
-        # restore (`broker._spawn`, `broker.restore`), and 459 of this store's 463 rows
-        # carry one. `pane_id` is deliberately NOT used: herdr changes it on a pane move,
-        # so a live agent could disagree with its own row and be read as dead.
-        #
-        # The session id is compared too, for nothing it catches today: should herdr start
-        # reporting `agent_session`, it is the stronger identity and this already uses it.
-        if agent is not None and (
-                (tracks_terminal and row["terminal_id"] and agent.terminal_id
-                 and agent.terminal_id != row["terminal_id"])
-                or (row["session_id"] and agent.session_id
-                    and agent.session_id != row["session_id"])):
-            agent = None
-        # A PANE WE CLOSED is gone whatever herdr still lists, and this is the second way
-        # the store outranks `agent list`. `cleanup` and `_stop_panes` end the row and clear
-        # its `pane_id` in the same breath they close the pane (`broker._stop_panes`,
-        # `broker.cleanup`), so `ended_at set AND pane_id NULL` is precisely "we took this
-        # agent's pane away". herdr's own reaper can lag that close by minutes — measured at
-        # ~5 min after a mass force-close on the lore fleet, where every closed row kept
-        # `alive` and stayed drawn on the board the whole time, then vanished together the
-        # instant herdr finally reaped the batch. We hold the more authoritative fact, so we
-        # decline the stale match exactly as the identity guard above does: `alive` reads
-        # False and the row archives on the NEXT tick rather than waiting on herdr. It can
-        # only ever be a finished, pane-cleared row — a live agent always carries a `pane_id`
-        # (spawn and `restore` both set it) and a null `ended_at` — so this never hides
-        # anything still running.
-        if agent is not None and row["ended_at"] is not None and row["pane_id"] is None:
-            agent = None
+        agent = matched[name]
         hstate = agent.state if agent else None
-        alive = (agent is not None) if consulted else None
+        alive = alive_of[name]
         running = row["state"] in RUNNING and row["ended_at"] is None
         # The wider half of the same question, and the ONLY thing `gone` is built on: a row
         # that never reported an end, whether it is working or blocked. See REAPABLE.
@@ -1507,7 +1723,11 @@ def collect(
         # needs the agent itself to have run an `sb` command. An agent that has run `sb` is
         # an agent herdr had. Should `agent start` ever start returning a session id, this
         # becomes a live hole and the condition has to go.
-        spawning = row["session_id"] is None and (now - row["created_at"]) < SPAWN_GRACE
+        #
+        # Computed in the liveness pre-pass above and read back here: `liveness` needs
+        # the same window (an absent claim mid-spawn is "cannot tell", not "gone for
+        # good") and two spellings of one grace is how the two come to disagree.
+        spawning = spawning_of[name]
         # An agent nobody has asked for anything yet is idle for the only reason it could
         # be, and calling that STALLED says something false about it — a workspace lead or
         # a top-level orchestrator waiting for its first instruction has finished exactly
@@ -1627,6 +1847,13 @@ def collect(
             # on its own, and `_confirmed_gone` still makes it hold for GONE_CONFIRM_GRACE
             # before anything is written.
             gone=bool(unended and alive is False and not spawning),
+            # THE THREE-VALUED VERDICT (§9), from the pre-pass above. `gone` is unchanged
+            # beside it and still means what it always meant — the pane is not there — and
+            # this says what follows from that. The two are not redundant: the readouts ask
+            # different questions of them, and only one of them decides what is WRITTEN
+            # (see the reap path at the end of this function).
+            liveness=liveness_of[name],
+            closed=is_closed(row),
             unread=unread.get(name, 0),
             age=max(0, now - row["created_at"]),
             idle=idle_for,
@@ -1696,9 +1923,29 @@ def collect(
     # drift is not real and must not be acted on (see the `only` note above).
     if consulted and reap and only is None:
         absent = [a.name for a in agents if a.gone]
+        # THE SPLIT WAVE 4 IS ABOUT (§9). Every absence used to end here as `state=failed`
+        # plus a ping to the parent — a crash, a closed pane, a herdr restart and a whole
+        # machine reboot in one bucket. Now the absence is classified first, and only the
+        # half that cannot come back is written down:
+        #
+        #   restorable      NOTHING is written. The row keeps its identity, its
+        #                   assignments and its last derived status "waiting to be
+        #                   restored", its parent is not told and not released, and
+        #                   `sb restore` (or `--sweep`) is what ends the wait. This is the
+        #                   whole of "a machine restart does not flood Needs You".
+        #   not restorable  exactly what every absence got before — see `_record_gone` —
+        #                   plus the `not_restorable` attention item `_attention` raises
+        #                   off the same verdict.
+        #
+        # THE DEBOUNCE STILL RUNS OVER BOTH, and its stamp is now KEPT for the restorable
+        # half rather than cleared on confirmation. `absent_since` stops being only a
+        # debounce for those rows and becomes the durable record of when the session went
+        # away — which is the one §9 field that was genuinely not persisted before, and is
+        # what `Broker._crash_time` needs to place an old absence on the clock at all.
+        restorable = {a.name for a in agents if a.restorable}
         if tracks_absence:
-            absent = _confirmed_gone(db, absent, absent_since, now)
-        _record_gone(db, absent)
+            absent = _confirmed_gone(db, absent, absent_since, now, keep=restorable)
+        _record_gone(db, [n for n in absent if n not in restorable])
         # The same debounce over a different disagreement, and the reason it is here rather
         # than anywhere cheaper is the same: this is the one path that both reads herdr and
         # is allowed to write. A store with nowhere to remember the doubt does nothing,
@@ -1860,7 +2107,8 @@ def stamp_needs_for(snap: Snapshot, since: dict[str, int]) -> dict[str, int]:
 
 
 def _confirmed_gone(db: sqlite3.Connection, absent: list[str],
-                    since: dict[str, Optional[int]], now: int) -> list[str]:
+                    since: dict[str, Optional[int]], now: int,
+                    keep: Collection[str] = ()) -> list[str]:
     """Of the rows herdr did not list, the ones that have been absent long enough to mean it.
 
     The debounce, and the whole of it. An absence is remembered in the store (`absent_since`)
@@ -1885,15 +2133,26 @@ def _confirmed_gone(db: sqlite3.Connection, absent: list[str],
     command that dies between the two still leaves the absence remembered. Callers MUST be
     in the reap path — this writes.
 
+    `keep` is the exception to "a confirmed row is cleared too", and it is what makes
+    `absent_since` durable for a RESTORABLE agent (§9). Such a row is never written off, so
+    there is no verdict for the stamp to outlive — and the moment the session went away is
+    a fact worth keeping rather than a counter to reset: `Broker._crash_time` reads it to
+    place the absence on a clock, and re-stamping it every grace would make an agent that
+    went down at breakfast look like one that went down a minute ago, for ever. Names in
+    `keep` that herdr LISTS again are cleared by the ordinary rule above — coming back is
+    what ends the absence, and it is the only thing that does.
+
     The mechanics are `_sustained`, which the stale-turn repair asks the same question of
     against its own column. One debounce written twice is a debounce whose two copies end up
     disagreeing about what "continuously" means.
     """
-    return _sustained(db, "absent_since", absent, since, now, GONE_CONFIRM_GRACE)
+    return _sustained(db, "absent_since", absent, since, now, GONE_CONFIRM_GRACE,
+                      keep=keep)
 
 
 def _sustained(db: sqlite3.Connection, column: str, flagged: list[str],
-               since: dict[str, Optional[int]], now: int, grace: float) -> list[str]:
+               since: dict[str, Optional[int]], now: int, grace: float,
+               keep: Collection[str] = ()) -> list[str]:
     """Of the rows a reading flagged, the ones it has flagged CONTINUOUSLY for long enough.
 
     The debounce itself, for both of the disagreements this file remembers between readings:
@@ -1914,7 +2173,10 @@ def _sustained(db: sqlite3.Connection, column: str, flagged: list[str],
       the agent, and the clock starts again from nothing.
 
     A confirmed row is cleared too, so the stamp never outlives the verdict it was counting
-    towards.
+    towards — unless it is named in `keep`, which is for the one caller whose confirmation
+    writes no verdict at all (`_confirmed_gone`, for a restorable absence). A kept name is
+    still RETURNED as confirmed; only the clearing is skipped, so it goes on being reported
+    every tick and the caller decides what that means.
 
     Written and committed here rather than left to the caller, so a command that dies
     between the two still leaves the reading remembered. Callers MUST be in the reap path —
@@ -1924,8 +2186,9 @@ def _sustained(db: sqlite3.Connection, column: str, flagged: list[str],
     confirmed = [n for n in flagged
                  if since.get(n) is not None and now - since[n] >= grace]
     fresh = [n for n in flagged if since.get(n) is None]
-    back = [n for n, first in since.items()
-            if first is not None and n not in flagged_set] + confirmed
+    back = ([n for n, first in since.items()
+             if first is not None and n not in flagged_set]
+            + [n for n in confirmed if n not in keep])
     if fresh:
         db.executemany(f"UPDATE agents SET {column}=? WHERE name=?",
                        [(now, n) for n in fresh])
@@ -1978,7 +2241,13 @@ def _forget_turn(db: sqlite3.Connection, names: list[str]) -> None:
 
 
 def _record_gone(db: sqlite3.Connection, names: list[str]) -> None:
-    """Write the drift back: an agent herdr no longer has is not working any more.
+    """Write the drift back: an agent herdr no longer has AND cannot get back is finished.
+
+    Reached by the NOT RESTORABLE half of a confirmed absence only (§9) — its checkout was
+    removed under it, or it never got a session id to resume, so `sb restore` would refuse
+    it and no command in the system can bring this agent back. Everything below is what
+    that half has always got, unchanged. The restorable half no longer reaches here at all:
+    see the reap path in `collect` for what happens instead, which is nothing.
 
     The one write on the read path, and it is here because this is the only place that
     ever learns it. Nothing else closes a row that died abnormally — a crash, a pane
@@ -2963,7 +3232,24 @@ def _attention(snap: Snapshot) -> list[str]:
         out.append("")
         out.append("NEEDS YOU")
         for a in needs:
-            if a.blocked:
+            if a.not_restorable:
+                # FIRST, and above `blocked` deliberately. This row's session is gone for
+                # good, so every other line in this block would offer an action that
+                # reaches nobody — `sb tell` types into a pane that is not there, and even
+                # the blocked row's "the human answers it" is an answer with nowhere to
+                # land. What is left is held work that cannot resume itself (§9, §12).
+                #
+                # The count is what this store can durably say is HELD for it. Steps and
+                # Questions are not first-class objects yet — Steps live in the plans
+                # plugin's own store and a Question is a `messages` row with `needs_reply`
+                # — so the honest number here is its unread mail, which is exactly the
+                # held-and-undeliverable backlog `sb inbox` would have handed it. The
+                # wording is §9's; when Steps and Questions become objects, the count
+                # widens to them and this line does not have to change.
+                out.append(f"  {a.name:<{w}}  is not restorable — {a.unread} "
+                           f"Steps/Questions held"
+                           f"  →  its work is on its branch: sb inspect {a.name}")
+            elif a.blocked:
                 # Says whose answer counts: only the human's `tell` clears a block
                 # (`Broker.tell` passes `answer=(me == HUMAN)`). Another agent's mail is
                 # written and then held, so telling one without that caveat sends an agent
@@ -3049,15 +3335,22 @@ def _attention(snap: Snapshot) -> list[str]:
         w = max(len(a.name) for a in drift)
         out.append("")
         out.append("DRIFT — the store still has these open; their panes are running nothing,")
-        out.append("which is why STATE reads idle above. A GONE one is recorded as failed once it")
-        out.append(f"has stayed gone ({GONE_STATE} after {fmt_age(int(GONE_CONFIRM_GRACE))} "
-                   f"of it, so a herdr hiccup")
-        out.append("does not end a live agent) — its pane is gone, so nothing will ever")
-        out.append("move that row again. A STALLED one is left alone:")
-        out.append("its pane is still there, and marking it done here would invent a")
+        out.append("which is why STATE reads idle above. A pane that has gone is read two")
+        out.append("ways, and the difference is whether the agent can come back. AWAITING")
+        out.append("RESTORE keeps its identity, its assignments and its last status and is")
+        out.append("waiting for a command — nothing is written about it and its parent is")
+        out.append("still waiting on it. GONE is the other half: its checkout went with it,")
+        out.append("or it never had a session to resume, so nothing can bring it back and it")
+        out.append(f"is recorded as {GONE_STATE} once the absence has held "
+                   f"{fmt_age(int(GONE_CONFIRM_GRACE))}")
+        out.append("(so a herdr hiccup does not end a live agent). A STALLED one is left")
+        out.append("alone: its pane is still there, and marking it done here would invent a")
         out.append("summary its parent never received.")
         for a in drift:
-            if a.gone:
+            if a.restorable:
+                what = ("AWAITING RESTORE  its pane is gone, its checkout and session are "
+                        "not — sb restore brings this exact agent back")
+            elif a.gone:
                 what = "GONE     no longer in herdr — its pane closed under it"
             elif a.signal_drift:
                 # The one row here our own signal did NOT find: it still says the turn is
@@ -3076,6 +3369,14 @@ def _attention(snap: Snapshot) -> list[str]:
             out.append(f"  {a.name:<{w}}  {what}, quiet {fmt_age(a.idle)}")
         out.append(f"  {'':<{w}}  →  sb inspect <name>, then: "
                    f"sb tell <name> \"wrap up and run sb done\"")
+        if any(a.restorable for a in drift):
+            # Said here rather than left to be inferred, because the line above is the
+            # wrong advice for this row twice over: there is no pane to tell anything
+            # into, and the row is NOT going to be reaped into a `failed` state that a
+            # sweep could then close. Either bring it back or close it by name.
+            out.append(f"  {'':<{w}}  →  for an AWAITING RESTORE one: sb restore <name> "
+                       f"(or sb restore --sweep for the fleet), or sb cleanup <name> "
+                       f"--force to let it go")
         if any(a.awaiting_keypress for a in drift):
             out.append(f"  {'':<{w}}  →  except an AWAITING KEYPRESS one: go to its pane "
                        f"and press a key, a tell cannot reach it")

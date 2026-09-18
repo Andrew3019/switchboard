@@ -807,9 +807,9 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
         # And the third, which is the only one of the three that must not run BESIDE
         # another: the reconciler is what records a death, this brings the dead back, and
         # two `sb` processes doing those at once over the same rows can write the second
-        # answer after the first. A tick is half a second and a confirmed death stays
-        # restorable for `Broker.SWEEP_RECENT`, so waiting for a quieter one costs nothing
-        # anybody can measure.
+        # answer after the first. A tick is half a second and a crashed agent stays in the
+        # sweep's cohort until somebody closes it (`Broker._crash_cohort` — no window since
+        # wave 4), so waiting for a quieter one costs nothing anybody can measure.
         if not reaping:
             run_auto_restore(snap, state, db_path)
         run_usage_resume(snap, state, db_path)

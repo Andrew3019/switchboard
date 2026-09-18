@@ -308,14 +308,34 @@ class SilentSessionHerdr(FakeHerdrAPI):
         return replace(a, session_id="")
 
 
-def reap_gone(db, h):
+def no_checkout(db, *names):
+    """Make these rows NOT RESTORABLE, so an absence is written off as a real end.
+
+    Liveness is three-valued since wave 4 (`status.liveness`, migration_sb_v2.md §9): a
+    session herdr no longer lists is `restorable` while its checkout is still on disk, and
+    only the other half is ever written back as `failed`. A test that wants a reaped row
+    therefore has to say which half it is about, and the checkout is the durable
+    difference — the one thing `restore` cannot rebuild.
+    """
+    for n in names:
+        db.execute("UPDATE agents SET cwd=? WHERE name=?", ("/nonexistent/checkout", n))
+    db.commit()
+
+
+def reap_gone(db, h, *names):
     """Get an absent agent recorded as `failed` — two readings, a grace window apart.
 
     One `agent list` that comes back short only remembers the absence now; it takes a
     second look past `GONE_CONFIRM_GRACE` to write the verdict (`status._confirmed_gone`).
     Every test here that wants a reaped row wants both, and none of them care about the
     debounce itself — that is `test_status`'s subject.
+
+    `names` are put out of restore's reach first (`no_checkout`), because since wave 4 a
+    reading that comes back short is not on its own an end: an agent whose checkout is
+    still there is `restorable` and nothing is written about it at all.
     """
+    if names:
+        no_checkout(db, *names)
     status.collect(db, h)
     status.collect(db, h, now=store.now() + int(status.GONE_CONFIRM_GRACE) + 1)
 
@@ -2242,6 +2262,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="kid", role="worker", parent="lead",
                            pane_id="w1:p2", session_id="s2", task="rewrite the parser")
         self.h.states_by_name = {"lead": "working"}                # kid's pane is gone
+        no_checkout(self.db, "kid")                                # and so is its checkout
         later = store.now() + int(status.GONE_CONFIRM_GRACE) + 1
         status.collect(self.db, self.h)
         status.collect(self.db, self.h, now=later)                 # the death is recorded
@@ -2754,6 +2775,13 @@ class BrokerTest(unittest.TestCase):
         longer existed, stamped the mail un-announceable and left it unread forever. Unread
         is what `needs_human` counts, so the dead agent stayed on the human's list with
         nothing in the fleet able to move it.
+
+        Since wave 4 the row does not leave that list altogether, and the difference is
+        what it is on the list FOR. The mail claim is gone — that is this test's subject
+        and is unchanged — and what remains is the one per-agent item §9 asks for ("Agent
+        <x> is not restorable — <n> Steps/Questions held"), which reports the backlog as a
+        count on one line instead of as a queue entry per message. One line per dead agent
+        that goes away when the row is closed is not the queue the incident was about.
         """
         # A session id, so its absence from herdr is a death rather than a spawn still in
         # flight (`status.collect`'s SPAWN_GRACE).
@@ -2762,12 +2790,17 @@ class BrokerTest(unittest.TestCase):
         store.put_message(self.db, from_agent="orch", to_agent="w", kind="tell",
                           body="please review the auth change")
         self.h.states_by_name = {}                  # its pane went with it
-        reap_gone(self.db, self.h)
+        reap_gone(self.db, self.h, "w")             # and its checkout: a real end
         self.assertEqual(store.get_agent(self.db, "w")["state"], "failed")
 
         self.restart_sb()
         self.assertEqual(self.b.flush_pending(), [])
-        self.assertEqual(status.collect(self.db, self.h, needs_me=True).agents, [])
+        [a] = status.collect(self.db, self.h, needs_me=True).agents
+        self.assertFalse(a.waiting_to_be_rung)      # no claim on a person for the MAIL
+        self.assertTrue(a.not_restorable)           # on the list as the §9 item instead
+        self.assertIn(f"is not restorable — {a.unread} Steps/Questions held",
+                      "\n".join(status._attention(
+                          status.collect(self.db, self.h))))
 
         # Nothing is discarded, and nothing is pretended to have been read: the message is
         # still in that agent's inbox, body and all, for `sb inspect` and for a restore.
@@ -3046,7 +3079,7 @@ class BrokerTest(unittest.TestCase):
                            pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}                     # herdr has never heard of it
         self.assertEqual(self.b.cleanup(me="orch"), [])          # still reads 'working'
-        reap_gone(self.db, self.h)
+        reap_gone(self.db, self.h, "kid")              # and its checkout: a real end
         self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
 
     def test_cleanup_closes_a_finished_agent_herdr_still_has(self):
@@ -3070,7 +3103,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}                     # a readout mid-spawn sees nothing
-        reap_gone(self.db, self.h)
+        reap_gone(self.db, self.h, "kid")              # and its checkout: a real end
         self.assertEqual(store.get_agent(self.db, "kid")["state"], status.GONE_STATE)
 
         self.h.states_by_name = {"kid": "working"}     # the spawn landed after all
@@ -3086,7 +3119,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
         self.h.states_by_name = {}
-        reap_gone(self.db, self.h)                     # reaped while herdr was answering
+        reap_gone(self.db, self.h, "kid")              # reaped while herdr was answering
 
         self.h.list_error = HerdrError("down", "no server")
         self.assertEqual(self.restart_sb().cleanup(me="orch"), [])
@@ -4084,6 +4117,76 @@ class BrokerTest(unittest.TestCase):
         self.b.restore("kid")
         self.assertEqual(self.h.started[-1]["model_args"],
                          ["--model", "claude-sonnet-5", "--effort", "medium"])
+
+    # -- v2 wave 4 (#322/#323): a restart is not a result, and held mail survives ------
+
+    def test_a_restorable_child_does_not_satisfy_an_explicit_wait(self):
+        """migration_sb_v2.md §9: `waiting on child` "requires a child that is still `live`
+        or `restorable`" — so a machine restart must not look like the whole cohort
+        reporting in. The mechanism is that nothing is WRITTEN about a restorable absence:
+        `status._record_gone` no longer fires for it, so there is no `failed` message for
+        `_wait_ready` to count and the row still reads `working` for `_still_going`.
+
+        The other child's real `done` is here to prove the wait is otherwise healthy —
+        this is a cohort that is one result short, not a wait that stopped working.
+        """
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0",
+                           session_id="s-lead")
+        for name in ("one", "two"):
+            store.create_agent(self.db, name=name, role="worker", parent="lead",
+                               pane_id=f"w1:{name}", session_id=f"s-{name}",
+                               cwd=str(self.repo))
+        self.h.states_by_name = {"lead": "idle", "one": "idle", "two": "idle"}
+        self.b.waiting(mode="all", me="lead")
+        self.b.done("first", me="one")
+        self.h.prompts.clear()
+
+        del self.h.states_by_name["two"]               # its pane goes; its checkout stays
+        reap_gone(self.db, self.h)
+
+        self.assertEqual(store.get_agent(self.db, "two")["state"], "working")
+        self.assertEqual(self.restart_sb().flush_pending(), [])
+        self.assertEqual(self.h.prompts, [])           # the lead is still waiting on it
+        self.assertIsNotNone(store.wait_for(self.db, "lead"))
+
+    def test_held_mail_is_announced_again_when_the_agent_is_restored(self):
+        """§9: "Messages and answers held for a non-live agent are delivered on restore."
+
+        Two halves. The mail itself was always durable and keyed by recipient rather than
+        by liveness, so `sb inbox` hands it over whenever the agent runs again — that half
+        needed nothing. What did not work was the ANNOUNCING: mail for an agent with no
+        pane is stamped `delivered_at` so the doorbell stops chasing a ring that cannot
+        happen, and nothing ever un-stamped it, so a restored agent had to think of running
+        `sb inbox` for itself. `restore` un-stamps it (`store.reannounce_for`), and the
+        held message is news again the moment there is a pane to announce it into.
+
+        Held, not written off: `undeliverable_at` says nobody will ever read this, and this
+        agent is about to.
+        """
+        store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
+                           cwd=str(self.repo), pane_id="w1:p1")
+        # Past its spawn window: inside it, an absence proves nothing about a row herdr may
+        # simply not have registered yet (`_awaiting_restore`).
+        self.db.execute("UPDATE agents SET created_at=?",
+                        (store.now() - int(status.SPAWN_GRACE) - 1,))
+        self.db.commit()
+        store.put_message(self.db, from_agent="lead", to_agent="kid", kind="tell",
+                          body="the fixture moved")
+        self.h.states_by_name = {}                     # its pane went away under it
+
+        self.assertEqual(self.restart_sb().flush_pending(), [])
+        [m] = self.db.execute("SELECT * FROM messages").fetchall()
+        self.assertIsNotNone(m["delivered_at"])        # held: nothing to ring
+        self.assertIsNone(m["undeliverable_at"])       # but not written off
+        self.assertEqual(store.unseen(self.db), [])    # the retry loop stops
+
+        self.h.states_by_name = {}
+        self.b.restore("kid")
+
+        [m] = self.db.execute("SELECT * FROM messages").fetchall()
+        self.assertIsNone(m["delivered_at"])           # news again, now there is a pane
+        self.assertEqual([x["body"] for x in self.b.inbox(me="kid")],
+                         ["the fixture moved"])
 
     def test_restore_without_a_session_is_an_error(self):
         store.create_agent(self.db, name="kid", role="worker")
@@ -5360,24 +5463,51 @@ class RestoreSweepTest(unittest.TestCase):
         self.assertIn("herdr cannot be reached", str(e.exception))
         self.assertEqual(self.h.started, [])
 
-    def test_the_cohort_is_what_went_down_recently_not_everything_that_ever_failed(self):
-        """`sb restore <name>` is how an older crash comes back, one at a time, with a
-        person deciding. A row still inside its absence debounce counts too — which half
-        of the union a row is in depends only on when the collector last ticked."""
-        self._agent("old", is_top=True)
+    def test_the_cohort_has_no_recency_window_an_old_crash_restores_like_a_fresh_one(self):
+        """migration_sb_v2.md §9: "Restore operates from durable Task/Agent state, not
+        heuristics such as how recently an agent was used: an agent belonging to an open
+        Task is eligible however old it is."
+
+        This REPLACES the ten-minute `SWEEP_RECENT` window, which silently dropped exactly
+        the long-lived session a person most wants back — the improvement §9 names ("making
+        restoration complete and deterministic for all agents of active Tasks, including
+        older long-lived sessions"). A row still inside its absence debounce counts too;
+        which half a row is in depends only on when the collector last ticked, and neither
+        half is now bounded by a clock."""
+        self._agent("ancient", is_top=True)
         self._agent("mid-debounce", is_top=True)
-        self._crashed("old")
-        self.db.execute("UPDATE agents SET ended_at=? WHERE name=?",
-                        (store.now() - broker_mod.SWEEP_RECENT - 60, "old"))
+        self._crashed("ancient")
+        self.db.execute("UPDATE agents SET ended_at=?, created_at=? WHERE name=?",
+                        (store.now() - 30 * 86400, store.now() - 30 * 86400, "ancient"))
         self.db.execute("UPDATE agents SET absent_since=? WHERE name=?",
                         (store.now(), "mid-debounce"))
         self.db.commit()
 
         r = self.b.restore_sweep(me=HUMAN, dry_run=True)
 
-        self.assertEqual(list(r), ["mid-debounce"])
+        self.assertEqual(sorted(r), ["ancient", "mid-debounce"])
 
     # --- The automatic half only: a confirmed death is not yet a restart -----------------
+
+    def test_the_automatic_sweep_keeps_the_recency_window_the_typed_one_dropped(self):
+        """The one place a window still applies, and the reason it does. §9 removes recency
+        from RESTORE; the collector's unattended sweep is the narrower thing §9 separately
+        calls "explicit environment recovery after a crash or restart", and the cluster test
+        is a test ON the cohort rather than a filter OF it — two old deaths that happened to
+        fall together would otherwise read as a restart and take every ancient row up with
+        them. So `auto` sees a recent cohort only; the same rows are still a typed sweep's
+        to bring back."""
+        self._agent("ancient-a", is_top=True)
+        self._agent("ancient-b", is_top=True)
+        self._crashed("ancient-a", "ancient-b")
+        old = store.now() - broker_mod.AUTO_RESTORE_RECENT - 600
+        self.db.execute("UPDATE agents SET ended_at=?, created_at=?", (old, old))
+        self.db.commit()
+
+        self.assertEqual(list(self.b.restore_sweep(me=HUMAN, auto=True)), [])
+        self.assertEqual(self.h.started, [])
+        self.assertEqual(sorted(self._fresh_broker().restore_sweep(me=HUMAN)),
+                         ["ancient-a", "ancient-b"])
 
     def test_the_automatic_sweep_declines_a_lone_death(self):
         """The whole point of narrowing the trigger: a pane closed by hand, a single kill,
