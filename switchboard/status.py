@@ -2914,12 +2914,14 @@ def _undelivered_counts(db: sqlite3.Connection,
     still holds such rows, and reporting them as undelivered would put a permanent warning
     on a board about mail that was never going to be announced to anybody.
 
-    The third field is there for one caller and one decision: `broker._ring` holds a
-    blocked agent's mail back unless the human's answer is among it, so "is any of this
-    from the human" is exactly what separates mail a doorbell can announce now from mail
-    that cannot move until a person acts. `AgentStatus.ringable` is where that is read,
-    and the collector's doorbell is why it has to be in the snapshot rather than a second
-    query — see `collector.ring_doorbell`.
+    The third field used to be the one thing `AgentStatus.ringable` read that
+    `waiting_to_be_rung` did not: `broker._ring` held a BLOCKED agent's mail back unless
+    the human's answer was among it, so "is any of this from the human" was what
+    separated mail a doorbell could announce from mail that could not move until a
+    person acted. That holdback is gone (#325 — see `AgentStatus.ringable`), and with it
+    the one reader this field had; it is still computed and published as
+    `undelivered_answer` because nothing has needed to remove it yet, not because
+    anything still reads it.
     """
     # `only` scopes to one agent so a single-agent reader (`inspect`) uses
     # `idx_msgs_undelivered` rather than scanning every mailbox. See `collect`'s note.

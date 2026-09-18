@@ -10014,21 +10014,13 @@ class Broker:
           the one mode whose send is CONFIRMED rather than fired and hoped for — see
           `_deliver_interrupt` — because it is the one mode whose text is the message.
 
-        Held back while the target is BLOCKED in every mode but interrupt, and that is a
-        deliberate widening of the old rule rather than a hole in the new one: a blocked
-        agent has no next turn to deliver to — it has stopped, and the ring would only
-        restart it, drop it out of `sb status --needs-me` and bury the answer it is
-        waiting for. *Next turn* to a blocked agent therefore means the turn its block is
-        answered on, which is `flush_pending`'s job exactly as before.
-
-        The blocked rule's reason, in full, since it is the one turned inside
-        out: a blocked agent is not idle, it is waiting on a person. This used to unblock
-        unconditionally before every delivery, so a sibling's unrelated `tell` — or a
-        child's `done` — put the agent back to `working`, dropped it out of `sb status
-        --needs-me`, and buried the human's eventual answer under mail it never asked for.
-        `answer=True` is the one ring that is the human's reply, and it is the only thing
-        that clears a block. Everything else waits its turn: the message stays queued and
-        `flush_pending` rings it once the block is answered.
+        THERE IS NO BLOCKED HOLDBACK ANY MORE (#325). An agent with an open Question is an
+        ordinary idle agent — `state` never changed for it — so unrelated mail rings it
+        exactly as it would ring anyone else; the open row is what still shows on `sb
+        status --needs-me`, and nothing here can bury it, because nothing here touches it.
+        `answer=True` remains the flag `answer`/`resolve_question` ring with: it is what
+        keeps the answer itself out of the coalescing holdback below, so a question's own
+        answer is never bundled away behind an unrelated sibling burst.
 
         `hold=True` says this ring belongs to the HELD RING CLASS (`HELD_RING_KINDS`):
         a child finishing or dying, and later the mutation rings. Those arrive in bursts —
@@ -10119,10 +10111,10 @@ class Broker:
             # (`RING_HOLDBACK`). Returning False is exactly what leaves it owed — the
             # message stays unseen and undelivered, which is the drain's work list.
             #
-            # `answer` is out, structurally: the human's reply is the one ring that
-            # clears a block, and holding it would leave an agent stopped on a question
-            # that has already been answered. INTERRUPT never arrives here — it is not
-            # an explicit holdback — and `block` never rings at all.
+            # `answer` is out, structurally: it is the reply to a question the asker is
+            # sitting on, and holding it back to coalesce with an unrelated burst would
+            # delay an answer that is already the whole of what it was waiting for.
+            # INTERRUPT never arrives here either — it is not an explicit holdback.
             store.log_event(self.db, kind=RING_HELD_BACK, agent=who)
             return False
         inline_ids: list[int] = []

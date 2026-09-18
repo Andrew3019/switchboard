@@ -938,17 +938,6 @@ class TheDoorbellTrigger(PanelTest):
         self.assertTrue(collector.ring_doorbell(self._snap(1), state, None))
         self.assertEqual(len(self.ran), 2)
 
-    def test_the_humans_answer_to_a_blocked_agent_still_rings(self):
-        """The one ring `_ring` lets a block through, so it is the one the doorbell must
-        still chase — the answer's own `sb tell` flushes, but a target that was mid-turn
-        at that moment has nothing else coming."""
-        state = collector.State(pid=1, started_at=0.0)
-        snap = self._snap(2)
-        snap.agents[0].state = "blocked"
-        snap.agents[0].undelivered_answer = True
-        self.assertTrue(collector.ring_doorbell(snap, state, None))
-        self.assertEqual(self.ran, [["/bin/sb", "flush"]])
-
     def test_a_failing_sb_is_a_counter_and_not_a_stale_snapshot(self):
         """`last_error` is what every panel reads as "this data is old". A doorbell that
         will not run is a different complaint about perfectly good data."""
