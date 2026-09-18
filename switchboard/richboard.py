@@ -168,7 +168,7 @@ _COLOR = os.environ.get("NO_COLOR") is None
 
 
 def marker_short(a) -> str:
-    """`board.marker` cut to its WORD — `BLOCKED`, `AT PROMPT`, `GONE`, `STALLED`.
+    """`board.marker` cut to its WORD — `ASKING`, `AT PROMPT`, `GONE`, `STALLED`.
 
     The half that must never be what a narrow pane drops: the reason after the dash is
     recoverable from the agent's own pane, the word is not. Derived from `board.marker`
@@ -188,8 +188,8 @@ def marker_short(a) -> str:
 def tail_forms(a) -> list[str]:
     """Everything the row's tail could say, WIDEST FIRST, narrowest last.
 
-    Andrew watches for two things — BLOCKED and MAIL — so those are what the row gives up
-    last. The ladder degrades the WORDING before it gives up either piece, and the last
+    Andrew watches for two things — a question aimed at him, and MAIL — so those are what
+    the row gives up last. The ladder degrades the WORDING before it gives up either piece, and the last
     rung is what `_row_budget` reserves columns for before it spends any on the name or
     the age.
 
@@ -234,12 +234,12 @@ def squeeze(a, room: int) -> str:
     """The tail when no whole rung of the ladder fits: fill `room`, mail first.
 
     Two jobs. It uses the room a rung would have left empty — a 25-column tail says
-    `BLOCKED — which pane s…`, not a bare `BLOCKED` with fifteen columns of nothing after
+    `ASKING — which pane s…`, not a bare `ASKING` with fifteen columns of nothing after
     it — and it decides what goes when the pane is narrower than even the bottom rung: the
     marker's REASON first, then its word, and the mail kept whole to the last. Mail is the
-    shorter of the two and the only one with no other representation on the screen — the
-    state word beside it already says `blocked`, and NEEDS YOU below names the agent again
-    — so an unanswered message is what a clip here would really lose.
+    shorter of the two and the only one with no other representation on the screen — NEEDS
+    YOU below names the agent again — so an unanswered message is what a clip here would
+    really lose.
     `board._MAIL_RESERVE` makes the same trade for the same reason.
     """
     full, word = board.marker(a), marker_short(a)
@@ -264,9 +264,9 @@ def squeeze(a, room: int) -> str:
 def needs_kind(a) -> str:
     """Which of NEEDS YOU's TWO kinds this agent is, or `""` for neither.
 
-    `blocked` — waiting on a human, whether it called `sb block`, is sitting at its
-    prompt, or is parked on a screen herdr cannot read. `idle` — nothing running: stalled,
-    or a session that died mid-turn with the pane still open.
+    `blocked` — waiting on a human, whether it has an open Question for one, is sitting at
+    its prompt, or is parked on a screen herdr cannot read. `idle` — nothing running:
+    stalled, or a session that died mid-turn with the pane still open.
 
     STILL TWO WORDS AND NOT THREE. `awaiting_keypress` is counted as `blocked` rather than
     given a kind of its own, for two reasons that point the same way: it IS the blocked
@@ -284,7 +284,7 @@ def needs_kind(a) -> str:
 
     An INFERRED summons also has to have held (`AgentStatus.settled`), which is what stops
     a row that is between two turns being listed for the frame it takes to start the next
-    one. `blocked` is exempt and immediate — the agent wrote that word itself; the keypress
+    one. `blocked` is exempt and immediate — the agent wrote the question itself; the keypress
     reading is emphatically NOT exempt, being the most inferred thing on the row.
     """
     if a.blocked or ((a.at_prompt or a.awaiting_keypress) and a.settled):
@@ -316,8 +316,8 @@ def still_going(a) -> bool:
     # `a.gone and not a.restorable`, the same narrowing `board.wants_you` makes and for
     # the same rule: §9 says `waiting on child` requires a child still `live` OR
     # `restorable`, so a descendant awaiting restore is still work out below and still
-    # excuses the ancestor idling above it. The case this actually changes is a BLOCKED
-    # restorable descendant, whose `display_state` stays `blocked`: without the narrowing
+    # excuses the ancestor idling above it. The case this actually changes is a restorable
+    # descendant with an open question for a person (`a.blocked`): without the narrowing
     # it would drop out of the subtree's work-in-flight and withdraw the excuse from an
     # idle ancestor above it. A merely-WORKING restorable descendant already reads `idle`
     # once its pane is gone (`display_state`), so the RUNNING test below returns False for
@@ -360,9 +360,8 @@ def busy_below(agents: list[Any]) -> set[str]:
 def needs_list(agents: list[Any]) -> list[Any]:
     """The NEEDS YOU section's membership, in the order it is drawn: blocked, then idle.
 
-    Blocked first because a blocked agent asked a question and is holding until a person
-    answers it, and it is listed whatever is happening under it — its own children cannot
-    unblock it.
+    Blocked first because that agent asked a person a question and nothing under it can
+    answer one, so it is listed whatever is happening beneath it.
 
     AN IDLE AGENT WITH LIVE WORK BENEATH IT IS NOT THE HUMAN'S PROBLEM. `stalled` already
     excuses a parent whose own direct children are open, but "open" is the store's word and
@@ -386,7 +385,7 @@ def needs_reason(a) -> str:
     if a.at_prompt:
         return "at a prompt, waiting on you"
     if a.blocked:
-        return a.blocked_why or "no reason recorded"
+        return a.blocked_why or "no question recorded"
     if a.awaiting_keypress:
         # The action first, for the same reason the stalled line puts the age first: it is
         # the half worth reading and the half a clip would eat. Says what was observed —

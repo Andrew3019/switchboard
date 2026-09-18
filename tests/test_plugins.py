@@ -685,7 +685,7 @@ class CliTest(Sandbox):
         with mock.patch.object(cli.Broker, "whoami", lambda self: "w1"):
             code, _, err = self.run_sb("plugin", "thing", "drop")
         self.assertEqual(code, 1)
-        self.assertIn("sb block", err)
+        self.assertIn("sb ask human", err)
 
     def test_an_agent_command_is_refused_for_the_human(self):
         self.ship("thing", FIXTURE)
@@ -1035,7 +1035,9 @@ class IsolationTest(Sandbox):
     LEVEL_0 = {
         "status": [], "context": [], "whoami": [], "done": ["finished"],
         "tell": ["w1", "hi"], "inbox": [], "waiting": [],
-        "block": ["why"], "log": [], "usage": [], "cleanup": [],
+        "ask": ["human", "why"], "answer": ["1", "ok"], "resolve": ["1"],
+        "withdraw": ["1"], "escalate": ["1"], "questions": [],
+        "log": [], "usage": [], "cleanup": [],
         # An agent closing its OWN pane — one store write on its own row and a pane
         # teardown, no spawn and no plugin code, the same class as its own `done`.
         "close": [],

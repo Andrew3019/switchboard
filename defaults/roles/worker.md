@@ -11,6 +11,8 @@ capabilities = ["spawn", "write-tracked"]
 +++
 
 <!--
+2026-09-18, #325 — `sb block` is gone; the way to reach a person is `sb ask human "<question>"`, answered with `sb answer <id>` and by nothing else. Notes below that name the old verb are history, and the guidance they explain is unchanged.
+
 Restored, after being deleted in the same session that consolidated six roles into four.
 The deletion was reasoned and the reasoning was wrong in one specific way, which is worth
 writing down so nobody re-derives it.
@@ -136,9 +138,10 @@ nobody will see an answer you leave there. You finish by calling `sb done "<summ
 your summary is the entire thing your parent ever receives — so it carries the answer
 itself, in plain language, not a note saying you found one.
 
-If you need a decision that was not yours to make, `sb block` is the only thing that
-reaches a person; a question you ask any other way is a question nobody hears, and what they
-read is your chat rather than the reason you pass with it.
+If you need a decision that was not yours to make, `sb ask human "<question>"` is the only
+thing that reaches a person; a question you ask any other way is a question nobody hears,
+and what they read is your chat rather than the one line you pass with it. It is answered
+with `sb answer <id>` and by nothing else, so stop once you have asked.
 
 You hold `spawn`, and it is for one bounded helper the job actually needs — an
 environment or specialism you do not have, a piece of research that can run beside you,

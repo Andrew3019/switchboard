@@ -14,12 +14,14 @@ Two rules do most of the work, and both come from herdr:
     shell") and refuses. This covers the ``--append-system-prompt`` lines AND the task
     text handed to ``agent prompt``.
 
-One rule is ours rather than herdr's, and it is in `reason`: a `sb block` reason is capped
-short, because the human never reads that field and a long one is an answer the agent has
-sent nowhere. See that docstring — it is the one place here enforcing a shape.
+One rule is ours rather than herdr's, and it is in `reason`: a question put to a person
+(`sb ask human`) is capped short, because the human never reads that field and a long one
+is an answer the agent has sent nowhere. See that docstring — it is the one place here
+enforcing a shape.
 
 Left to herdr, both surface as an error that names neither the flag the human typed nor
-the fix — and in the ``ask`` case as a wedged shell that blocks for the full timeout.
+the fix — and, for a call that waits on herdr, as a wedged shell that blocks for the
+full timeout.
 Shell injection is NOT the concern: every subprocess call is an argument list and
 ``shell=True`` appears nowhere. The concern is invalid input reaching herdr.
 
@@ -41,7 +43,7 @@ from . import config
 # reasoning lives next to the number.
 MAX_AGENT_NAME = config.setting("limits.agent_name")
 MAX_TEXT = config.setting("limits.text")
-MAX_BLOCK_REASON = config.setting("limits.block_reason")
+MAX_QUESTION_LINE = config.setting("limits.question_line")
 MAX_PROMPT = config.setting("limits.prompt")
 MAX_REF = config.setting("limits.ref")
 MAX_TOKEN = config.setting("limits.token")
@@ -120,15 +122,15 @@ def line(value: Optional[str], field: str, *, max_len: int = MAX_TEXT) -> str:
 
 
 def reason(value: Optional[str], field: str = "reason") -> str:
-    """`sb block "<why>"` — a one-line note on a board row, not a message to the human.
+    """`sb ask human "<q>"` — a one-line note on a board row, not a message to the human.
 
     The only validator here that is enforcing a SHAPE rather than a constraint somebody
     else imposes, and the reason it has to be mechanical is C6: the right shape was
     written down in the protocol and an orchestrator still put its whole answer here.
-    The human reads a blocked agent's own chat, with `sb inspect`; this field reaches him
-    as at most a clipped row on the board. So a `why` big enough to be the answer is not
-    a long reason, it is an answer that has been sent nowhere — and the agent cannot tell,
-    because `block` succeeded.
+    The human reads the asking agent's own chat, with `sb inspect`; this field reaches him
+    as at most a clipped row on the board. So a question big enough to be the whole message
+    is not a long question, it is a message that has been sent nowhere — and the agent
+    cannot tell, because `ask` succeeded.
 
     Both refusals therefore say the same thing and name the same fix, including the one
     that used to blame herdr. herdr's newline rule is real (the reason travels on to
@@ -140,7 +142,7 @@ def reason(value: Optional[str], field: str = "reason") -> str:
 
     What the refusal does NOT do is say what the chat message should contain. It used to
     name the parts ("the findings, the options, the numbered questions") and close with a
-    specimen block call, and it is read at exactly the moment the agent is composing for a
+    specimen call, and it is read at exactly the moment the agent is composing for a
     human — so it anchored harder than any prompt text could. DESIGN-TRUTH 2026-08-14:
     nothing may be turned into something to copy. It names the field's job, the mistake,
     and where the message goes; shape is the protocol's business, not an error string's.
@@ -150,9 +152,9 @@ def reason(value: Optional[str], field: str = "reason") -> str:
         raise Invalid(f"{field} is empty — say in one line what you need")
     if _CONTROL.search(v):
         raise Invalid(f"{field} contains control characters; send plain text")
-    if "\n" in v or "\r" in v or len(v) > MAX_BLOCK_REASON:
-        problem = (f"is {len(v)} characters, over the {MAX_BLOCK_REASON} a block reason "
-                   f"may carry" if len(v) > MAX_BLOCK_REASON else "must be a single line")
+    if "\n" in v or "\r" in v or len(v) > MAX_QUESTION_LINE:
+        problem = (f"is {len(v)} characters, over the {MAX_QUESTION_LINE} a question line "
+                   f"may carry" if len(v) > MAX_QUESTION_LINE else "must be a single line")
         raise Invalid(
             f"{field} {problem}. It is bookkeeping on a board row, NOT the message the "
             f"human reads — they read your own chat, and nothing you put here. So do not "
@@ -250,9 +252,10 @@ def target(value: Optional[str], field: str = "recipient") -> str:
     Shape only — whether the agent exists is the broker's business, and it already fails
     fast on an unknown one rather than blocking for the whole timeout.
 
-    `human` is a legal shape and NOT a legal recipient: a person has no mailbox, so the
-    broker refuses it with a sentence naming `sb block`. Rejecting it here instead would
-    answer "who do I tell?" with a shape complaint, which teaches nobody the one way in.
+    `human` is a legal shape and NOT a legal `tell` recipient: a person has no mailbox, so
+    the broker refuses it there with a sentence naming `sb ask human`. Rejecting it here
+    instead would answer "who do I tell?" with a shape complaint, which teaches nobody the
+    one way in — and `sb ask`, which shares this validator, takes `human` for real.
     """
     v = _require_str(value, field).strip()
     if v in RESERVED_TARGETS:

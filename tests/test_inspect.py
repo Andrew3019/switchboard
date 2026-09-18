@@ -130,7 +130,7 @@ class InspectTest(Base):
                               body=f"[done] summary {i}")
             store.put_message(self.db, from_agent="a0", to_agent=f"a{i}", kind="tell",
                               body=f"unread {i}")
-        store.log_event(self.db, kind="blocked", agent="a2", why="stuck")
+        store.create_question(self.db, asker="a2", target=store.Q_HUMAN, body="stuck")
         # `asker` asked a0 a question and a0 has never messaged it back — the one row
         # `_awaiting_reply` finds. It is deliberately NOT one of the a{i} above, because a0
         # sent each of those an "unread" message, which counts as an answer.
@@ -138,7 +138,7 @@ class InspectTest(Base):
         store.put_message(self.db, from_agent="asker", to_agent="a0", kind="tell",
                           body="which library?", needs_reply=True)
         for fn in (status._unread_counts, status._undelivered_counts,
-                   status._last_activity, status._block_reasons, status._last_summaries):
+                   status._last_activity, status._human_questions, status._last_summaries):
             full = fn(self.db)
             for name in ("a0", "a2", "a3"):
                 self.assertEqual(fn(self.db, name).get(name), full.get(name),
@@ -237,19 +237,20 @@ class InspectTest(Base):
         self.assertIn("UNDELIVERED", out)
         self.assertNotIn("not picked up", out)          # there is nothing it ignored
 
-    def test_a_blocked_agent_is_told_its_mail_waits_on_the_human_not_on_idle(self):
-        """Same branch as `sb status`, because it is the same held mail.
+    def test_an_agent_with_an_open_question_is_told_the_ordinary_thing_about_its_mail(self):
+        """The branch that used to be here is gone with the holdback it described (#325).
 
-        `_ring` holds a blocked agent's mail on `_is_blocked` until a `tell` from the
-        human specifically. "Released when it goes idle" describes a path this agent no
-        longer takes at all — `block` stopped reporting herdr state.
+        `_ring` held a blocked agent's mail until a `tell` from the human specifically, so
+        "released when it goes idle" was false for that one row and the readout said so.
+        There is no such hold any more: an agent with a question open is an ordinary idle
+        agent, and a second sentence about it would now be the wrong one.
         """
         self.agent()
-        store.set_state(self.db, "w1", "blocked")
+        store.create_question(self.db, asker="w1", target=store.Q_HUMAN, body="which?")
         store.put_message(self.db, from_agent="main", to_agent="w1", kind="tell", body="a")
         out = status.render_detail(self.inspect(h=FakeHerdr([alive("w1", "idle")])))
-        self.assertIn("held until the human", out)
-        self.assertNotIn("released when it", out)
+        self.assertIn("released when it", out)
+        self.assertNotIn("held until the human", out)
 
     def test_no_undelivered_section_when_everything_was_announced(self):
         self.agent()
@@ -307,12 +308,12 @@ class InspectTest(Base):
         self.assertTrue(got.transcript.endswith("sess-1.jsonl"))
 
     def test_a_long_message_still_reaches_the_human_through_the_chat(self):
-        """The capability the short `sb block` reason must not cost anyone.
+        """The capability the short `sb ask human` question line must not cost anyone.
 
-        `validate.reason` caps the `why` at one line, so this is the path that has to carry
-        a full question: the agent writes it in its own chat, blocks with a one-line note,
-        and the human reads the chat here — every paragraph of it, with the reason only
-        marking the row. Asserted end to end rather than trusted, because if this failed the
+        `validate.reason` caps that line at one line, so this is the path that has to carry
+        a full question: the agent writes it in its own chat, asks with a one-line note,
+        and the human reads the chat here — every paragraph of it, with the question line
+        only marking the row. Asserted end to end rather than trusted, because if this failed the
         cap would be taking a capability away instead of moving it.
         """
         message = ("Need human input: the audit found three ways the spawn path drops a "
@@ -321,8 +322,8 @@ class InspectTest(Base):
                    "2. Ship the prompt rewrite anyway? Recommended: no.\n\n"
                    "Detail is in the 2026-08-09 CONSOLIDATED.md write-up.")
         self.agent(pane_id="w1:p9")
-        store.set_state(self.db, "w1", "blocked")
-        store.log_event(self.db, kind="blocked", agent="w1", why="need a decision on spawn")
+        store.create_question(self.db, asker="w1", target=store.Q_HUMAN,
+                              body="need a decision on spawn")
         h = FakeHerdr([alive("w1", "idle")], pane_text=message + "\n")
         d = status.inspect(self.db, h, "w1", lines=100)
         self.assertEqual(d.agent.blocked_why, "need a decision on spawn")   # the row

@@ -13,4 +13,4 @@
 
 - Hit a bug in switchboard itself (`sb`, or anything under `switchboard/`)? File it: `sb plugin report-bug file "<what broke>" --command "..." --expected "..." --actual "<the exact error>"`.
 - Then carry on with your task. Do not work around it silently — that hides the bug from everyone else and is worse than the bug.
-- If it blocks you entirely, `sb block "..."` after filing.
+- If it stops you entirely, `sb ask human "..."` after filing.

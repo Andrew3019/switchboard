@@ -1030,7 +1030,7 @@ class BrokerTest(unittest.TestCase):
         seg = self._direct(manifest)
         self.assertTrue(seg["included"])
         self.assertIn("in your own chat", seg["text"])
-        self.assertIn("sb block", seg["text"])
+        self.assertIn("sb ask human", seg["text"])
         # It renders AFTER the role prompt: researcher.md tells every researcher to write a
         # notes file, so the nudge that relaxes that has to be the last word, not a silent
         # contradiction from above (PR #258 review).
@@ -1769,220 +1769,160 @@ class BrokerTest(unittest.TestCase):
                          ["[done] counted 144, the parser is fine",
                           "[done] counted 144, the parser is fine"])
 
-    def test_block_reports_no_state_to_herdr_at_all(self):
-        """The one thing that makes a block answerable.
+    def test_asking_a_person_reports_no_state_to_herdr_at_all(self):
+        """The one thing that makes a question answerable.
 
         ANY `pane report-agent` evicts the pane's named agent for good — `idle` as surely
-        as `blocked` (`Herdr.report_state` records the measurement). Blocking used to push
-        `idle` to stay "reachable"; it was the call, not the value, that made blocking a
-        one-way door. So the assertion is that no state is pushed, not that a safe one is.
+        as anything else (`Herdr.report_state` records the measurement). The old `sb block`
+        used to push `idle` to stay "reachable"; it was the call, not the value, that made
+        blocking a one-way door. So the assertion is that no state is pushed at all, and
+        that the agent's own row is untouched: asking is not a state.
         """
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.b.block("need a decision", me="w")
-        self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")  # our truth
+        self.b.ask(HUMAN, "need a decision", me="w")
+        self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
         self.assertEqual(self.h.states, [])                                  # still named
         self.assertTrue(self.h.notifications)                                # you hear it
 
-    def test_the_humans_answer_reaches_a_blocked_agent_on_an_evicting_herdr(self):
-        """The whole point, against a herdr that behaves the way the real one does.
+    def test_the_answer_reaches_the_asker_on_an_evicting_herdr(self):
+        """The whole round trip, against a herdr that behaves the way the real one does.
 
-        `EvictingHerdr` models the one fact this fix turns on: a `pane report-agent` on a
-        pane costs the agent its name, for good. Under it, the old code lost the block's
-        answer twice over — `block` evicted the name on the way in, `_unblock_if_needed`
-        evicted it again one line before the doorbell — and the observed result was the
-        block clearing while the answer sat undelivered. Neither call is made now, so the
-        round trip completes.
+        `EvictingHerdr` models the one fact this turns on: a `pane report-agent` on a pane
+        costs the agent its name, for good. The old block lost its own answer twice over —
+        it evicted the name on the way in, and the unblock evicted it again one line before
+        the doorbell — and the observed result was the row clearing while the answer sat
+        undelivered. Nothing reports a state now, so the round trip completes.
         """
         self.h = EvictingHerdr()
         self.b = Broker(self.db, self.h, repo=self.repo)
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "idle"}
-        self.b.block("which branch?", me="w")
+        q = self.b.ask(HUMAN, "which branch?", me="w")
 
-        self.b.tell(["w"], "use main", me=HUMAN)
+        self.b.answer(q["id"], "use main", me=HUMAN)
 
         self.assertEqual([n for n, _ in self.h.prompts], ["w"])   # the doorbell rang
         self.assertEqual(store.undelivered(self.db), [])          # the answer arrived
-        self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
         self.assertIsNone(self.b.unreachable("w"))                # and it never went lost
 
-    def test_block_goes_to_the_human_not_the_parent(self):
+    def test_a_question_to_a_person_goes_to_the_human_not_the_parent(self):
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.b.block("need a decision", me="kid")
-        self.assertEqual(store.get_agent(self.db, "kid")["state"], "blocked")
+        self.b.ask(HUMAN, "need a decision", me="kid")
         self.assertTrue(self.h.notifications)
         self.assertEqual(store.unread_for(self.db, "orch"), [])   # parent context untouched
 
-    def test_block_is_refused_while_a_descendant_is_already_waiting(self):
-        """One question, one row — the rule the protocol states and nothing enforced.
+    def test_two_agents_may_each_hold_a_question_for_the_same_person(self):
+        """The single-waiter gate is gone, and this is why it could go.
 
-        The observed failure (bug 2026-08-16-152345): a child blocked on a decision, its
-        dispatcher relayed the same question and blocked on top of it, and the board carried
-        two human-waiting rows for one decision. The refusal names the waiting agent and
-        quotes its reason, because the caller's next move turns on whether that row is
-        already its own question.
-        """
-        store.create_agent(self.db, name="orch", role="lead")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.b.block("which branch?", me="kid")
-
-        with self.assertRaises(ValueError) as e:
-            self.b.block("kid needs to know which branch", me="orch")
-
-        self.assertIn("kid", str(e.exception))
-        self.assertIn("which branch?", str(e.exception))
-        self.assertIn("sb done", str(e.exception))
-        self.assertEqual(store.get_agent(self.db, "orch")["state"], "working")  # not blocked
-        refused = [r for r in store.recent_events(self.db, agent="orch")
-                   if r["kind"] == "block_refused_descendant_waiting"]
-        self.assertEqual(len(refused), 1)
-
-    def test_the_refusal_lifts_once_the_childs_row_clears(self):
-        """Not a permanent gate, which is why it needs no escape hatch.
-
-        A parent with a genuinely different question is not locked out — it is made to wait
-        its turn. The moment the person answers the child (which clears its block), the
-        parent may reach them itself.
+        It refused a second block while a descendant was already blocked, because `state`
+        could only ever hold one of them and answering the parent left the child waiting.
+        A Question has an id, so two of them are two rows a person answers separately —
+        which is the thing the state column could not represent.
         """
         store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.b.block("which branch?", me="kid")
-        self.b.tell(["kid"], "use main", me=HUMAN)               # the human answers the child
+        a = self.b.ask(HUMAN, "which branch?", me="kid")
+        b = self.b.ask(HUMAN, "and a different question", me="orch")
+        self.assertNotEqual(a["id"], b["id"])
+        waiting = {x.name: x.blocked_why
+                   for x in status.collect(self.db, self.h, needs_me=True).agents}
+        self.assertEqual(waiting, {"kid": "which branch?",
+                                   "orch": "and a different question"})
+        self.assertFalse(hasattr(self.b, "block"))
+        self.assertFalse(hasattr(self.b, "blocked_descendants"))
 
-        self.b.block("and now a different question", me="orch")
-
-        self.assertEqual(store.get_agent(self.db, "orch")["state"], "blocked")
-
-    def test_a_dead_descendant_never_holds_the_gate_shut(self):
-        """A child that died holding a block is nobody the person is waiting on.
-
-        The dangerous direction here is the opposite of `live_descendants`': a gate held by
-        a row nothing can clear would take away the parent's only way to reach a person, for
-        good. A block that ended with its agent is not a question anybody is still holding.
-        """
-        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
-        store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.b.block("which branch?", me="kid")
-        store.set_state(self.db, "kid", "failed")     # its session died under the block
-
-        self.b.block("nobody below me is waiting now", me="orch")
-
-        self.assertEqual(store.get_agent(self.db, "orch")["state"], "blocked")
-
-    def test_a_block_writes_no_mail_but_keeps_a_durable_record(self):
+    def test_a_question_writes_no_mail_to_the_human_but_keeps_a_durable_record(self):
         """The human has no mailbox, and the record must survive anyway.
 
-        A desktop notification is gone the moment it is dismissed, which is why a mailbox
-        row was written here once. The event log is that record now, and it is what
-        `sb status --needs-me` reads the reason out of — so nothing is lost by not
-        addressing anybody.
+        A desktop notification is gone the moment it is dismissed. The Question row is the
+        record now — durable, with an id — and it is what `sb status --needs-me` reads.
         """
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        self.b.block("which branch?", me="kid")
+        q = self.b.ask(HUMAN, "which branch?", me="kid")
         self.assertEqual(
             self.db.execute("SELECT COUNT(*) c FROM messages WHERE to_agent=?",
                             (HUMAN,)).fetchone()["c"], 0)
-        why = [r for r in store.recent_events(self.db, agent="kid") if r["kind"] == "blocked"]
-        self.assertIn("which branch?", why[0]["payload"])
+        row = store.get_question(self.db, q["id"])
+        self.assertEqual((row["asker"], row["target"], row["state"], row["body"]),
+                         ("kid", HUMAN, store.Q_OPEN, "which branch?"))
         [needs] = status.collect(self.db, self.h, needs_me=True).agents
         self.assertEqual((needs.name, needs.blocked_why), ("kid", "which branch?"))
 
-    def _hooked(self, name, sid):
-        """An agent whose session carries the two hooks, mid-turn. `hooks.mark_turn` is
-        called rather than imitated: the edge this gate reads is the one that hook writes,
-        and a hand-rolled copy would stop proving that."""
-        from switchboard import hooks
-        store.create_agent(self.db, name=name, role="worker", parent="orch",
-                           pane_id="w1:p9", session_id=sid)
-        hooks.mark_turn({"session_id": sid}, self.db, store.TURN_WORKING)
-        return hooks
+    def test_answer_resolves_and_rings_and_a_bare_tell_does_neither(self):
+        """THE lifecycle, and the rule that separates it from the verb it replaced.
 
-    def test_a_blocked_agent_does_not_unblock_itself_by_running_a_command(self):
-        """The bug: `sb block "..."` and then any other `sb` command in the SAME turn.
-
-        Every verb resolves its caller through `whoami`, so a blocked agent that ran `sb
-        status` — or, in the wild, `sb plugin report-bug file` — flipped its own row back
-        to `working` and erased the one signal that says a person is needed. Nobody was
-        coming for it. `Stop` has not fired between the two commands, so no `turn_end`
-        edge exists after the block, and that is what this now asks for.
+        `sb block` was answered by any `sb tell` from the human, so an ordinary message
+        could clear it by accident and nothing recorded what the answer had been. Only
+        `answer` and `resolve` close a Question now — a `tell`, the human's included,
+        reaches the agent and leaves the question exactly where it was.
         """
-        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
-        self._hooked("kid", "sess-kid")
-        self.b.block("which branch?", me="kid")
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        q = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
 
-        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-kid"},
-                             clear=True):
-            self.assertEqual(self.restart_sb().whoami(), "kid")   # the read-only command
+        self.b.tell(["kid"], "unrelated news", me=HUMAN)
+        self.assertEqual(store.get_question(self.db, q)["state"], store.Q_OPEN)
 
-        self.assertEqual(store.get_agent(self.db, "kid")["state"], "blocked")
-        self.assertEqual([e for e in store.recent_events(self.db, agent="kid")
-                          if e["kind"] == "unblocked"], [])
-        # and the question is still on the human's board, which is the point
-        [needs] = [a for a in status.collect(self.db, self.h, needs_me=True).agents
-                   if a.name == "kid"]
-        self.assertEqual(needs.blocked_why, "which branch?")
+        self.h.prompts.clear()
+        self.b.answer(q, "use main", me=HUMAN)
+        row = store.get_question(self.db, q)
+        self.assertEqual((row["state"], row["answer"], row["resolved_by"]),
+                         (store.Q_RESOLVED, "use main", HUMAN))
+        self.assertEqual([n for n, _ in self.h.prompts], ["kid"])      # woken for it
+        self.assertIn("use main",
+                      [m["body"] for m in store.unread_for(self.db, "kid", mark=False)])
+        self.assertIsNone(status.collect(self.db, self.h).agents[0].blocked_why)
 
-    def test_a_human_answering_in_the_pane_still_clears_the_block_with_hooks_live(self):
-        """The regression that matters most: the behaviour above must survive.
+    def test_resolve_and_withdraw_are_the_two_other_ends(self):
+        """`resolved` says somebody dealt with it; `withdrawn` says the asker took it back.
+        A readout that could not tell them apart would be counting answers nobody gave."""
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        a = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
+        self.b.resolve_question(a, me=HUMAN)
+        row = store.get_question(self.db, a)
+        self.assertEqual((row["state"], row["answer"]), (store.Q_RESOLVED, None))
 
-        A person typing into a stopped agent's pane is a real turn boundary — `Stop` fired
-        on the blocked turn (`turn_end`), then `UserPromptSubmit` started a new one — and
-        the agent's next command clears the block exactly as it always has.
-        """
-        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
-        hooks = self._hooked("kid", "sess-kid")
-        self.b.block("which branch?", me="kid")
-        hooks.mark_turn({"session_id": "sess-kid"}, self.db, store.TURN_IDLE)   # Stop
-        hooks.mark_turn({"session_id": "sess-kid"}, self.db, store.TURN_WORKING)  # typed
+        b = self.b.ask(HUMAN, "and another", me="kid")["id"]
+        self.b.withdraw(b, me="kid")
+        self.assertEqual(store.get_question(self.db, b)["state"], store.Q_WITHDRAWN)
+        with self.assertRaises(ValueError):
+            self.b.withdraw(b, me="kid")            # already closed; nothing to retract
 
-        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-kid"},
-                             clear=True):
-            self.assertEqual(self.restart_sb().whoami(), "kid")
-
-        self.assertEqual(store.get_agent(self.db, "kid")["state"], "working")
-        [e] = [e for e in store.recent_events(self.db, agent="kid")
-               if e["kind"] == "unblocked"]
-        self.assertIn("answered_in_pane", e["payload"])
-
-    def test_answering_in_the_pane_clears_the_block_and_releases_its_mail(self):
-        """The way a person actually answers a question: they type into the pane.
-
-        The message lands — that is herdr's pane, not ours — and the agent carries on, but
-        nothing told the store, so the row sat in NEEDS YOU with the question already
-        answered and its mail held behind a block nobody was still waiting on. The agent
-        taking a turn again IS the answer having arrived: blocking ends a turn, so a
-        blocked agent runs no commands until something restarts it.
-        """
+    def test_a_question_to_an_agent_is_delivered_and_escalates_to_the_human(self):
+        """Point-to-point stays point-to-point: an agent-targeted question is ordinary mail
+        plus a durable row. `escalate` is the whole of escalation — the row keeps its id,
+        its asker and its text, and now targets the human."""
         store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
-                           pane_id="w1:p9")
-        self.b.block("which branch?", me="kid")
-        self.h.states_by_name = {"kid": "idle"}
-        self.b.tell(["kid"], "unrelated news", me="orch")     # held: it is blocked
-        self.assertEqual(self.h.prompts, [])
-        self.assertEqual(len([a for a in status.collect(self.db, self.h, needs_me=True)
-                              .agents if a.needs_human]), 1)
+                           pane_id="w1:p1")
+        q = self.b.ask("parent", "which branch?", me="kid")
+        self.assertEqual(q["target"], "orch")
+        [m] = store.unread_for(self.db, "orch", mark=False)
+        self.assertIn("which branch?", m["body"])
+        self.assertIn(str(q["id"]), m["body"])       # it can be answered without a lookup
+        # Nothing is on the human's board while an agent still owes the answer.
+        self.assertEqual([a.name for a in status.collect(self.db, self.h,
+                                                         needs_me=True).agents
+                          if a.blocked], [])
 
-        # ...the human types the answer into the pane, and the agent runs its next command.
-        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p9"}, clear=True):
-            self.assertEqual(self.b.whoami(), "kid")
+        self.b.escalate(q["id"], me="kid")
+        row = store.get_question(self.db, q["id"])
+        self.assertEqual((row["target"], row["asker"], row["body"]),
+                         (HUMAN, "kid", "which branch?"))
+        self.assertIsNotNone(row["escalated_at"])
+        self.assertEqual([a.name for a in status.collect(self.db, self.h,
+                                                         needs_me=True).agents
+                          if a.blocked], ["kid"])
 
-        self.assertEqual(store.get_agent(self.db, "kid")["state"], "working")
-        [e] = [e for e in store.recent_events(self.db, agent="kid") if e["kind"] == "unblocked"]
-        self.assertIn("answered_in_pane", e["payload"])
-        self.restart_sb()                                     # the next `sb` command
-        self.assertEqual(self.b.flush_pending(), ["kid"])     # the held mail goes
-
-    def test_answering_a_block_unblocks_it_and_does_ring(self):
-        """The reply is what restarts the agent: its turn ended, so unlike an answer to a
-        pending `ask` this one has nobody waiting to collect it."""
+    def test_a_question_whose_asker_is_gone_is_dropped(self):
+        """#325 in as many words: "if its asker is gone, it's dropped". No timer and no
+        auto-clear — the row stays open and simply stops summoning anybody."""
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        self.b.block("which branch?", me="kid")
-        self.h.prompts.clear()
-        self.b.tell(["kid"], "use main", me=HUMAN)
-        self.assertEqual([n for n, _ in self.h.prompts], ["kid"])
-        self.assertEqual(store.get_agent(self.db, "kid")["state"], "working")
+        q = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
+        store.set_state(self.db, "kid", "done")   # it reported; its row has ended
+        self.assertEqual(store.get_question(self.db, q)["state"], store.Q_OPEN)
+        self.assertEqual([a.name for a in status.collect(self.db, self.h).agents
+                          if a.blocked], [])
 
     def test_an_interrupt_is_recorded_as_well_as_delivered(self):
         """It travels inline rather than as a doorbell, so without the row the instruction
@@ -2109,23 +2049,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.h.keys, [])                           # nothing cancelled
         self.assertEqual(store.undelivered(self.db), [])            # nothing left waiting
 
-    def test_a_blocked_agent_holds_its_mail_in_every_mode_but_interrupt(self):
-        """3.4, which modes must not regress: a blocked agent is not idle, it has STOPPED
-        for a person, so "next turn" is the turn its block is answered on. Ringing it early
-        would clear the block and bury the answer under mail it never asked for."""
-        store.create_agent(self.db, name="lead", role="lead")
-        store.create_agent(self.db, name="kid", role="worker", parent="lead",
-                           pane_id="w1:p1")
-        store.create_agent(self.db, name="sibling", role="worker", parent="lead")
-        self.b.block("which branch?", me="kid")
-        self.h.prompts.clear()
-        for mode in (NEXT_TURN, WHEN_IDLE):
-            self.b.tell(["kid"], "unrelated", me="sibling", mode=mode)
-            self.assertEqual(self.h.prompts, [], mode)
-            self.assertEqual(store.get_agent(self.db, "kid")["state"], "blocked", mode)
-        self.b.tell(["kid"], "use main", me=HUMAN)          # the answer still lands
-        self.assertEqual([n for n, _ in self.h.prompts], ["kid"])
-
     def test_hold_until_free_runs_on_our_own_signal_not_the_screen(self):
         """NORMAL does not consult the old hold-until-free path."""
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
@@ -2217,12 +2140,12 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.message_bodies("lead"),
                          [f"[done] {k} shipped" for k in kids])
 
-    def test_the_holdback_never_touches_a_block_or_an_interrupt(self):
+    def test_the_holdback_never_touches_a_question_or_an_interrupt(self):
         """The two absolute carve-outs, checked while a holdback is open on the target.
 
-        Neither is exempted by name: `block` writes no message row and reaches a person
-        through `_surface`, and an interrupt is `mode=INTERRUPT`, which never reaches the
-        when-idle branch the holdback lives on.
+        Neither is exempted by name: a human-targeted Question writes no message row and
+        reaches a person through `_surface`, and an interrupt is `mode=INTERRUPT`, which
+        never reaches the when-idle branch the holdback lives on.
         """
         kids = self._fanout(("k1", "k2"))
         self.b.done("k1 shipped", me=kids[0])
@@ -2233,9 +2156,8 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual([n for n, _ in self.h.prompts], ["lead"])  # straight through
 
         self.b.done("k2 shipped", me=kids[1])                      # hold still open
-        self.b.block("which branch?", me="lead")
+        self.b.ask(HUMAN, "which branch?", me="lead")
         self.assertTrue(any("which branch?" in n for n in self.h.notifications))
-        self.assertEqual(store.get_agent(self.db, "lead")["state"], "blocked")
 
     def test_one_child_reporting_to_an_idle_parent_still_rings_at_once(self):
         """No regression for the common shape. A parent with no other live child cannot
@@ -2250,12 +2172,10 @@ class BrokerTest(unittest.TestCase):
         self.assertFalse(self.b._holdback_open("lead"))
         self.assertEqual(store.undelivered(self.db), [])
 
-    def test_a_dead_childs_ping_waits_for_a_busy_parent_and_for_a_blocked_one(self):
-        """A failure travels the same rails as a `done`, so it inherits both holds without
-        a line of its own: `status._record_gone` writes the message, `flush_pending` rings
-        it, and `_ring`'s when-idle guards decide when. Mid-turn is held; BLOCKED is held
-        too, because a blocked parent has stopped waiting on a person and a ring would
-        cancel that and bury the answer underneath it.
+    def test_a_dead_childs_ping_waits_for_a_busy_parent(self):
+        """A failure travels the same rails as a `done`, so it inherits the hold without a
+        line of its own: `status._record_gone` writes the message, `flush_pending` rings
+        it, and `_ring`'s when-idle guards decide when. Mid-turn is held.
         """
         store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1",
                            session_id="s1")
@@ -2272,18 +2192,12 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.b.flush_pending(), [])               # held: lead is mid-turn
         self.assertEqual(self.h.prompts, [])
 
-        self.b.block("which branch?", me="lead")                   # it stops to ask a person
-        self.h.states_by_name = {"lead": "idle"}                   # its turn HAS ended
+        self.h.states_by_name = {"lead": "idle"}                   # its turn ends
         self.b._alive_cache = None
-        self.assertEqual(self.b.flush_pending(), [])               # still held: not idle
-        self.assertEqual(store.get_agent(self.db, "lead")["state"], "blocked")
-
-        self.b.tell(["lead"], "use main", me=HUMAN)                # the answer arrives
-        self.assertEqual([n for n, _ in self.h.prompts], ["lead"])
+        self.assertEqual(self.b.flush_pending(), ["lead"])
         delivered = self.h.prompts[-1][1]
         self.assertIn("rewrite the parser", delivered)
         self.assertIn("[failed] kid ", delivered)
-        self.assertIn("use main", delivered)
 
     def test_the_doorbell_does_not_ring_for_mail_the_agent_already_read(self):
         """A ring says "you have mail" — to an agent that has already got it, that is a
@@ -2304,35 +2218,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual([n for n, _ in self.h.prompts], ["w"])
         self.assertEqual(len(store.undelivered(self.db)), 0)
         self.assertEqual(store.unseen(self.db), [])                # but the agent knows
-
-    def test_a_stale_doorbell_does_not_cancel_a_block(self):
-        """The block is the whole point: `_ring` unblocks before it prompts.
-
-        An agent reads its mail proactively, then stops to ask a person. If the flush
-        still rang for that already-read mail, the agent would be put back to `working`,
-        drop off `sb status --needs-me`, and the question would reach nobody — cancelled
-        by a doorbell carrying no news at all.
-        """
-        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.h.states_by_name = {"w": "working"}
-        self.b.tell(["w"], "review the PR", me=HUMAN, mode=WHEN_IDLE)
-        self.b.inbox(me="w")                                       # read it, unrung
-        self.b.block("which branch?", me="w")
-        self.h.prompts.clear()
-        self.h.states_by_name = {"w": "idle"}                      # the block leaves it idle
-        self.b._alive_cache = None
-
-        rung = self.b.flush_pending()
-        # The harm first, so a regression reports what was actually lost rather than a
-        # list that differs. Both of these were the observed symptom: the agent went back
-        # to `working` and vanished from the one readout that would have shown a person
-        # the question.
-        self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
-        self.assertEqual([a.name for a in
-                          status.collect(self.db, self.h, needs_me=True).agents], ["w"])
-        [needs] = status.collect(self.db, self.h, needs_me=True).agents
-        self.assertEqual(needs.blocked_why, "which branch?")
-        self.assertEqual((rung, self.h.prompts), ([], []))
 
     def test_flush_costs_nothing_when_there_is_no_pending_mail(self):
         self.assertEqual(self.b.flush_pending(), [])
@@ -2944,107 +2829,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.db.execute(
             "SELECT count(*) FROM messages WHERE to_agent='w'").fetchone()[0], 0)
 
-    def test_messaging_a_blocked_agent_unblocks_it_first(self):
-        """Answering a blocked agent is what unblocking means, so the transition is
-        correct rather than a workaround — and it happens in our store only.
-
-        Unblocking used to push herdr `working` here, one line before the doorbell, in the
-        belief that a report re-registers the name. It evicts it (`Herdr.report_state`), so
-        that push destroyed the binding in the same breath as the ring that needed it: the
-        block cleared, `agent prompt` answered agent_not_found, and the human's answer was
-        never delivered. Nothing may be reported on this path.
-        """
-        store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        store.set_state(self.db, "w", "blocked")
-        self.b.tell(["w"], "here is your answer", me=HUMAN)
-        self.assertEqual(self.h.states, [])                   # the name still binds
-        self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
-        self.assertTrue(any(n == "w" for n, _ in self.h.prompts))
-
-    def test_a_siblings_mail_does_not_cancel_a_block(self):
-        """The answer Andrew eventually gives would arrive buried under it.
-
-        Blocking tells herdr nothing at all (a report would cost the name), so nothing
-        downstream can tell a blocked agent from an idle one — the store is the only
-        record. A
-        ring used to unblock unconditionally before every delivery, so any sibling's
-        ordinary `tell` put the agent back to `working` and dropped it off the one readout
-        that shows a person somebody needs them.
-        """
-        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
-        store.create_agent(self.db, name="w", role="worker", parent="lead",
-                           pane_id="w1:p1")
-        store.create_agent(self.db, name="sib", role="worker", parent="lead",
-                           pane_id="w1:p2")
-        self.b.block("which branch?", me="w")
-        self.h.prompts.clear()
-
-        self.b.tell(["w"], "fyi, I renamed the fixture", me="sib")
-
-        self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
-        self.assertEqual(self.h.prompts, [])                       # not announced either
-        [needs] = [a for a in status.collect(self.db, self.h, needs_me=True).agents
-                   if a.needs_human]
-        self.assertEqual((needs.name, needs.blocked_why), ("w", "which branch?"))
-        # Held, not lost: it is still queued for once the block is answered.
-        self.assertEqual(len(store.undelivered(self.db)), 1)
-
-    def test_a_childs_done_does_not_cancel_its_parents_block(self):
-        """`done` rings the parent like anything else, and a blocked parent is not idle."""
-        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p1")
-        store.create_agent(self.db, name="kid", role="worker", parent="lead",
-                           pane_id="w1:p2")
-        self.b.block("which branch?", me="lead")
-        self.h.prompts.clear()
-
-        self.b.done("shipped it", me="kid")
-
-        self.assertEqual(store.get_agent(self.db, "lead")["state"], "blocked")
-        self.assertEqual(self.h.prompts, [])
-        self.assertEqual([a.name for a in
-                          status.collect(self.db, self.h, needs_me=True).agents], ["lead"])
-
-    def test_held_mail_is_rung_once_the_human_answers_the_block(self):
-        """Held, never dropped: the sibling's mail lands with the answer that released it."""
-        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
-        store.create_agent(self.db, name="w", role="worker", parent="lead",
-                           pane_id="w1:p1")
-        store.create_agent(self.db, name="sib", role="worker", parent="lead",
-                           pane_id="w1:p2")
-        self.b.block("which branch?", me="w")
-        self.b.tell(["w"], "fyi", me="sib")
-        self.h.prompts.clear()
-
-        self.b.tell(["w"], "use main", me=HUMAN)
-
-        self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
-        self.assertEqual([n for n, _ in self.h.prompts], ["w"])
-        self.assertIn("fyi", self.h.prompts[-1][1])
-        self.assertIn("use main", self.h.prompts[-1][1])
-
-    def test_a_flush_does_not_cancel_a_block_for_a_siblings_mail(self):
-        """`flush_pending` runs at the start of every `sb` command, so this fires on any
-        traffic anywhere in the fleet — the fastest way to lose a block."""
-        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
-        store.create_agent(self.db, name="w", role="worker", parent="lead",
-                           pane_id="w1:p1")
-        store.create_agent(self.db, name="sib", role="worker", parent="lead",
-                           pane_id="w1:p2")
-        self.h.states_by_name = {"w": "working"}
-        self.b.tell(["w"], "fyi", me="sib")                        # queued, mid-turn
-        self.b.block("which branch?", me="w")
-        self.h.prompts.clear()
-        self.h.states_by_name = {"w": "idle"}                      # the block leaves it idle
-        self.b._alive_cache = None
-
-        self.assertEqual(self.b.flush_pending(), [])
-        self.assertEqual(store.get_agent(self.db, "w")["state"], "blocked")
-        self.assertEqual(self.h.prompts, [])
-
-        # ...and the human's answer, arriving through the same flush, does clear it.
-        self.b.tell(["w"], "use main", me=HUMAN)
-        self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
-
     def test_restore_brings_the_agent_back_to_life(self):
         """whoami() matches on `ended_at IS NULL`; leaving it set makes a restored agent
         resolve to HUMAN, so everything it sends is attributed to a person."""
@@ -3511,7 +3295,7 @@ class BrokerTest(unittest.TestCase):
         import argparse, contextlib, io
         from switchboard import cli
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        self.b.block("which branch?", me="kid")
+        self.b.ask(HUMAN, "which branch?", me="kid")
         args = argparse.Namespace(cmd="inbox", json=False, peek=False)
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {}, clear=True), \
@@ -3575,11 +3359,11 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
-        self.b.block("which branch?", me="kid")
+        self.b.ask(HUMAN, "which branch?", me="kid")
         r = self.b.cleanup(["kid"], me="orch")
         self.assertEqual(r, [])
         self.assertEqual([n for n, _ in r.refused], ["kid"])
-        self.assertIn("blocked", r.refused[0][1])
+        self.assertIn("waiting on an answer from a person", r.refused[0][1])
 
     def test_cleanup_names_the_unread_mail_that_holds_a_row(self):
         store.create_agent(self.db, name="orch", role="lead")
@@ -3796,7 +3580,7 @@ class BrokerTest(unittest.TestCase):
         import argparse, contextlib, io
         from switchboard import cli
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        self.b.block("which branch?", me="kid")
+        self.b.ask(HUMAN, "which branch?", me="kid")
         args = argparse.Namespace(cmd="cleanup", name=["kid"], force=False,
                                   dry_run=False, json=False)
         buf = io.StringIO()
@@ -3805,7 +3589,7 @@ class BrokerTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("closed: (nothing)", out)
         self.assertIn("refused kid", out)
-        self.assertIn("blocked", out)
+        self.assertIn("waiting on an answer from a person", out)
 
     def test_a_sweep_that_closes_something_still_accounts_for_what_it_kept(self):
         """The silence item 1.4 was written about, wearing a different hat.
@@ -3813,15 +3597,15 @@ class BrokerTest(unittest.TestCase):
         `closed: five names` reads as "all done", and acceptance run 4 twice watched a
         sweep leave behind exactly the row a human needed with no word of it. A row that
         was already closed, and an agent that is merely still working, are the sweep doing
-        its job and stay out of the readout; a blocked agent is stopped, waiting on a
-        person, and is precisely what that person must not walk away from.
+        its job and stay out of the readout; an agent with a question open to a person is
+        precisely what that person must not walk away from.
         """
         store.create_agent(self.db, name="orch", role="lead")
         for n in ("done1", "blocked1", "busy1", "gone1"):
             store.create_agent(self.db, name=n, role="worker", parent="orch",
                                pane_id=f"w1:{n}", session_id=f"s-{n}")
         store.set_state(self.db, "done1", "done")
-        self.b.block("which branch?", me="blocked1")
+        self.b.ask(HUMAN, "which branch?", me="blocked1")
         store.set_state(self.db, "gone1", "done")          # closed before this sweep ran
         store.update_agent(self.db, "gone1", pane_id=None)
         self.h.states_by_name = {"done1": "idle", "blocked1": "idle", "busy1": "working"}
@@ -3831,7 +3615,7 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(sorted(n for n, _ in r.refused), ["blocked1", "busy1", "gone1"])
         # Only the one a human might have meant survives the cut.
         self.assertEqual([n for n, _ in r.notable], ["blocked1"])
-        self.assertIn("blocked", r.notable[0][1])
+        self.assertIn("waiting on an answer from a person", r.notable[0][1])
         self.assertEqual(r.expected, {"busy1", "gone1"})
 
     def test_already_closed_names_the_descendant_still_holding_a_pane(self):
@@ -3930,7 +3714,7 @@ class BrokerTest(unittest.TestCase):
             store.create_agent(self.db, name=n, role="worker", parent="orch",
                                pane_id=f"w1:{n}", session_id=f"s-{n}")
         store.set_state(self.db, "done1", "done")
-        self.b.block("which branch?", me="blocked1")
+        self.b.ask(HUMAN, "which branch?", me="blocked1")
         self.h.states_by_name = {"done1": "idle", "blocked1": "idle", "busy1": "working"}
 
         def run(as_json):
@@ -3944,7 +3728,7 @@ class BrokerTest(unittest.TestCase):
         out = run(False)
         self.assertIn("closed: done1", out)
         self.assertIn("refused blocked1", out)
-        self.assertIn("blocked", out)
+        self.assertIn("waiting on an answer from a person", out)
         # A working agent is not news in itself. It still appears where it IS news —
         # as one of the live children holding its parent's row open.
         self.assertNotIn("refused busy1", out)
@@ -3963,7 +3747,7 @@ class BrokerTest(unittest.TestCase):
         for i in range(8):
             store.create_agent(self.db, name=f"b{i}", role="worker", parent="orch",
                                pane_id=f"w1:b{i}", session_id=f"s-b{i}")
-            self.b.block("which branch?", me=f"b{i}")
+            self.b.ask(HUMAN, "which branch?", me=f"b{i}")
         from switchboard import cli
         r = self.b.cleanup(me="orch")
         text = cli._sweep_refusals(r.notable)
@@ -4674,8 +4458,8 @@ class BrokerTest(unittest.TestCase):
         from switchboard.broker import PROTOCOL_LINE
         self.assertNotIn("\n", PROTOCOL_LINE)
         self.assertIn("sb done", PROTOCOL_LINE)
-        self.assertIn("sb block", PROTOCOL_LINE)
-        self.assertNotIn("sb ask human", PROTOCOL_LINE)   # there is only one way
+        self.assertIn("sb ask human", PROTOCOL_LINE)
+        self.assertNotIn("sb block", PROTOCOL_LINE)       # there is only one way
 
     def test_protocol_cannot_go_stale(self):
         """Generated at every spawn, so there is no copy to fall out of date."""

@@ -186,7 +186,7 @@ class GlyphTest(unittest.TestCase):
         self.assertTrue(board.wants_you(a))
 
     def test_every_glyph_has_a_colour_and_they_are_all_distinct(self):
-        kinds = [agent("a", gone=True), agent("b", state="blocked"),
+        kinds = [agent("a", gone=True), agent("b", blocked_why="which branch?"),
                  agent("c", stalled=True), agent("d", state="done"),
                  agent("e", alive=None), agent("f")]
         glyphs = [board.glyph(a) for a in kinds]
@@ -195,9 +195,8 @@ class GlyphTest(unittest.TestCase):
             self.assertIn(g, board._GLYPH_COLOR)
 
     def test_only_one_marker_is_ever_shown_and_it_is_the_most_actionable(self):
-        a = agent("w", state="blocked", blocked_why="need a key", unread=2,
-                  task="do the thing")
-        self.assertEqual(board.marker(a), "BLOCKED — need a key")
+        a = agent("w", blocked_why="need a key", unread=2, task="do the thing")
+        self.assertEqual(board.marker(a), "ASKING — need a key")
 
 
 class RowSaysOneThingTest(unittest.TestCase):
@@ -376,31 +375,28 @@ class OneLineTest(unittest.TestCase):
         self.assertEqual(len(self.lines(rows, quiet)), 1)
 
     def test_identity_and_detail_share_the_one_row(self):
-        a = agent("w", state="blocked", blocked_why="need a key", unread=2,
-                  task="fix the parser")
+        a = agent("w", blocked_why="need a key", unread=2, task="fix the parser")
         [line] = self.lines(self.rows(a), a)
-        self.assertIn("blocked", line)                      # name, state, timing
-        for said in ("BLOCKED", "need a key", "unread", "fix the parser"):
+        for said in ("ASKING", "need a key", "unread", "fix the parser"):
             self.assertIn(said, line)
 
     def test_priority_is_trouble_then_mail_then_context(self):
-        a = agent("w", state="blocked", blocked_why="need a key", unread=2,
-                  task="fix the parser")
+        a = agent("w", blocked_why="need a key", unread=2, task="fix the parser")
         self.assertEqual([kind for _, _, kind in board.detail_bits(a)],
                          ["marker", "mail", "tail"])
         [line] = self.lines(self.rows(a), a)
-        self.assertLess(line.index("BLOCKED"), line.index("mail:"))
+        self.assertLess(line.index("ASKING"), line.index("mail:"))
         self.assertLess(line.index("mail:"), line.index("fix the parser"))
 
     def test_context_is_dropped_first_and_mail_is_never_crowded_out(self):
-        """Sixty columns, a verbose block and mail waiting. The task head goes, because
+        """Sixty columns, a verbose question and mail waiting. The task head goes, because
         it is the piece a reader can get elsewhere — and the mail stays, because it is
-        quite possibly the answer that ends the block."""
-        a = agent("w", state="blocked", unread=1, undelivered=1, undelivered_age=900,
+        quite possibly the answer the agent is waiting for."""
+        a = agent("w", unread=1, undelivered=1, undelivered_age=900,
                   blocked_why="whether to merge #33 before or after the board work lands",
                   task="put every agent back on one line")
         [line] = self.lines(self.rows(a, width=60), a)
-        self.assertIn("BLOCKED", line)
+        self.assertIn("ASKING", line)
         self.assertIn("UNDELIVERED", line)
         self.assertNotIn("put every agent", line)
 

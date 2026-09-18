@@ -337,6 +337,47 @@ CREATE INDEX idx_msgs_inbox ON messages(to_agent, read_at);
 CREATE INDEX idx_msgs_undelivered ON messages(to_agent, delivered_at);
 CREATE INDEX idx_msgs_reply ON messages(reply_to);
 
+-- THE QUESTION (v2 §Questions). An agent that needs an answer it cannot get for itself
+-- records one here and ends its turn. Durable, because the whole fault of `sb block` — the
+-- verb this replaces — was that "waiting on a person" lived in the agent's `state` column
+-- and in the event log, where it could only ever be one thing at a time and could not say
+-- WHO was being asked. A Question names its asker and its target, survives the turn that
+-- made it, and is what `waiting on human` is derived from (`status._derived_row`).
+--
+-- NO SECOND CHAT SURFACE. An agent-targeted Question is delivered to that agent as an
+-- ordinary message and shows against both rows in the readouts; messaging stays
+-- point-to-point (§Questions, "no shared Task chat by default").
+CREATE TABLE questions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    asker         TEXT NOT NULL,      -- the agent that asked. Never the human: a person
+                                      -- asks an agent by telling it, and has no row here
+                                      -- to be woken on.
+    target        TEXT NOT NULL,      -- RESOLVED at creation: 'human', or an agent name.
+                                      -- `parent` is resolved here and not stored as the
+                                      -- literal, because the answer has to reach whoever
+                                      -- was being asked on the day it was asked: moving
+                                      -- an agent under a new parent must not silently
+                                      -- repoint an open question at somebody who never
+                                      -- saw it.
+    target_literal TEXT,              -- what the asker actually typed ('parent', 'human',
+                                      -- a name), kept so the readback can say which of
+                                      -- the two it was. Never read as an address.
+    body          TEXT NOT NULL,      -- the question, verbatim.
+    state         TEXT NOT NULL,      -- open | resolved | withdrawn
+    answer        TEXT,               -- the text `sb answer` recorded, if any. NULL on a
+                                      -- bare `sb resolve` and on a withdrawal: resolved
+                                      -- without an answer is a real outcome, not a gap.
+    created_at    INTEGER NOT NULL,
+    resolved_at   INTEGER,
+    resolved_by   TEXT,               -- who ended it — the answerer, or the asker itself
+                                      -- on a withdrawal.
+    escalated_at  INTEGER             -- when `sb escalate` repointed this at the human.
+                                      -- NULL is every question nobody escalated, which is
+                                      -- what rows predating the column read as too.
+);
+CREATE INDEX idx_questions_target ON questions(target, state);
+CREATE INDEX idx_questions_asker ON questions(asker, state);
+
 -- THE ONE EVENT LOG (v2 §13). Switchboard keeps mutable current state in the other tables
 -- and this single append-only history beside them. Task, Plan, Step and Agent history are
 -- filtered views of it (`history`), never logs of their own. Transcripts are not copied:
@@ -361,13 +402,14 @@ CREATE INDEX idx_events_task ON events(task_id, id);
 CREATE INDEX idx_events_plan ON events(plan_id, step_id, id);
 -- The board's per-agent aggregates over ALL history. `idx_events_agent` orders a group-by
 -- but still fetches every row (its key is `agent` alone), so on a large events table the
--- collector's tick paid three full scans — `_block_reasons` and `_last_summaries` reading
+-- collector's tick paid three full scans — the block-reason scan (since replaced by the
+-- `questions` table) and `_last_summaries` reading
 -- 28 MB of payload to find one `blocked`/`done` per agent, `_last_activity` reading every
 -- row for a `MAX(created_at)`. Measured at ~8.5 s a tick on a 94 k-row store on a DrvFs
 -- mount, which is why the board updated once every ~14 s instead of every 0.5 s.
 --   idx_events_kind_agent_id  — seek straight to one `kind`, then MAX(id) per agent, for
---                               `_block_reasons` (kind='blocked') and `_last_summaries`
---                               (kind='done'): a handful of rows instead of the whole table.
+--                               `_last_summaries` (kind='done'): a handful of rows instead
+--                               of the whole table.
 --   idx_events_agent_created  — COVERS `_last_activity`: MAX(created_at) per agent with the
 --                               `kind NOT IN (...)` filter satisfied from the index itself,
 --                               so no row (and no payload) is fetched at all.
@@ -2804,6 +2846,119 @@ def wait_for(db: sqlite3.Connection, name: str) -> Optional[dict]:
 
 def get_message(db: sqlite3.Connection, mid: int) -> Optional[sqlite3.Row]:
     return db.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
+
+
+# ---------------------------------------------------------------------------
+# Questions
+# ---------------------------------------------------------------------------
+
+# The three words `questions.state` holds. Spelled once, here, for `[states]`' reason: the
+# writer and every reader have to agree on them and two spellings is how they come apart.
+Q_OPEN, Q_RESOLVED, Q_WITHDRAWN = "open", "resolved", "withdrawn"
+
+# What `target` holds when the question is for a person. The same string `broker.HUMAN` is,
+# and deliberately: an answer routed by name must be able to tell "the human" from an agent
+# called anything else, and there is exactly one name that is not an agent's.
+Q_HUMAN = "human"
+
+
+def create_question(db: sqlite3.Connection, *, asker: str, target: str,
+                    body: str, target_literal: Optional[str] = None) -> int:
+    """Record an open Question. -> its id.
+
+    `target` is already RESOLVED — `human`, or an agent name — because resolving `parent`
+    is the broker's job and the column is an address (see the schema note).
+    """
+    cur = db.execute(
+        "INSERT INTO questions (asker, target, target_literal, body, state, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (asker, target, target_literal or target, body, Q_OPEN, now()))
+    db.commit()
+    return int(cur.lastrowid)
+
+
+def get_question(db: sqlite3.Connection, qid: int) -> Optional[sqlite3.Row]:
+    return db.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
+
+
+def end_question(db: sqlite3.Connection, qid: int, *, state: str,
+                 answer: Optional[str] = None, by: Optional[str] = None) -> None:
+    """Move an open Question to `resolved` or `withdrawn`. Only that.
+
+    The answer text is stored beside the state rather than sent and forgotten: the message
+    it is also delivered as can be read, archived or lost with the agent, and the record of
+    what was actually answered belongs with the question it answered.
+    """
+    db.execute(
+        "UPDATE questions SET state=?, answer=COALESCE(?, answer), resolved_at=?, "
+        "resolved_by=? WHERE id=?", (state, answer, now(), by, qid))
+    db.commit()
+
+
+def escalate_question(db: sqlite3.Connection, qid: int) -> None:
+    """Repoint an open Question at the human, and stamp when.
+
+    The whole of escalation (#325: "`escalate` = re-ask the human", and
+    escalation-as-retargeting is explicitly not in scope). The row keeps its id, its asker
+    and its body, so the question a person answers is the one that was asked.
+    """
+    db.execute("UPDATE questions SET target=?, escalated_at=? WHERE id=?",
+               (Q_HUMAN, now(), qid))
+    db.commit()
+
+
+def open_questions(db: sqlite3.Connection, *, asker: Optional[str] = None,
+                   target: Optional[str] = None) -> list[sqlite3.Row]:
+    """Open Questions, narrowed by asker and/or target. Newest last."""
+    where, params = ["state = ?"], [Q_OPEN]
+    if asker is not None:
+        where.append("asker = ?")
+        params.append(asker)
+    if target is not None:
+        where.append("target = ?")
+        params.append(target)
+    try:
+        return db.execute(
+            f"SELECT * FROM questions WHERE {' AND '.join(where)} ORDER BY id", params
+        ).fetchall()
+    except sqlite3.OperationalError:            # a store older than the table
+        return []
+
+
+def open_questions_by_asker(db: sqlite3.Connection, target: str,
+                            only: Optional[str] = None) -> dict[str, str]:
+    """Every LIVE agent with an open Question aimed at `target`. -> {asker: body}.
+
+    The one read every readout goes through, and the two rules in it are the design:
+
+    **A question whose asker is gone is dropped** (#325: "a question is open or resolved;
+    if its asker is gone, it's dropped"). An agent whose row ended — it reported, it was
+    swept, it was closed — is not waiting for anything, and a person summoned to answer it
+    would be answering nobody. The join is what enforces that; there is deliberately no
+    timer and no auto-clear, which the issue puts out of scope in as many words.
+
+    **The NEWEST wins.** One agent may have several open questions and the readouts have
+    one line each; `ORDER BY id` with a later row overwriting is the same "latest by id"
+    rule `_last_summaries` uses, and for the same reason — whole-second timestamps cannot
+    order two writes in one second.
+
+    `only` is `status.collect`'s single-agent fast path, and it narrows exactly as the
+    other scans there do.
+
+    Never raises on a store that predates the table: the readers that reach this hold a
+    read-only connection and cannot migrate one (see `connect`).
+    """
+    scope = " AND q.asker = ?" if only is not None else ""
+    params: list[Any] = [Q_OPEN, target] + ([only] if only is not None else [])
+    try:
+        rows = db.execute(
+            "SELECT q.asker AS asker, q.body AS body FROM questions q "
+            " JOIN agents a ON a.name = q.asker "
+            f" WHERE q.state = ? AND q.target = ? AND a.ended_at IS NULL{scope} "
+            " ORDER BY q.id", params).fetchall()
+    except sqlite3.OperationalError:            # a store older than the table
+        return {}
+    return {r["asker"]: r["body"] for r in rows}
 
 
 # `pending_ask` and `reply_to_ask` were here — the correlation that let a plain `tell`

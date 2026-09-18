@@ -11,8 +11,11 @@ The properties, one test each:
 * the ONE reader that is a multi-statement walk (`_descendants`) sees the pre-state or the
   post-state and never a torn mix of both — with a control that shows the walk really does
   tear without its snapshot, so the guard is pinned to a hazard rather than a hope;
-* `hooks._has_live_child` stays a raw, broker-independent, fail-open read — the reason the
-  resolver has to stay thin in the first place.
+* the hook module stays broker-independent and fails open — the reason the resolver has to
+  stay thin in the first place. It used to read the parent column itself
+  (`hooks._has_live_child`, a waiver of the Stop gate); the gate and the waiver went in
+  #325, so what is left to pin is the independence and the fail-open, both of which still
+  matter: `hooks.run` writes a turn edge on a store it may find in any condition.
 """
 
 from __future__ import annotations
@@ -167,14 +170,14 @@ class TornWalkTest(Fixture, unittest.TestCase):
 
 
 class StopHookStaysRawTest(Fixture, unittest.TestCase):
-    """Raw reader 6 — `hooks._has_live_child`, and why the resolver has to stay thin.
+    """The hook process stays broker-independent and fails open.
 
-    The Stop hook runs in a process that must not import `broker` and must fail open, so
-    its `WHERE parent=?` is deliberately raw. It is NOT routed through the resolver, and
-    these tests are what stops a later hand routing it there. The broker once kept a second
-    copy of the same SQL for the reconciler's exemption; DESIGN-TRUTH now rules out "The
-    reconciler's nudge to an agent that went quiet." and that copy went with it, which
-    leaves the hook's read as the only one.
+    It runs at the exact moment a turn ends, in a process that must not import `broker`
+    (every `sb` invocation also ticks the doorbell) and must never raise, because a hook
+    that raises is a hook that costs an agent its turn. It used to read `WHERE parent=?`
+    itself for one of the Stop gate's waivers — raw rather than through the resolver, which
+    is why this unit named it — and both the gate and that read went in #325. The two
+    properties they were protecting are still the hook's and are still pinned here.
     """
 
     def test_the_hook_module_does_not_import_the_broker(self):
@@ -189,30 +192,9 @@ class StopHookStaysRawTest(Fixture, unittest.TestCase):
         self.assertNotIn("broker", imported)
         self.assertFalse([m for m in imported if m.endswith("broker")])
 
-    def test_the_hooks_copy_of_the_parent_sql_stays_a_plain_equality_read(self):
-        def sql(fn) -> str:
-            src = inspect.getsource(fn)
-            body = "".join(re.findall(r'"([^"]*)"', src.split("db.execute(", 1)[1]))
-            return " ".join(body.split())
-        self.assertIn("WHERE parent=?", sql(hooks._has_live_child))
-        # One statement, no join, no ancestry walk — the property the resolver's thinness
-        # exists to preserve.
-        self.assertNotIn("JOIN", sql(hooks._has_live_child).upper())
-
-    def test_the_raw_copy_follows_a_re_parent_on_its_own(self):
-        store.create_agent(self.db, name="top", role="dispatcher", is_top=True)
-        store.create_agent(self.db, name="proxy", role="researcher", parent="top")
-        store.create_agent(self.db, name="kid", role="worker", parent="proxy")
-        store.set_state(self.db, "proxy", "done")   # the promoter, on its way out
-        self.assertTrue(hooks._has_live_child(self.db, "proxy"))
-        self.assertFalse(hooks._has_live_child(self.db, "top"))
-        _reparent(self.repo / "state.db", "kid", "top")
-        self.assertFalse(hooks._has_live_child(self.db, "proxy"))
-        self.assertTrue(hooks._has_live_child(self.db, "top"))
-
-    def test_the_gate_still_fails_open_if_that_read_raises(self):
+    def test_the_hook_still_fails_open_if_its_own_read_raises(self):
         store.create_agent(self.db, name="kid", role="worker", session_id="s1")
-        boom = mock.patch.object(hooks, "_has_live_child",
+        boom = mock.patch.object(hooks, "mark_turn",
                                  side_effect=sqlite3.OperationalError("no such column"))
         with boom:
             out = hooks.run('{"session_id": "s1"}', db_path=self.repo / "state.db")

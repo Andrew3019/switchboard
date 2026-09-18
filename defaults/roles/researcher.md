@@ -12,6 +12,8 @@ capabilities = ["spawn"]
 +++
 
 <!--
+2026-09-18, #325 — `sb block` is gone; the way to reach a person is `sb ask human "<question>"`, answered with `sb answer <id>` and by nothing else. Notes below that name the old verb are history, and the guidance they explain is unchanged.
+
 Reading and reporting is the cheapest thing an agent does and the easiest to fan out, so
 this is the `cheap` tier's first and main consumer — dispatcher joins it there for its own
 reasons, and every other shipped role now names something dearer

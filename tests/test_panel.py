@@ -938,22 +938,6 @@ class TheDoorbellTrigger(PanelTest):
         self.assertTrue(collector.ring_doorbell(self._snap(1), state, None))
         self.assertEqual(len(self.ran), 2)
 
-    def test_a_blocked_agents_held_mail_does_not_cost_a_process_a_tick(self):
-        """The floor divides the cost of a stuck target; it does not end it.
-
-        Mail for a blocked agent is undelivered and stays that way — the agent is waiting
-        on a person, not idle — so every tick rediscovers it, spawns `sb flush`, and
-        `flush_pending` holds it again. Measured at 85 processes for one block held
-        thirteen minutes, bounded by nothing but how long the human takes.
-        """
-        state = collector.State(pid=1, started_at=0.0)
-        snap = self._snap(2)
-        snap.agents[0].state = "blocked"
-        for _ in range(3):
-            self.assertFalse(collector.ring_doorbell(snap, state, None))
-            state.last_doorbell = None                    # the floor is not what stops it
-        self.assertEqual((self.ran, state.doorbells), ([], 0))
-
     def test_the_humans_answer_to_a_blocked_agent_still_rings(self):
         """The one ring `_ring` lets a block through, so it is the one the doorbell must
         still chase — the answer's own `sb tell` flushes, but a target that was mid-turn

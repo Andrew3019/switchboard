@@ -1218,7 +1218,7 @@ class Herdr:
         pane: `agent start` → resolvable, `report_session` → still resolvable, one
         `report_state(..., IDLE)` → agent_not_found for good. This is the mechanism behind
         the "lost name binding" the rest of this file talks about, and it is why nothing in
-        the broker calls this any more — `block`, `_unblock_if_needed` and `done` all
+        the broker calls this any more — the old `block` and its unblock, and `done`, all
         report nothing at all, `done` last, once the price of it turned out to be that a
         finished agent could never be asked a follow-up question. Kept because it is the
         measurement, and because the eviction is invisible without a written record of it;
@@ -1359,6 +1359,6 @@ class Herdr:
     # -- human-facing ----------------------------------------------------
 
     def notify(self, text: str) -> None:
-        """The blocked-leaf shortcut in v0: a leaf surfaces straight to the human,
-        bypassing its parent so parent context never grows with blocks (C14, C4)."""
+        """The waiting-leaf shortcut in v0: a leaf surfaces straight to the human,
+        bypassing its parent so parent context never grows with its questions (C14, C4)."""
         self._call("notification", "show", text)

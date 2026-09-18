@@ -92,8 +92,8 @@ linked_config = ["CLAUDE.md", ".switchboard"]
 # Names, not behaviour. Every one of these used to be a string literal in Python.
 
 # The two addresses that are not agents. `parent` is an ordinary target; `human` is not a
-# target at all — a person has no mailbox, so `sb tell human` is refused and points at
-# `sb block`. The name is still needed to recognise that case.
+# target at all for `tell` — a person has no mailbox, so `sb tell human` is refused and
+# points at `sb ask human`, which DOES take it. The name is needed to recognise both cases.
 human  = "human"
 parent = "parent"
 
@@ -138,7 +138,7 @@ review_role = "reviewer"
 # The read-and-report role. Named here, not as a literal in Python, for one behaviour: a
 # researcher spawned DIRECTLY by the top dispatcher is one the person spawned on their own
 # instruction and reads directly, so it gets a nudge (`spawn.researcher_direct`) to report
-# in its own chat and `sb block` rather than reporting done back up the tree. The nudge keys
+# in its own chat and `sb ask human` rather than reporting done back up the tree. The nudge keys
 # off this name; a repo that renames its researcher keeps the behaviour by renaming it here.
 researcher_role = "researcher"
 
@@ -165,9 +165,9 @@ base_branch = "origin/main"
 # stays an implementation detail of the mailbox rather than something everyone must know.
 done_prefix = "[done] "
 
-# There is deliberately no `blocked_prefix`. A block is not mail: the human has no mailbox,
-# so `sb block` records the reason against the agent and it reaches you as a marked row on
-# `sb board`, which needs no marker in the body to tell it apart from anything else.
+# There is deliberately no prefix for a question. A Question is not mail: the human has no
+# mailbox, so `sb ask human` records a row of its own and it reaches you as a marked row on
+# `sb board`, which needs no marker in a body to tell it apart from anything else.
 
 
 [routing]
@@ -263,20 +263,20 @@ gpt_luna_direct_enabled = true
 running = ["working"]
 
 # Has never reported an end, and so a pane that disappears under it is a death worth
-# recording (`status.REAPABLE`). Wider than `running` by exactly one word, and the word is
-# the point: a blocked agent is legitimately not working — it has stopped to ask a person
-# and sits there until answered — so it must never be contradicted for being idle, which is
-# what `running` decides. But if its pane goes, nothing more is coming from it either, and
-# before this it was never reaped, never marked failed and never reported to its parent; it
-# stayed BLOCKED on the board for good. The signal that separates the two is the pane, not
-# the state, and only `gone` reads this list.
+# recording (`status.REAPABLE`). Wider than `running` by exactly one word, and the word is a
+# LEGACY one: `blocked` was what `sb block` wrote, and that verb is gone (#325) — waiting on
+# a person is an open Question now and the agent's state stays `working` throughout. Live
+# stores still hold rows carrying the old word, and a row nothing can reap is exactly what
+# this list exists to catch: never reaped, never marked failed, never reported to its
+# parent, on the board for good. Only `gone` reads this list.
 reapable = ["working", "blocked"]
 
 # Will never move again. Waiting on one of these is waiting forever.
 finished = ["done", "failed"]
 
 # Counts as "an agent is live", which is what makes the store refuse to drop and recreate
-# itself on a schema change.
+# itself on a schema change. `blocked` is the same legacy word as above: nothing writes it
+# any more, and a store still holding one must not be rebuilt out from under it.
 live = ["working", "blocked"]
 
 # herdr's `done` is a display state meaning "idle and not looked at yet". For drift it
@@ -290,7 +290,7 @@ idle_like = ["idle", "done"]
 # writer (`store.set_turn`) and the readouts (`status`, `Broker._busy`) agree on how to
 # spell them. Not something to retune — they are the two edges Claude Code fires, not a
 # policy — and `turn_idle` in particular is NOT a state and never becomes one: the state
-# column's vocabulary is working | blocked | done | failed and stays four words.
+# column's vocabulary is working | done | failed (plus the legacy `blocked`).
 turn_working = "working"
 turn_idle    = "idle"
 
@@ -414,17 +414,18 @@ text = 40000
 # pasted artifact or a large burst falls back before it dominates the recipient's turn.
 inline_mail = 8000
 
-# `sb block "<why>"`. NOT a runaway guard and not style advice — the only cap here that is
-# load-bearing, because the reason is the one field whose SIZE tells the agent it is using
-# the verb wrong. The human never reads it (he reads the agent's own chat, via
-# `sb inspect`); it is bookkeeping on a board row. An orchestrator wrote its entire answer
-# to him into a `why` — several paragraphs, findings and questions — left its own chat
-# empty, and when the newline check refused it, flattened the whole thing into one run-on
-# line and got through. 200 characters is roomy for the one line this is meant to be and
-# has no room at all for a report, which is the only way to make the flattening trick fail
-# too. Raising it re-opens that hole; the capability it appears to take away is not lost —
-# long text goes in the chat, which is where he actually reads it.
-block_reason = 200
+# `sb ask human "<question>"`. NOT a runaway guard and not style advice — the only cap here
+# that is load-bearing, because the question line is the one field whose SIZE tells the
+# agent it is using the verb wrong. The human never reads it (he reads the agent's own
+# chat, via `sb inspect`); it is bookkeeping on a board row. An orchestrator wrote its
+# entire answer to him into the old `sb block` reason — several paragraphs, findings and
+# questions — left its own chat empty, and when the newline check refused it, flattened the
+# whole thing into one run-on line and got through. 200 characters is roomy for the one
+# line this is meant to be and has no room at all for a report, which is the only way to
+# make the flattening trick fail too. Raising it re-opens that hole; the capability it
+# appears to take away is not lost — long text goes in the chat, which is where he actually
+# reads it.
+question_line = 200
 
 # Authored prompt text (`--as`, and preset files after flattening). Config rather than
 # traffic: a preset is allowed to be a substantial briefing, and the orchestrator role is

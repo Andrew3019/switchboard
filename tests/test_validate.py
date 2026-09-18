@@ -7,6 +7,7 @@ the flag that caused them, or as a shell that hangs for the full timeout.
 
 from __future__ import annotations
 
+import inspect
 import sys
 import tempfile
 import unittest
@@ -89,18 +90,18 @@ class LineTest(unittest.TestCase):
 
 
 class ReasonTest(unittest.TestCase):
-    """`sb block "<why>"`. The one rule here that is ours: the human never reads this
-    field, so a reason big enough to BE the message is an answer sent nowhere — and the
-    agent cannot tell, because the block succeeded."""
+    """`sb ask human "<question>"`. The one rule here that is ours: the human never reads
+    this field, so a question big enough to BE the message is an answer sent nowhere — and
+    the agent cannot tell, because the ask succeeded."""
 
     def test_the_cap_is_far_below_ordinary_text(self):
         """Sized off the caps, not literals: a report must not fit, and a real reason
         must never be near the edge."""
-        self.assertLess(validate.MAX_BLOCK_REASON, validate.MAX_TEXT)
-        self.assertEqual(len(validate.reason("x" * validate.MAX_BLOCK_REASON)),
-                         validate.MAX_BLOCK_REASON)
+        self.assertLess(validate.MAX_QUESTION_LINE, validate.MAX_TEXT)
+        self.assertEqual(len(validate.reason("x" * validate.MAX_QUESTION_LINE)),
+                         validate.MAX_QUESTION_LINE)
         with self.assertRaises(validate.Invalid):
-            validate.reason("x" * (validate.MAX_BLOCK_REASON + 1))
+            validate.reason("x" * (validate.MAX_QUESTION_LINE + 1))
 
     def test_a_report_flattened_onto_one_line_is_still_refused(self):
         """The actual misuse, and its second act. A multi-paragraph answer was refused for
@@ -117,7 +118,7 @@ class ReasonTest(unittest.TestCase):
         """The error is the only teaching moment that cannot be forgotten, so it carries
         the fix. It must NOT blame herdr's newline rule: that reads as a formatting
         complaint, and the answer to a formatting complaint is to flatten and resend."""
-        for bad in ("stuck\nbadly", "x" * (validate.MAX_BLOCK_REASON + 1)):
+        for bad in ("stuck\nbadly", "x" * (validate.MAX_QUESTION_LINE + 1)):
             with self.assertRaises(validate.Invalid) as e:
                 validate.reason(bad)
             msg = str(e.exception)
@@ -132,7 +133,7 @@ class ReasonTest(unittest.TestCase):
         human-facing rules may become something to copy). It says where the message goes,
         never what is in it, and offers no specimen call to imitate."""
         with self.assertRaises(validate.Invalid) as e:
-            validate.reason("x" * (validate.MAX_BLOCK_REASON + 1))
+            validate.reason("x" * (validate.MAX_QUESTION_LINE + 1))
         msg = str(e.exception)
         for shape in ("numbered", "findings", "recommend", "options"):
             self.assertNotIn(shape, msg.lower())
@@ -227,25 +228,32 @@ class CliBoundaryTest(unittest.TestCase):
     def test_empty_strings_are_caught_for_every_verb_that_takes_prose(self):
         self.bad(["delegate", "   "])
         self.bad(["done", "   "])
-        self.bad(["block", "\t"])
+        self.bad(["ask", "human", "\t"])
         self.bad(["tell", "worker-1", "  "])
 
-    def test_done_and_block_must_be_one_line(self):
-        # Both reach herdr as `report-agent --message`.
+    def test_done_and_a_question_must_be_one_line(self):
         self.bad(["done", "fixed it\nand tested it"])
-        self.bad(["block", "stuck\nbadly"])
+        self.bad(["ask", "human", "stuck\nbadly"])
 
-    def test_block_at_the_boundary_refuses_a_reason_shaped_like_a_report(self):
-        """A summary of any length is legal; a block reason of any length is not. The verb
-        is where the misuse is visible, so this must fail before anything is written."""
+    def test_a_question_to_a_person_refuses_a_line_shaped_like_a_report(self):
+        """A summary of any length is legal; a question put to a person is not. The verb is
+        where the misuse is visible, so this must fail before anything is written."""
         long = "the whole answer, " * 40
-        self.bad(["block", long])
+        self.bad(["ask", "human", long])
         args = parse(["done", long])
         _validate(args)                              # `done` is a report and may be long
         self.assertEqual(args.summary, long.strip())
-        args = parse(["block", "  need a decision on the auth split  "])
+        args = parse(["ask", "human", "  need a decision on the auth split  "])
         _validate(args)
-        self.assertEqual(args.why, "need a decision on the auth split")
+        self.assertEqual(args.question, "need a decision on the auth split")
+
+    def test_a_question_to_an_agent_is_capped_like_a_message(self):
+        """The short cap is about what a PERSON reads off a board row. An agent-targeted
+        question is delivered as ordinary mail and takes the ordinary message cap."""
+        long = "the whole answer, " * 40
+        args = parse(["ask", "worker-1", long])
+        _validate(args)
+        self.assertEqual(args.question, long.strip())
 
     def test_a_message_body_may_wrap_but_a_task_may_not(self):
         args = parse(["tell", "worker-1", "line one\nline two"])
@@ -283,14 +291,17 @@ class CliBoundaryTest(unittest.TestCase):
         _validate(args)
         self.assertEqual(args.mode, "interrupt")
 
-    def test_the_ask_verb_is_gone(self):
-        """Item 3.6. It blocked its caller in a poll loop, which is the one thing
-        DESIGN-TRUTH forbids outright — no agent ever waits on another agent. What
-        replaces it is a `tell --needs-reply`, which returns immediately."""
-        with self.assertRaises(SystemExit):
-            parse(["ask", "worker-1", "ready?"])
+    def test_the_ask_verb_does_not_wait(self):
+        """Item 3.6 removed an `sb ask` that BLOCKED its caller in a poll loop, which is
+        the one thing DESIGN-TRUTH forbids outright — no agent ever waits on another agent.
+        #325 gave the name back to a verb that records a durable Question and returns; this
+        pins that it is the second one, by the shape of its signature."""
+        _validate(parse(["ask", "worker-1", "ready?"]))
         from switchboard import broker as broker_mod
-        self.assertFalse(hasattr(broker_mod.Broker, "ask"))
+        sig = inspect.signature(broker_mod.Broker.ask)
+        self.assertEqual([p for p in sig.parameters if p != "self"],
+                         ["target", "body", "me"])
+        self.assertNotIn("timeout", sig.parameters)
 
     def test_agent_lookups_are_checked_too(self):
         self.bad(["restore", "Not A Name"])

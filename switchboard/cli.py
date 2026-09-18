@@ -1,6 +1,7 @@
 """The `sb` command — the only surface agents ever see.
 
-Six verbs for agents (`delegate`, `tell`, `inbox`, `done`, `block`, `status`), a
+Seven verbs for agents (`delegate`, `tell`, `inbox`, `done`, `ask`, `answer`, `status`) —
+plus `resolve`, `withdraw` and `escalate`, which are the rest of one Question's life — a
 few more for the human (`init`, `doctor`, `cleanup`, `restore`, `inspect`,
 `log`, `presets`, `models`, `workspace`), and `plugin`, which is a namespace rather
 than a verb: `sb plugin <name> <verb>` is whatever a plugin declared, and `sb plugin list`
@@ -337,28 +338,56 @@ def build_parser() -> argparse.ArgumentParser:
                          "they keep their panes, their checkouts and their work, and "
                          "report to your parent from now on")
 
-    bl = cmd(
-        "block", help="stop and surface to the human (they answer with `sb tell`)",
-        # Says the gate exists before a caller trips it. The rule is the protocol's — one
-        # agent waits on a person for one question — and `broker.block` is what enforces
-        # it; this only keeps the refusal from being a surprise, like the `why` note below.
-        description="Refused while somebody below you is already waiting on a person: that "
-                    "row is theirs, and the report to make instead is `sb done` naming who "
-                    "is waiting and what for.")
-    # The help string is where a caller looks before its first block, so it states the
+    ak = cmd(
+        "ask", help="ask a durable question and end your turn",
+        # Says the two things a caller has to know before its first one: nothing waits, and
+        # what the human actually reads is the agent's own chat. `broker.ask` is where the
+        # rest of it is written down.
+        description="Records a Question that outlives this turn. Nothing waits: you get an "
+                    "id back and stop. `human` surfaces it to the person on their board and "
+                    "in `sb status --needs-me`; an agent target is also delivered to them "
+                    "as a message. Answered with `sb answer <id>`, and by nothing else — a "
+                    "plain `sb tell` resolves no question.")
+    ak.add_argument("target", metavar="WHO",
+                    help="human | parent | an agent name")
+    # The help string is where a caller looks before its first question, so it states the
     # split rather than just naming the field: the full text goes in the chat, one line
-    # comes here. Enforced in validate.reason — this only stops the enforcement being a
-    # surprise.
-    bl.add_argument("why", help="ONE short line for the board; write the full question in "
-                                "your own chat, which is what the human reads")
+    # comes here. Enforced in validate.reason for a human target — this only stops the
+    # enforcement being a surprise.
+    ak.add_argument("question",
+                    help="ONE short line for a human target; write the full question in "
+                         "your own chat, which is what they read")
+
+    an = cmd("answer", help="answer somebody's question and wake them",
+             description="Records the answer against the question, resolves it, and rings "
+                         "the asker's doorbell with it.")
+    an.add_argument("id", type=int, metavar="ID")
+    an.add_argument("answer")
+
+    rq = cmd("resolve", help="close a question with no answer text",
+             description="For a question that was answered somewhere else, or that stopped "
+                         "mattering. The asker is woken; the row records who closed it.")
+    rq.add_argument("id", type=int, metavar="ID")
+
+    wd = cmd("withdraw", help="retract your own still-open question")
+    wd.add_argument("id", type=int, metavar="ID")
+
+    es = cmd("escalate", help="re-ask the human a question nobody else answered",
+             description="The question keeps its id, its asker and its text, and now "
+                         "targets the human.")
+    es.add_argument("id", type=int, metavar="ID")
+
+    qs = cmd("questions", help="list open questions")
+    qs.add_argument("--mine", action="store_true",
+                    help="only the ones you asked (default: also the ones asked of you)")
 
     cl = cmd(
-        "close", help="close your OWN pane — run it in the agent's bash, blocked or not",
+        "close", help="close your OWN pane — run it in the agent's bash, whatever it is doing",
         # Says the two things that separate it from its neighbours before a caller reaches
         # for the wrong one: it is SELF only (a parent closes a child with `sb cleanup`),
         # and the summary is what decides whether the parent hears (see `broker.self_close`).
         description="The close an agent runs on itself, or that you run in an agent's bash "
-                    "to end it whatever state it is in — working, blocked, idle, done. "
+                    "to end it whatever state it is in — working, idle, done. "
                     "`sb cleanup <name>` is the other direction (a parent closing a child) "
                     "and refuses to close the caller's own pane; this is that missing case. "
                     "Give a summary and your parent gets it exactly as `sb done` delivers "
@@ -386,7 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="every agent, finished ones included (the whole tree, and the "
                          "whole --json dump)")
     ss.add_argument("--needs-me", dest="needs_me", action="store_true",
-                    help="only agents that are blocked, at a prompt, stalled, or holding "
+                    help="only agents asking you something, at a prompt, stalled, or holding "
                          "unread mail")
     # A human has no subtree — `_subtree` reads `human` as every root and everything under
     # it, so the flag filters nothing for them. Says that rather than "for a human: every
@@ -753,11 +782,20 @@ def _validate(args) -> None:
         if args.summary is not None:
             args.summary = validate.line(args.summary, "summary")
 
-    elif cmd == "block":
-        # Not `line`: the reason has its own rule and its own error, because the human
-        # never reads this field and a caller told only "one line" flattens a report into
-        # it. See validate.reason.
-        args.why = validate.reason(args.why)
+    elif cmd == "ask":
+        args.target = validate.target(args.target, "question target")
+        if args.target == broker_mod.HUMAN:
+            # Not `line`: a question put to a person has its own rule and its own error,
+            # because they never read this field — they read the agent's own chat — and a
+            # caller told only "one line" flattens a whole report into it. See
+            # validate.reason. An agent-targeted question is an ordinary message and is
+            # capped like one.
+            args.question = validate.reason(args.question, "question")
+        else:
+            args.question = validate.line(args.question, "question")
+
+    elif cmd == "answer":
+        args.answer = validate.line(args.answer, "answer")
 
     elif cmd == "workspace":
         # `list` takes no arguments at all and `close` takes only a name, so each one is
@@ -1001,7 +1039,7 @@ def _configure_text(r: dict) -> str:
 # where am I?" changes what the caller should do next.
 #
 # Everything else stays quiet, and that is the half worth defending (obj. 5). `tell`,
-# `inbox`, `done`, `block`, `status`, `log`, `inspect` are the verbs an agent runs dozens
+# `inbox`, `done`, `ask`, `status`, `log`, `inspect` are the verbs an agent runs dozens
 # of times a turn-cycle; a state readout under each of them would be the nag-fatigue
 # §5 warns about, arriving through a second channel. The read verbs are also the ones
 # that already SHOW state — `sb status` draws the divergence marker, `sb who-holds`
@@ -1115,7 +1153,7 @@ def _degraded(deficit: list[str], cmd: str) -> str:
     return (f"sb: `sb {cmd}` cannot run against this store yet —\n"
             + "".join(f"      {d}\n" for d in deficit)
             + "    A fleet is still running on the older store, so it has not been\n"
-              "    rebuilt yet. Reporting is unaffected: sb done, sb block, sb tell and\n"
+              "    rebuilt yet. Reporting is unaffected: sb done, sb ask, sb tell and\n"
               "    sb inbox all still work, and the store rebuilds itself as soon as the\n"
               "    last agent finishes. To rebuild NOW and lose their state:\n"
               "      sb doctor --reset-store --force")
@@ -1792,10 +1830,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         lost = [n for n in lost if n not in closed]
         notes = []
         if waiting:
-            # NORMAL queues at the next turn boundary, so an undelivered target is blocked
-            # on a human (or otherwise unavailable), never merely mid-turn. The old
-            # `--when-idle` spelling is normalized before this report is built.
-            notes.append(f"{', '.join(waiting)} blocked, waiting on the human — "
+            # NORMAL queues at the next turn boundary, so an undelivered target is
+            # unavailable rather than merely mid-turn. The old `--when-idle` spelling is
+            # normalized before this report is built.
+            notes.append(f"{', '.join(waiting)} not reachable right now — "
                          "will be rung when free")
         if lost:
             notes.append(f"{', '.join(lost)} UNREACHABLE — herdr no longer answers to its "
@@ -1814,16 +1852,16 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
 
     if cmd == "inbox":
         if me == HUMAN:
-            # A person has no mailbox — an agent that needs you blocks instead, and the
-            # block waits on the board until you answer it. Saying so beats printing
-            # "(no new messages)", which reads as "nothing needs you" and is a different
-            # claim entirely. The board, not `sb status`: `sb board` is the human's
-            # surface (DESIGN-TRUTH.md), and a blocked agent is a marked row there
-            # carrying its reason (`board.wants_you`, `board.marker`).
+            # A person has no mailbox — an agent that needs you asks a Question instead,
+            # and that question waits on the board until somebody answers it. Saying so
+            # beats printing "(no new messages)", which reads as "nothing needs you" and is
+            # a different claim entirely. The board, not `sb status`: `sb board` is the
+            # human's surface (DESIGN-TRUTH.md), and an asking agent is a marked row there
+            # carrying its question (`board.wants_you`, `board.marker`).
             _emit(args,
-                  "you have no inbox — agents that need you BLOCK, and a blocked agent "
-                  "waits on `sb board` as a marked row with its reason (answer with "
-                  "`sb tell <agent> \"...\"`)",
+                  "you have no inbox — agents that need you ASK, and an open question "
+                  "waits on `sb board` as a marked row (`sb questions` lists them; answer "
+                  "with `sb answer <id> \"...\"`)",
                   {"messages": [], "human": True})
             return 0
         msgs = b.inbox(me=me, peek=args.peek)
@@ -1934,17 +1972,53 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         b.close_own_pane(r["target"], me=me)
         return 0
 
-    if cmd == "block":
-        b.block(args.why, me=me)
-        # Says WHAT they read, not just that they were told. The old note ("they will see
-        # it") let a caller believe the reason was the delivered message, which is the
-        # misuse validate.reason now refuses. "The board", not `sb board`: this is read by
-        # an agent, and the verb is deliberately not part of an agent's vocabulary (see
-        # the human-only refusal in `board` above, and the shipped prompts, which say
-        # "a board row" and never name the command).
-        _emit(args, "blocked — your reason marks your row on the human's board until "
-                    "they answer; what they actually read is your own chat, so the full "
-                    "question belongs there", {"agent": me})
+    if cmd == "ask":
+        r = b.ask(args.target, args.question, me=me)
+        if r["target"] == HUMAN:
+            # Says WHAT they read, not just that they were told. "The board", not `sb
+            # board`: this is read by an agent, and the verb is deliberately not part of an
+            # agent's vocabulary (see the human-only refusal in `board` above, and the
+            # shipped prompts, which say "a board row" and never name the command).
+            note = (f"asked the human — question {r['id']}. It marks your row on their "
+                    f"board until somebody answers it; what they actually read is your own "
+                    f"chat, so the full question belongs there")
+        else:
+            note = (f"asked {r['target']} — question {r['id']}. Nothing waits: they are "
+                    f"told, and you are woken when they answer")
+        _emit(args, note, r)
+        return 0
+
+    if cmd == "answer":
+        r = b.answer(args.id, args.answer, me=me)
+        _emit(args, f"answered question {args.id} — {r['asker']} has been woken with it", r)
+        return 0
+
+    if cmd == "resolve":
+        r = b.resolve_question(args.id, me=me)
+        _emit(args, f"resolved question {args.id} with no answer text", r)
+        return 0
+
+    if cmd == "withdraw":
+        r = b.withdraw(args.id, me=me)
+        _emit(args, f"withdrew question {args.id}", r)
+        return 0
+
+    if cmd == "escalate":
+        r = b.escalate(args.id, me=me)
+        _emit(args, f"question {args.id} now goes to the human", r)
+        return 0
+
+    if cmd == "questions":
+        rows = store.open_questions(db, asker=me)
+        if not args.mine and me != HUMAN:
+            rows = list(rows) + [q for q in store.open_questions(db, target=me)]
+        elif not args.mine and me == HUMAN:
+            rows = list(store.open_questions(db, target=HUMAN))
+        data = [{"id": q["id"], "asker": q["asker"], "target": q["target"],
+                 "body": q["body"], "created_at": q["created_at"]} for q in rows]
+        human = "\n".join(f"{q['id']:>4}  {q['asker']} -> {q['target']}: {q['body']}"
+                           for q in data) or "no open questions"
+        _emit(args, human, {"questions": data})
         return 0
 
     if cmd == "status":
@@ -2569,7 +2643,7 @@ def _plugin_run(args, b: Broker, db, me: str) -> int:
     agent = None if me == HUMAN else me
     if c.audience == "human" and agent is not None:
         print(f"sb: `{p.name} {c.name}` is for the human, and you are '{me}'.\n"
-              f"    Ask for it with `sb block \"...\"`, which surfaces to them.",
+              f"    Ask for it with `sb ask human \"...\"`, which surfaces to them.",
               file=sys.stderr)
         return 1
     if c.audience == "agent" and agent is None:

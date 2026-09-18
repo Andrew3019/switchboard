@@ -1,13 +1,13 @@
-"""The two turn edges — the Stop gate's decision, and the activity signal beside it.
+"""The two turn edges — the activity signal.
 
-The gate: the three tests it was built with, and two for the cap that the integration
-found was not one. The signal (`agents.turn`): the two edges, and the ordering between the
-gate and the idle mark, which is the likeliest bug in it.
+There WAS a Stop gate here, refusing the end of a turn nobody had reported, with a cap and
+four waivers. It is gone (#325): a silent finish is a passive reading on the board now, and
+nothing speaks to the agent about it. What is left is the signal (`agents.turn`): the two
+edges, and the one thing `run` may still return.
 
-What a test can pin here is the DECISION and the WRITE (a real store, real rows) and the
-fact that every spawn carries the settings file. What it cannot pin is that Claude honours
-the response or fires the events at all, so those halves are proved live, in an isolated
-clone — once for the gate, once for the signal.
+What a test can pin here is the WRITE (a real store, real rows) and the fact that every
+spawn carries the settings file. What it cannot pin is that Claude fires the events at all,
+so that half is proved live, in an isolated clone.
 """
 
 from __future__ import annotations
@@ -27,10 +27,18 @@ from switchboard.herdr import Herdr  # noqa: E402
 from tests.test_herdr import AGENT_JSON, FakeHerdr, ok  # noqa: E402
 
 
-class StopGateTest(unittest.TestCase):
+class StopHookNeverBlocksTest(unittest.TestCase):
+    """The enforcement is gone, and this is what took its place: nothing.
+
+    The gate used to answer `{"decision": "block", "reason": …}` for a turn that ended with
+    nothing reported, and four waivers existed only to decide when not to. Every one of
+    those shapes is here, and every one of them ends its turn.
+    """
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.db = store.connect(path=Path(self.tmp.name) / "state.db")
+        self.path = Path(self.tmp.name) / "state.db"
+        self.db = store.connect(path=self.path)
 
     def tearDown(self):
         self.db.close(); self.tmp.cleanup()
@@ -38,103 +46,36 @@ class StopGateTest(unittest.TestCase):
     def payload(self, **kw):
         return {"session_id": "sess-1", "hook_event_name": "Stop", **kw}
 
-    def test_a_working_agent_is_stopped_and_a_reported_one_is_not(self):
-        """The whole point: a turn ending with nothing said does not end."""
+    def stop(self, **kw):
+        return hooks.run(json.dumps(self.payload(**kw)), db_path=self.path)
+
+    def test_a_silent_finish_ends_its_turn_and_is_told_nothing(self):
+        """THE removal. An agent that ends a turn having reported nothing simply ends; its
+        silence surfaces on the board (`status` draws it STALLED) rather than being argued
+        with in its own pane."""
         store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
-        reason = hooks.stop_gate(self.payload(), self.db)
-        self.assertIsNotNone(reason)
-        self.assertIn("sb done", reason)
-        self.assertIn("sb block", reason)
+        self.assertEqual(self.stop(), {})
+        self.assertEqual(store.get_agent(self.db, "w1")["turn"], store.TURN_IDLE)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) c FROM events WHERE kind LIKE 'stop_gate%'").fetchone()["c"], 0)
 
-        store.set_state(self.db, "w1", "done")
-        self.assertIsNone(hooks.stop_gate(self.payload(), self.db))
-
-        # `blocked` is a report too — it is the one way an agent reaches a person.
-        store.set_state(self.db, "w1", "blocked")
-        self.assertIsNone(hooks.stop_gate(self.payload(), self.db))
-
-    def test_stop_hook_active_is_the_loop_cap(self):
-        """One nudge per stop-chain, or the gate is the loop it is meant to prevent.
-
-        The flag is set by the CLI on a turn this gate itself caused (verified against the
-        real CLI, 2026-08-11). Honouring it is what makes "blocked, so take another turn,
-        which ends, so block again" terminate — at most once, whatever the agent does.
-        """
-        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
-        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
-        self.assertIsNone(hooks.stop_gate(self.payload(stop_hook_active=True), self.db))
-
-    def test_the_cap_survives_a_new_stop_chain(self):
-        """The cap the flag above cannot keep, and the defect it was found by.
-
-        `stop_hook_active` is scoped to ONE stop-chain — one user prompt. A ring, a `tell`
-        or a person typing starts a fresh chain with the flag false, and the gate blocked
-        the same agent a second time twelve seconds later. The store is what
-        outlives a chain, so one block
-        per agent until it says something is asked of the event log.
-        """
-        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
-        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
-        # A new chain: the flag is false and honestly so, and it still must not block.
-        self.assertIsNone(hooks.stop_gate(self.payload(), self.db))
-        blocks = self.db.execute(
-            "SELECT COUNT(*) c FROM events WHERE kind='stop_gate_blocked'").fetchone()["c"]
-        self.assertEqual(blocks, 1)
-
-    def test_a_report_re_arms_the_gate(self):
-        """Once per SILENCE, not once per lifetime. An agent that reported and was then
-        spoken to in its pane is `working` again, and that next quiet turn-end is a new
-        silence — the case the scope decision deliberately does not exempt."""
-        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
-        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
-        store.set_state(self.db, "w1", "done")
-        store.log_event(self.db, kind="done", agent="w1")
-        store.set_state(self.db, "w1", "working")       # revived by a person in its pane
-        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
-
-    def test_an_agent_waiting_on_a_reply_it_asked_for_ends_its_turn(self):
-        """The state that had no verb. `tell --needs-reply` says end your turn and be poked
-        with the answer, and the gate used to demand a report there was nothing to make."""
-        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
+    def test_every_shape_the_waivers_existed_for_ends_the_same_way(self):
+        """The four waivers are gone because there is no decision left to waive."""
         store.create_agent(self.db, name="lead", role="lead")
+        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1",
+                           parent="lead")
         store.put_message(self.db, from_agent="w1", to_agent="lead", kind="tell",
                           body="which one?", needs_reply=True)
-        self.assertIsNone(hooks.stop_gate(self.payload(), self.db))
-
-    def test_an_explicit_background_wait_ends_without_the_stop_hook(self):
-        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
         store.set_wait(self.db, "w1", "background")
-        self.assertIsNone(hooks.stop_gate(self.payload(), self.db))
+        self.assertEqual(self.stop(), {})
+        self.assertEqual(self.stop(stop_hook_active=True), {})
 
-    def test_a_new_provider_turn_spends_the_previous_wait(self):
-        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
-        store.set_wait(self.db, "w1", "background")
-        self.db.execute("UPDATE agents SET usage_limit_reset_at=123 WHERE name='w1'")
-        self.db.commit()
-        hooks.mark_turn(self.payload(), self.db, store.TURN_WORKING)
-        self.assertIsNone(store.wait_for(self.db, "w1"))
-        self.assertIsNone(store.get_agent(self.db, "w1")["usage_limit_reset_at"])
-
-    def test_the_answer_ends_the_excuse(self):
-        """Any message back from whoever was asked, and the next silent end is a silence
-        like any other — nothing here excuses a row for the rest of its life."""
-        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
-        store.create_agent(self.db, name="lead", role="lead")
-        store.put_message(self.db, from_agent="w1", to_agent="lead", kind="tell",
-                          body="which one?", needs_reply=True)
-        store.put_message(self.db, from_agent="lead", to_agent="w1", kind="tell",
-                          body="the second one")
-        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
-
-    def test_a_question_nobody_is_left_to_answer_excuses_nothing(self):
-        """The recipient's `sb done` has landed, so no answer is coming and waiting on it
-        is a silent finish like any other."""
-        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
-        store.create_agent(self.db, name="lead", role="lead")
-        store.put_message(self.db, from_agent="w1", to_agent="lead", kind="tell",
-                          body="which one?", needs_reply=True)
-        store.set_state(self.db, "lead", "done")   # its `sb done` landed; no answer is coming
-        self.assertIsNotNone(hooks.stop_gate(self.payload(), self.db))
+    def test_the_gate_is_not_importable_any_more(self):
+        """Named rather than left to a grep: the verb it offered (`sb block`) is gone too,
+        so a reader reaching for the gate is reaching for both halves of a removed design."""
+        for gone in ("stop_gate", "BLOCK_REASON", "REPORTED", "_already_nudged",
+                     "_has_live_child", "_awaiting_reply", "_explicit_wait"):
+            self.assertFalse(hasattr(hooks, gone), gone)
 
 
 class ActivitySignalTest(unittest.TestCase):
@@ -177,33 +118,15 @@ class ActivitySignalTest(unittest.TestCase):
         self.assertEqual(self.stop(), {})
         self.assertEqual(self.turn(), store.TURN_IDLE)
 
-    def test_a_turn_the_gate_refuses_to_end_is_not_recorded_idle(self):
-        """THE ordering bug this change could most easily have shipped.
-
-        A blocked stop is not the end of a turn: the agent is handed `BLOCK_REASON` and
-        keeps going in the same turn, and `UserPromptSubmit` does not fire again for it.
-        Marking idle there would hand its held mail over mid-turn and put a working agent
-        on the board as one whose turn ended without a report.
-        """
+    def test_an_agent_with_an_open_question_has_ended_its_turn(self):
+        """Asking a person is not a state and does not stop anything: the row stays
+        `working`, the turn edge says the turn ended, and the open Question is what says it
+        is waiting. All three are true at once and they answer different questions."""
         store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
         self.start()
-        out = self.stop()                               # silent finish: refused
-        self.assertIn("sb done", out["reason"])
-        self.assertEqual(self.turn(), store.TURN_WORKING)
-
-        # The continued turn ends for real, carrying the flag the gate's own block sets.
-        self.assertEqual(self.stop(stop_hook_active=True), {})
-        self.assertEqual(self.turn(), store.TURN_IDLE)
-
-    def test_an_agent_that_blocked_has_ended_its_turn(self):
-        """`blocked` is a report, so the gate lets the stop through — and a blocked agent
-        is stopped, waiting on a person. Both columns are true at once and they are
-        answering different questions: state=blocked, turn=idle."""
-        store.create_agent(self.db, name="w1", role="worker", session_id="sess-1")
-        self.start()
-        store.set_state(self.db, "w1", "blocked")
+        store.create_question(self.db, asker="w1", target=store.Q_HUMAN, body="which one?")
         self.assertEqual(self.stop(), {})
-        self.assertEqual(store.get_agent(self.db, "w1")["state"], "blocked")
+        self.assertEqual(store.get_agent(self.db, "w1")["state"], "working")
         self.assertEqual(self.turn(), store.TURN_IDLE)
 
     def test_a_new_turn_leaves_the_terminal_state_column_untouched(self):
@@ -351,11 +274,10 @@ class CodexHookShapeTest(unittest.TestCase):
             self.assertIn(str(store.db_path()), c)
 
     def test_the_decision_is_shared_rather_than_a_second_gate(self):
-        """The cap especially. It is defensive for Claude and MANDATORY for codex —
-        openai/codex#37937 is an open unbounded-no-escape loop on a repeatedly blocking
-        Stop hook — so a codex-specific gate that forgot it would be the bug. There is no
-        codex gate to forget it in: `codex_hook_commands` wires the same scripts."""
-        for name in ("stop_gate", "mark_turn", "run", "run_activity"):
+        """openai/codex#37937 is an open unbounded-no-escape loop on a repeatedly blocking
+        Stop hook, and nothing here can meet it any more: `run` returns `{}` unconditionally
+        and `codex_hook_commands` wires the same scripts rather than a gate of its own."""
+        for name in ("mark_turn", "run", "run_activity"):
             self.assertTrue(hasattr(hooks, name))
         self.assertFalse([n for n in dir(hooks) if n.startswith("codex_") and n != "codex_hook_commands"])
 

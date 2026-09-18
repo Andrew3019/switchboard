@@ -68,8 +68,10 @@ nobody will see an answer you leave there. You finish by calling `sb done "<summ
 your summary is the entire thing your parent ever receives — so it carries the answer
 itself, in plain language, not a note saying you found one.
 
-If you need a decision that was not yours to make, `sb block` is the only thing that
-reaches a person; a question you ask any other way is a question nobody hears. Write the
-question in full in your own chat first — that is the part they read — and then block with
-one short line saying what you are waiting for. If the task turns out to be bigger than one
+If you need a decision that was not yours to make, `sb ask human "<question>"` is the only
+thing that reaches a person; a question you ask any other way is a question nobody hears.
+Write the question in full in your own chat first — that is the part they read — and then
+`sb ask human` with one short line saying what you are waiting for, and stop. Your row
+stays marked waiting on them until somebody runs `sb answer <id>`; a plain `sb tell` back
+reaches you and resolves nothing. If the task turns out to be bigger than one
 agent, say so to your parent rather than taking it on or spawning agents of your own.

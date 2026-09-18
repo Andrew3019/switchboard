@@ -54,17 +54,21 @@ class RolesTest(unittest.TestCase):
 
         Asserted over every shipped prompt rather than the one that was wrong, because the
         original fix was applied to the first file somebody found and three others went on
-        teaching the opposite. A prompt is free to never mention blocking; one that does
-        must name the chat.
+        teaching the opposite. A prompt is free to never mention asking a person; one that
+        does must name the chat.
         """
         texts = {"protocol.md": config.protocol(self.repo)}
         for name, role in roles.load(self.repo).items():
             texts[name] = role.prompt
-        mentions = {n: t for n, t in texts.items() if "sb block" in t}
+        mentions = {n: t for n, t in texts.items() if "sb ask human" in t}
         self.assertIn("protocol.md", mentions)         # the one text every agent gets
         for name, t in mentions.items():
-            self.assertIn("chat", t, f"{name} names `sb block` but not where the message "
-                                     f"goes; the human does not read the reason")
+            self.assertIn("chat", t, f"{name} names `sb ask human` but not where the "
+                                     f"message goes; the human does not read the line")
+        # And the verb it replaced is nowhere: a prompt naming a verb the CLI refuses is
+        # worse than one that says nothing (#325).
+        for name, t in texts.items():
+            self.assertNotIn("sb block", t, name)
 
     def test_no_shipped_prompt_tells_an_agent_to_put_the_message_in_the_reason(self):
         """The exact sentence that caused it — "they read that one message ... so say in it
@@ -89,8 +93,8 @@ class RolesTest(unittest.TestCase):
         p = config.protocol(self.repo)
         for reason, phrase in {
             "a big design question": "behaviour-changing design question",
-            "blocked on running something": "blocked on running",
-            "told to block": "told to block",
+            "blocked on running something": "stuck on running",
+            "told to block": "told to ask",
             "going back and forth": "back and forth",
             "finished work needing approval": "needs Andrew's input or approval",
         }.items():
@@ -256,7 +260,7 @@ class RolesTest(unittest.TestCase):
         prompt = roles.load(self.repo)["dispatcher"].prompt
         self.assertIn("repo other than the one you were started in", prompt)
         self.assertIn("Do not dispatch it and do not guess", prompt)
-        self.assertIn("sb block", prompt)
+        self.assertIn("sb ask human", prompt)
         self.assertIn("start nothing until you have an answer", prompt)
 
     def test_a_dispatcher_is_told_setting_up_another_repo_is_not_its_own_job(self):

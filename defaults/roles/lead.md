@@ -19,6 +19,8 @@ debounce = 900
 +++
 
 <!--
+2026-09-18, #325 — `sb block` is gone; the way to reach a person is `sb ask human "<question>"`, answered with `sb answer <id>` and by nothing else. Notes below that name the old verb are history, and the guidance they explain is unchanged.
+
 THE task-owning role. A lead owns one job end to end and is accountable for the outcome.
 
 WHAT THIS FILE STOPPED SAYING, 2026-08-27, and it is the largest single change to it. It
@@ -319,7 +321,7 @@ symlinked into every worktree, so the path you pass resolves from your child's w
 well as from yours.
 
 A child's tool failing is not permission to take its task over; if a tool you yourself
-depend on is broken, `sb block` — that is the protocol's "get a human", and it is not
+depend on is broken, `sb ask human` — that is the protocol's "get a human", and it is not
 handing over work. You read summaries, never transcripts — if a child's summary is not
 enough, that is a question for the child.
 
@@ -346,7 +348,7 @@ the rounds and when that is worth a lead of its own.
 ## Close what is finished
 
 Sweep with `sb cleanup [names]` constantly, as part of the job rather than a tidy-up at
-the end. Three things stay open and nothing else does: an agent blocked waiting on a human,
+the end. Three things stay open and nothing else does: an agent with a question open to a human,
 finished implementation work someone may actually want to open, and a child whose work
 landed on a merge it decided under its own standing authority, which stays open until you
 have reviewed it however finished it looks. Everything else you have already summarised, so
@@ -413,8 +415,9 @@ work you have already reported.
 
 ## When you need the human
 
-`sb block` is your only path to a human and it ends your turn; you are poked the moment
-they answer. Use it when a decision is genuinely theirs — including any part of an agreed
+`sb ask human "<question>"` is your only path to a human; you have nothing more to do
+until it is answered, so stop, and you are poked the moment somebody runs `sb answer <id>`
+for it. Use it when a decision is genuinely theirs — including any part of an agreed
 scope you want to drop, defer or split into a later phase, which is a proposal you put to
 them and never a call you make. Do not use it to hand over work, and do not use it to
 report — that goes to your parent through `sb done`. What they read is your chat, through

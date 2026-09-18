@@ -17,12 +17,12 @@ load-bearing, so they are written down where the code is rather than argued abou
   instruction itself on the wire. Deferring an interrupt would defeat it; interrupting on
   every `tell` is what NORMAL exists to stop. Legacy *next-turn* and *when-idle* spellings
   are accepted as NORMAL. See `TELL_MODES`.
-- **`block` vs telling somebody.** The human has NO mailbox, so needing a person is always
-  a block. `block` ends the turn and the doorbell restarts it, which for an answer that may
-  take hours is the only shape that is not a trap. There is no verb that waits: `sb ask`
-  used to be one, blocking its caller in a poll loop, and it is gone — no agent ever waits
-  on another agent, so a question is a `tell --needs-reply` and the answer is a `tell`
-  back.
+- **asking somebody vs telling them.** The human has NO mailbox, so needing a person is
+  always a Question: `sb ask human "<q>"` records a durable row, the agent ends its turn,
+  and `sb answer <id>` rings the doorbell — which for an answer that may take hours is the
+  only shape that is not a trap. Nothing here ever waits, `sb ask` included: it writes the
+  row and returns, exactly as `tell` does. (An older `sb ask` DID wait, polling its caller
+  in a loop; that one is gone, and this verb is not it.)
 - **`wait` vs explicit holdback.** They are deliberately not merged; see status.py.
   `wait` serves callers that are not agents, while a small set of internal mutation
   signals may still use an explicit coalescing holdback.
@@ -387,7 +387,8 @@ SIGNAL = "signal"
 # What is NOT here is the point. `tell` and `ask` are direct mail — somebody wrote to this
 # agent on purpose, and delaying that would be a new latency for the sake of a burst that
 # does not happen. And the two absolute carve-outs are not in this tuple's gift at all:
-# `block` writes no message row and rings nothing (it goes to `_surface`), and
+# a human-targeted Question writes no message row and rings nothing (it goes to
+# `_surface`), and
 # `--interrupt` is `mode=INTERRUPT`, which never reaches the explicit holdback. Neither
 # is exempted by being missing from a kind list;
 # both are exempt because they are not this shape of thing.
@@ -672,8 +673,8 @@ class CleanupResult(list):
     reason a sweep can say something short instead of nothing. A sweep is FOR skipping
     rows that are already closed and agents that are simply still working: naming those
     is a list of the fleet, it grows with the fleet, and nobody reading it learns
-    anything. Every other gate held back a row a human might have meant — blocked,
-    `failed` with a pane herdr still has, mail it has not read, live children
+    anything. Every other gate held back a row a human might have meant — one still
+    working, `failed` with a pane herdr still has, mail it has not read, live children
     underneath — and those are news whatever else the sweep did. `refused` keeps every
     one of them and `--json` reports every one of them; `expected` only says which are
     not worth a line on their own.
@@ -979,41 +980,27 @@ class Broker:
         return HUMAN
 
     def _revive(self, row) -> str:
-        """An agent that is calling `sb` again is working again — finished or blocked.
+        """An agent that is calling `sb` again is working again.
 
-        THE BLOCKED HALF IS HOW A BLOCK GETS ANSWERED IN THE PANE. `sb tell` from the human
-        is not the only way to answer a question: the obvious thing to do with an agent
-        that has stopped and asked you something is to type the answer into its pane, and
-        that works — the agent reads it and carries on — while the store went on saying
-        `blocked` forever. The row stayed in NEEDS YOU with the question already answered,
-        its held mail stayed held (`_ring`'s blocked branch), and there was no verb, not
-        even for the human, that could put it right.
+        `state` is a self-report about the TASK and it stays terminal until the agent's own
+        next `sb` command reopens it — deliberately lazy, because nothing watches panes and
+        nothing needs to: whatever restarted the agent, the command it is now running is
+        the agent taking a turn again.
 
-        Nothing watches panes, and nothing needs to. An agent that is blocked has ENDED ITS
-        TURN — that is what blocking is — so it runs no commands while it waits, and the
-        next `sb` command from inside that pane is the agent taking a turn again. Whatever
-        restarted it, it is no longer stopped waiting on a person, which is the entire
-        content of `blocked`. So the same rule that already brings back a finished agent
-        brings back a blocked one, and it costs no new verb, no prompt change and no
-        pane-content diffing (there is no such mechanism to reuse).
+        `_turn_passed_since` is what keeps that honest. "The next `sb` command from inside
+        that pane" was never the same claim as "a turn boundary passed", and an agent that
+        reported and then ran one more command in the SAME turn used to reopen its own row
+        on the strength of it. So the branch asks for the turn edge before it acts —
+        except in the no-hooks case, which still revives on the spot, because a session
+        that can never produce the edge would otherwise be wedged terminal for good.
 
-        The narrow cost, and it is worth stating plainly: an agent that runs another `sb`
-        command in the same turn AFTER `sb block`, instead of stopping the way every
-        shipped prompt tells it to, clears its own block. It does not vanish — the state
-        goes to `working` with the turn about to end, and a turn that ends without `sb
-        done` is STALLED, which `needs_human` covers, so the row comes back to NEEDS YOU
-        under a different heading rather than dropping off the human's list. The event log
-        keeps both the `blocked` and the `unblocked` rows, with the reason on the second.
-
-        THAT NARROW COST WAS THE BUG, and `_turn_passed_since` is the whole of the fix. The
-        paragraph above is still the design — a restarted pane is an answered block — but
-        "the next `sb` command from inside that pane" was never the same claim as "a turn
-        boundary passed". An agent that runs `sb block "..."` and then any other command in
-        the SAME turn — `sb status`, `sb inbox`, `sb plugin report-bug file` — reached here
-        and cleared its own block while it was still stopped waiting on a person. Nobody was
-        coming for it, because the one signal that says so had been erased by the agent
-        itself. So both branches now ask for the turn edge before they act; everything else
-        here is unchanged, including the no-hooks case, which still revives on the spot.
+        THE OTHER HALF OF THIS USED TO BE BLOCKING. `sb block` put an agent into a
+        `blocked` state that only the human could clear, and this method's second branch
+        was how a block answered by typing into the pane got cleared. Both are gone with
+        the verb: waiting on a person is an open Question now (`ask`), it is not a state at
+        all, and the only thing that closes it is `sb answer`/`sb resolve` — which is the
+        point, because a Question that cleared itself the moment somebody said anything to
+        the agent was exactly the accident the old design could not prevent.
         """
         name = row["name"]
         if row["ended_at"] is not None:
@@ -1044,19 +1031,6 @@ class Broker:
                 "UPDATE agents SET ended_at=NULL, state='working' WHERE name=?", (name,))
             self.db.commit()
             store.log_event(self.db, kind="revived", agent=name)
-        elif "state" in row.keys() and row["state"] == "blocked":
-            if not self._turn_passed_since(name, ("blocked",)):
-                # Still inside the turn that called `sb block`. The row stays blocked, no
-                # `unblocked` event is written, and the command the caller is running goes
-                # ahead exactly as it would have — resolving a name must not have effects,
-                # least of all on a read-only verb.
-                return name
-            store.set_state(self.db, name, "working")
-            # The same event `_unblock_if_needed` writes, because it is the same fact and
-            # `sb log` should not need two words for it. The reason is what tells the two
-            # routes apart afterwards: `sb tell` from the human, or the human typing into
-            # the pane and the agent getting on with it.
-            store.log_event(self.db, kind="unblocked", agent=name, reason="answered_in_pane")
         return name
 
     def _turn_passed_since(self, name: str, kinds: tuple[str, ...]) -> bool:
@@ -1064,11 +1038,11 @@ class Broker:
 
         This is what tells the human answering apart from the agent itself, and it is one
         fact: a `turn_end` event for this agent with an id after the id of the report it is
-        being asked about (`blocked`, or `done`/`failed`).
+        being asked about (`done`/`failed`).
 
-        Why that is the discriminator. `sb block` and `sb done` both put the agent in
-        REPORTED, which is exactly the state `hooks.stop_gate` lets a turn end in — so a
-        genuine boundary writes `turn_end`, and whatever started the next turn (a human
+        Why that is the discriminator. A report writes an event and the turn it was written
+        in then ends — so a genuine boundary writes `turn_end`, and whatever started the
+        next turn (a human
         typing into the pane, a doorbell, `sb tell`) happened after it. An agent's own next
         command in the SAME turn has no `turn_end` between, because `Stop` has not fired
         yet. The bare `turn` column cannot say this: `UserPromptSubmit` fires before the
@@ -1081,31 +1055,23 @@ class Broker:
 
         FAILS OPEN, in three places, all of them to today's behaviour — revive:
         - a session carrying no hooks can never produce the edge, so demanding one would
-          wedge it blocked for good. This is the same case `hooks.py` and the docstring
+          wedge it terminal for good. This is the same case `hooks.py` and the docstring
           above already fail open for, and it must stay open. It is read off the `turn`
           column: `mark_turn` writes the column and the event together, so a NULL `turn` is
           a row no hook has ever written (`store._repair_unhooked_turn` restores that
           invariant for rows an older `_revive` stamped). Note what this does NOT cover — an
           agent that HAD hooks and lost them keeps a stale `turn`, stays gated, and can then
           only be answered with `sb tell`. Narrow, recoverable, and not fixed here.
-        - no report event to anchor on (a row put into `done`/`blocked` by something other
+        - no report event to anchor on (a row put into `done`/`failed` by something other
           than the verbs — `store.set_state` direct, an old store, a repair).
         - the query itself failing: a degraded store, or a sqlite without JSON1.
 
         This is the FAIL-OPEN half of the pair, and it is the right half for `_revive`: the
-        cost of being wrong is one row un-blocking itself, which is where we started.
+        cost of being wrong is one row reopening itself, which is where we started.
         `done`'s repeat guard takes the other half — see `_reported_done_and_stayed_there`,
         which asks the same question and counts "cannot tell" as a repeat, because the cost
         of being wrong there is a parent that gets two reports for one piece of work.
 
-        KNOWN RESIDUAL HOLE, deliberately left. If a blocked agent's turn genuinely ends
-        and a LATER turn is started by something that is not a person answering — a
-        doorbell delivery from a child, a sibling's `sb tell` — the `turn_end` exists and
-        the block clears with nobody having answered. That is strictly narrower than the
-        behaviour this replaces (which cleared on any command at all, in the same turn), and
-        it is consistent with the docstring above: a turn that starts for any reason is the
-        agent working again. Closing it needs a signal that says WHO started the turn, and
-        nothing in the fleet has one. Left as is, on purpose.
         """
         try:
             anchor = self._last_report(name, kinds)
@@ -1120,7 +1086,7 @@ class Broker:
             return True
 
     def _last_report(self, name: str, kinds: tuple[str, ...]) -> Optional[int]:
-        """The id of this agent's most recent `blocked`/`done`/`failed` event, or None.
+        """The id of this agent's most recent `done`/`failed` event, or None.
 
         Indexed: `idx_events_agent` is `(agent, id)`, and these rows DO name their agent.
         """
@@ -1151,7 +1117,7 @@ class Broker:
         `done`'s repeat guard, and the FAIL-CLOSED twin of `_turn_passed_since`. Same
         question — is there a turn boundary after the report — and the opposite answer when
         the store cannot tell, because the two are protecting different things. `_revive`
-        guesses in favour of the agent, and the worst case is a row that un-blocks itself.
+        guesses in favour of the agent, and the worst case is a row that reopens itself.
         Here the worst case is a parent holding two reports for one piece of work, unable to
         tell which is the real one, with the board showing the second. So: no boundary
         recorded, no session that could have recorded one — still a repeat.
@@ -1924,7 +1890,7 @@ class Broker:
         raise ValueError(
             f"{target} is in another dispatcher's tree, which is invisible from "
             f"here — agents cannot reach across that boundary. Ask your own parent, or "
-            f"`sb block` for a person, who can."
+            f"`sb ask human` for a person, who can."
         )
 
     # -- setup -----------------------------------------------------------
@@ -2164,7 +2130,7 @@ class Broker:
         they already have, and naming a dead one there costs a line of text, while
         omitting a live one costs them the way back to it. That second cost is why the
         stamp and not the role decides: a rename of the top's role emptied this list
-        while two tops were running, one of them blocked and waiting on him.
+        while two tops were running, one of them waiting on an answer from him.
         """
         tops = [r["name"] for r in store.live_tops(self.db)]
         known = self._agent_states()
@@ -5194,7 +5160,7 @@ class Broker:
         })
         # A researcher spawned by the top dispatcher was spawned on the person's own
         # instruction and is read directly, so it is nudged to report in its own chat and
-        # `sb block` rather than write a notes file and `done` back up the tree. Placed AFTER
+        # `sb ask human` rather than write a notes file and `done` back up the tree. Placed AFTER
         # the role prompt on purpose: researcher.md unconditionally tells every researcher to
         # write that file and name its path, so the nudge has to be the LAST word and to say
         # out loud that it relaxes the rule just given, rather than contradicting it silently
@@ -6140,7 +6106,7 @@ class Broker:
           moment it landed. Measured in the incident this exists for: the proof hit
           disk at 00:16:32.619Z and the spawn gave up at 00:16:33.475Z, 0.9 s later,
           over an agent that was working.
-        - a row that says `done` or `blocked` was written BY THE AGENT, through `sb` — it
+        - a row that says `done` was written BY THE AGENT, through `sb` — it
           cannot have reported an end it never ran to. This is the case that mattered
           most: the row that was overwritten with `failed` had a `done` on it, one second
           old, with a summary of the work.
@@ -6156,7 +6122,7 @@ class Broker:
         if task and since is not None and self._task_arrived(name, cwd, task, since):
             return "the task is in its own transcript, it just landed late"
         a = store.get_agent(self.db, name)
-        if a is not None and a["state"] in ("done", "blocked"):
+        if a is not None and a["state"] in FINISHED:
             return f"it has since reported {a['state']} itself"
         # Asked of herdr directly and not through `_agent_states`, whose one-probe-per-
         # process cache may have been filled before this agent existed.
@@ -6281,7 +6247,7 @@ class Broker:
                 # which puts you in `sb status --needs-me` until they deal with you.
                 raise ValueError(
                     "the human has no mailbox — a message to them would never be read. "
-                    "Use `sb block \"<why>\"` if you need an answer, or `sb done "
+                    "Use `sb ask human \"<question>\"` if you need an answer, or `sb done "
                     "\"<summary>\"` to report what you did."
                 )
             # A name nothing knows is a typo, and it is refused HERE — the "whatever
@@ -6311,8 +6277,9 @@ class Broker:
                 needs_reply=needs_reply, no_reply=no_reply,
             )
             ids.append(mid)
-            # Only the human answers a block, so only the human's `tell` clears one.
-            # Anyone else's mail is held until they have (see `_ring`).
+            # The human's own mail is treated as an ANSWER by the doorbell: it is never
+            # held back to be coalesced with a burst (see `_ring`). It does NOT resolve an
+            # open Question — only `sb answer`/`sb resolve` do that.
             self._ring(t, f"{tag(me)} {self._say('notify.mail')}",
                        mode=mode, answer=(me == HUMAN))
         return ids
@@ -6342,7 +6309,7 @@ class Broker:
         case (`status.display_state`); this is the same reading, from the same function, so
         the two cannot say different things about one row.
 
-        Cheap in the common case: a row that is `working` or `blocked` and unended answers
+        Cheap in the common case: a row that is `working` and unended answers
         without asking herdr anything. Only a terminal row costs the probe, and
         `_agent_states` is cached per `sb` process.
 
@@ -6711,13 +6678,14 @@ class Broker:
         reads was only ever a second copy of this. What WAS lost is that nothing announced
         it: a record on a board is only seen by someone already looking at the board, and
         the top of a tree finishing is the one event in a run that ends the run. So a root
-        `done` notifies, the same way `block` does — see the `_surface` call below.
+        `done` notifies, the same way a human-targeted Question does — see the `_surface`
+        call below.
 
         **Finishing costs the agent nothing it needs to be reached by.** This used to
         report `idle` to herdr, which is not an annotation but a replacement: it evicts the
         name `agent start` registered, permanently, so `sb tell <name>` after a `done`
-        could never land again (`Herdr.report_state` carries the measurement; `block` had
-        the same call removed for the same reason). That made the ordinary next move after
+        could never land again (`Herdr.report_state` carries the measurement; the old
+        `block` had the same call removed for the same reason). That made the ordinary next move after
         a report — a follow-up question to the agent still holding the whole context —
         impossible, and the only remaining move was spawning a fresh agent and re-teaching
         it everything. Nothing needed the report: herdr's own detector reads the pane as
@@ -6926,7 +6894,7 @@ class Broker:
             # before this it was indistinguishable on the board from any other row: nothing
             # rang, nothing entered NEEDS YOU, and the only way to learn a run had finished
             # was to already be watching. Dismissing it loses nothing, the same way it
-            # loses nothing for `block`: the summary is durable in the event log and on the
+            # loses nothing for a Question: the summary is durable in the event log and on the
             # done row, and this only says "now".
             # WHERE THE GRANDPARENT IS THE HUMAN, this line IS the promote signal — there
             # is no mailbox to put one in, and a person who is told only "done" would not
@@ -7061,8 +7029,7 @@ class Broker:
                               commit=commit)
         store.set_state(self.db, me, "done", commit=commit)
         # NOTHING is reported to herdr here, and that silence is what keeps a finished
-        # agent addressable — see the docstring, and `block` for the same call and the
-        # same reason.
+        # agent addressable — see the docstring for the measurement.
         store.log_event(self.db, kind="done", agent=me, summary=summary[:EVENT_CLIP],
                         # The displayed summary remains clipped, but guidance needs a
                         # durable count for multiline and parentless reports. This is
@@ -7117,10 +7084,10 @@ class Broker:
         so the CLI can print its confirmation while it still has a pane to print into; see
         `close_own_pane`.
 
-        **Works whatever the state** — working, blocked, idle, or already done. It lifts no
+        **Works whatever the state** — working, idle, or already done. It lifts no
         gate about a stranger, because there is no stranger: the caller IS the agent, and
         asking to end yourself is the confirmation, the way naming an agent is for
-        `cleanup --force`. This is the whole of "close it, whether it is blocked or not".
+        `cleanup --force`. This is the whole of "close it, whatever it is doing".
 
         **Summary optional, and it alone decides whether the parent hears** (Andrew's call,
         2026-09-08):
@@ -7209,7 +7176,7 @@ class Broker:
                 else:
                     # A root self-closing with a summary is the end of its run, and the human
                     # has no mailbox — the notification IS the delivery, as it is for a root
-                    # `done` and for `block`. The summary is durable in the log regardless.
+                    # `done` and for a Question. The summary is durable in the log regardless.
                     self._surface(me, f"done — {summary}")
 
         # THE TEARDOWN, every write of it before the pane goes. Mirrors `cleanup`'s
@@ -7260,84 +7227,197 @@ class Broker:
                             if e.code == "pane_not_found" else "self_close_failed",
                             agent=me, error=str(e))
 
-    def block(self, why: str, *, me: Optional[str] = None) -> None:
-        """Stop and surface to the human — never to the parent.
+    # -- questions --------------------------------------------------------
 
-        Routing blocks around the parent is what keeps parent context from growing with
-        every problem (C14, C4).
+    def ask(self, target: str, body: str, *, me: Optional[str] = None) -> dict:
+        """Record a durable Question and return. -> `{"id", "asker", "target"}`.
 
-        This is the ONE way an agent reaches a person — there is no second spelling of it
-        and never was one worth keeping. There is no human mailbox to leave the reason in,
-        and it does not
-        need one: the block is durable in the agent's own state and in the event log, and
-        both readouts are driven from there — `sb status --needs-me` lists this agent with
-        `why` for as long as it stays blocked. A dismissed desktop notification therefore
-        loses nothing, which was the only reason a mailbox row was ever written here.
+        THE VERB THAT REPLACED `sb block`. The fault of block was never the stopping —
+        that part was right and every prompt still says it — it was that "waiting on a
+        person" lived in the agent's `state` column, so there could be exactly one of them
+        per agent, it could not say who was being asked, and answering it was a state
+        change rather than a thing with a record. A Question is durable, has an id, names
+        both ends, and is what `waiting on human` is now DERIVED from
+        (`status._derived_row`) rather than declared by.
 
-        Two things answer it, and both clear the row. `sb tell <agent> "..."` from the
-        human rings the doorbell and unblocks it (`_unblock_if_needed`); typing the answer
-        straight into the agent's pane restarts the agent itself, and its next `sb` command
-        is what clears the block (`_revive`). The second is the one people actually do, and
-        it used to leave the row blocked forever with the question already answered.
+        `target` is `human`, `parent`, or an agent name. `parent` is resolved here, at the
+        moment it is typed, and the RESOLVED name is what is stored: moving this agent
+        under a new parent later must not silently repoint an open question at somebody who
+        never saw it.
 
-        **REFUSED WHILE A DESCENDANT IS ALREADY BLOCKED.** Only one agent ever waits on a
-        person for one question, and until now nothing enforced it: a dispatcher relayed a
-        child's question and blocked on top of the child's own row, so one decision sat on
-        the board twice and answering the parent left the child still waiting (bug
-        2026-08-16-152345). The protocol has said the rule since the beginning and a live
-        dispatcher walked past it, which is what makes this a gate rather than more wording.
+        WHAT HAPPENS NEXT DEPENDS ON THE TARGET, and only on that.
 
-        The gate is a READ at the moment of the call, not a notification: "a parent is not
-        told that its child blocked" still holds — nothing rings the parent when a child
-        blocks, and a parent that never blocks never hears about it. It only learns of the
-        row when it tries to make a second one.
+        - **human** — there is no human mailbox, so nothing is sent. The question surfaces
+          exactly where a block did: the desktop notification below, `sb status
+          --needs-me`, and the board's NEEDS YOU column, all of them driven off the open
+          row (`store.open_questions_by_asker`). The asker then ends its turn, and
+          nothing forces it to: the Stop gate is gone, and an agent that keeps working
+          with a question open is simply working with a question open.
+        - **an agent** — messaging stays point-to-point (#325: "no shared Task chat by
+          default"), so the question is delivered as an ordinary message with `needs_reply`
+          set, and the durable row is what makes it visible on both rows afterwards. The
+          message body carries the question's id because the answer verb needs one and the
+          recipient has nowhere else to read it; that is the one place a delivered body is
+          not verbatim what the sender typed.
 
-        No `--force`, deliberately. The refusal is not permanent and does not need an escape
-        hatch: the child's row clears the moment the person answers it, and the parent may
-        block then. What it costs is a parent with a genuinely unrelated question, and the
-        answer for that one is the protocol's — report `sb done` naming who is waiting and
-        what for, which is the shape the human wanted in the first place. A flag here would
-        be the flag every double-block reaches for.
+        There is no refusal here for a second open question and no single-waiter gate. That
+        gate belonged to a one-per-agent state column; a question has an id, so two of them
+        are two rows a person can answer separately, which is what the column could never
+        represent.
         """
         me = me or self.whoami()
         if me == HUMAN:
-            raise ValueError("`sb block` is for agents")
-        waiting = self.blocked_descendants(me)
-        if waiting:
-            # Logged as well as refused: a double-block attempt is the shape this gate
-            # exists for, and one that is only ever a stderr line in a pane nobody reads is
-            # a shape nobody can count afterwards.
-            store.log_event(self.db, kind="block_refused_descendant_waiting", agent=me,
-                            waiting=",".join(waiting), why=why[:EVENT_CLIP])
-            raise ValueError(self._someone_below_is_waiting(waiting))
-        store.set_state(self.db, me, "blocked")
-        # NOTHING is reported to herdr here, and that silence is the whole of what makes a
-        # block answerable (see `_binding_lost` for what it costs when it is not).
-        #
-        # `pane report-agent` does not annotate a pane's agent, it REPLACES it. The named
-        # agent `agent start` registered is evicted and a source-reported record put in its
-        # place, and a reported record is not a target: `agent get`/`agent prompt <name>`
-        # answer agent_not_found, and a pane-targeted prompt answers agent_not_ready
-        # ("<pane> is not an active named agent"). It is one-way — `pane release-agent`
-        # deletes the record rather than handing detection back (the pane then drops out of
-        # `agent list` entirely), and `agent start` on the still-live pane refuses
-        # agent_pane_busy. So the doorbell can never ring that agent again, on the one verb
-        # whose entire purpose is "stop and get a human".
-        #
-        # This used to push `idle`, on the reading that herdr's `blocked` badge is what
-        # costs the binding. That reading was half right and the wrong half was load-
-        # bearing: `blocked` does cost it, and so does `idle`, and so does every other
-        # value. The state is not what evicts the name — making the call is. Measured on
-        # herdr 0.8.0 against a throwaway pane: `agent start` → bound; `pane
-        # report-agent-session` → still bound; one `pane report-agent --state idle` →
-        # agent_not_found, and nothing brings it back.
-        #
-        # Nothing is lost by staying quiet. Blocked-ness has always lived in our store
-        # (`_is_blocked`), which is what `sb status --needs-me` and the board read (C5), and
-        # herdr's own detector reads a waiting agent as idle unprompted — the very value we
-        # were paying the binding to tell it. The notification below is what reaches you.
-        self._surface(me, why)
-        store.log_event(self.db, kind="blocked", agent=me, why=why[:EVENT_CLIP], text=why)
+            # A person asks an agent by telling it — they have no row to be woken on and
+            # no mailbox for the answer to come back to, so a Question from them would be
+            # a record nothing could ever close.
+            raise ValueError("`sb ask` is for agents — to ask an agent something, "
+                             "`sb tell <agent> \"...\" --needs-reply`")
+        who = self._resolve(target, me)
+        if who != HUMAN:
+            if store.get_agent(self.db, who) is None:
+                raise KeyError(f"no such agent: {who}")
+            # The tree boundary, exactly as `tell` applies it and before anything is
+            # written: a question is a message plus a row, and neither may cross it.
+            self.require_same_tree(me, who)
+        qid = store.create_question(self.db, asker=me, target=who, body=body,
+                                    target_literal=target)
+        store.log_event(self.db, kind="question_asked", agent=me, question=qid,
+                        target=who, why=body[:EVENT_CLIP], text=body)
+        if who == HUMAN:
+            # The same surfacing `block` used, and nothing else: a dismissed notification
+            # loses nothing, because the open row is what both readouts are driven from.
+            self._surface(me, body)
+        else:
+            store.put_message(self.db, from_agent=me, to_agent=who, kind="tell",
+                              body=self._question_line(qid, body), needs_reply=True)
+            self._ring(who, f"{tag(me)} {self._say('notify.mail')}", mode=NORMAL)
+        return {"id": qid, "asker": me, "target": who}
+
+    def _question_line(self, qid: int, body: str) -> str:
+        """The question as the TARGET AGENT reads it — one line, with the id on it.
+
+        The id is here and not left to a readout because the verb that answers takes one
+        (`sb answer <id>`), and a recipient handed only the text would have to go looking
+        for the row that carries it. One line, because a delivered body may travel inline
+        in a herdr prompt, which refuses newlines.
+        """
+        return f'{body}  [question {qid} — answer with: sb answer {qid} "<text>"]'
+
+    def answer(self, qid: int, text: str, *, me: Optional[str] = None) -> dict:
+        """Answer an open Question: record it, resolve it, and wake the asker.
+
+        Both halves matter and both used to be one thing. `block` was answered by a `sb
+        tell` from the human, which meant an ordinary message could clear it by accident
+        and nothing anywhere recorded WHAT the answer had been. Here the text is stored on
+        the row and delivered as a message, and a bare `sb tell` resolves nothing at all.
+
+        The wake is the same doorbell path an answer to a block took: `answer=True` on the
+        ring, which is what keeps it out of the coalescing holdback — the asker is stopped
+        waiting for exactly this, and holding it back to bundle it with a burst of
+        somebody else's mail is the one case that must never happen.
+
+        An asker whose row has gone still resolves the question; there is simply nobody to
+        deliver to. That is the "if its asker is gone, it's dropped" rule arriving from the
+        other end.
+        """
+        me = me or self.whoami()
+        q = self._open_question(qid)
+        if me != HUMAN and me != q["target"]:
+            raise ValueError(
+                f"question {qid} was asked of {q['target']}, not you — "
+                f"`sb escalate {qid}` re-asks the human, and `sb tell` says something "
+                f"without resolving anything")
+        store.end_question(self.db, qid, state=store.Q_RESOLVED, answer=text, by=me)
+        store.log_event(self.db, kind="question_answered", agent=q["asker"], question=qid,
+                        by=me, text=text)
+        self._deliver_answer(q, text, by=me)
+        return {"id": qid, "asker": q["asker"], "answered_by": me}
+
+    def resolve_question(self, qid: int, *, me: Optional[str] = None) -> dict:
+        """Close an open Question with no answer text, and wake the asker.
+
+        For the answer that happened somewhere else — a person typed it into the agent's
+        pane, the decision was taken in a meeting, the thing the asker wanted to know
+        stopped mattering. The row records who ended it and when; `answer` stays NULL,
+        which is a real outcome and not a gap.
+        """
+        me = me or self.whoami()
+        q = self._open_question(qid)
+        if me not in (HUMAN, q["target"], q["asker"]):
+            raise ValueError(f"question {qid} is between {q['asker']} and {q['target']}")
+        store.end_question(self.db, qid, state=store.Q_RESOLVED, by=me)
+        store.log_event(self.db, kind="question_resolved", agent=q["asker"], question=qid,
+                        by=me)
+        if me != q["asker"]:
+            self._deliver_answer(q, None, by=me)
+        return {"id": qid, "asker": q["asker"], "resolved_by": me}
+
+    def withdraw(self, qid: int, *, me: Optional[str] = None) -> dict:
+        """The ASKER retracts its own still-open question. Nobody is woken.
+
+        Its own verb rather than a flag on `resolve`, because it records a different fact:
+        `resolved` says somebody dealt with it and `withdrawn` says it was never dealt
+        with, and a readout that could not tell those apart would be counting answers
+        nobody gave.
+        """
+        me = me or self.whoami()
+        q = self._open_question(qid)
+        if me not in (HUMAN, q["asker"]):
+            raise ValueError(f"question {qid} is {q['asker']}'s to withdraw")
+        store.end_question(self.db, qid, state=store.Q_WITHDRAWN, by=me)
+        store.log_event(self.db, kind="question_withdrawn", agent=q["asker"],
+                        question=qid, by=me)
+        return {"id": qid, "asker": q["asker"], "withdrawn_by": me}
+
+    def escalate(self, qid: int, *, me: Optional[str] = None) -> dict:
+        """Re-ask the human. The whole of escalation (#325), and deliberately the minimum.
+
+        The row keeps its id, its asker and its text and its target becomes the human, so
+        the question a person answers is the question that was asked. Nothing is re-asked
+        of the original target and nothing is chained: escalation-as-retargeting is out of
+        scope in as many words, and this is what is left when it is taken out.
+        """
+        me = me or self.whoami()
+        q = self._open_question(qid)
+        if me not in (HUMAN, q["asker"], q["target"]):
+            raise ValueError(f"question {qid} is between {q['asker']} and {q['target']}")
+        if q["target"] == HUMAN:
+            raise ValueError(f"question {qid} is already the human's")
+        store.escalate_question(self.db, qid)
+        store.log_event(self.db, kind="question_escalated", agent=q["asker"],
+                        question=qid, by=me, was=q["target"], why=q["body"][:EVENT_CLIP])
+        self._surface(q["asker"], q["body"])
+        return {"id": qid, "asker": q["asker"], "target": HUMAN}
+
+    def _asking_human(self, who: str) -> bool:
+        """Does this agent have a question open to a PERSON? The readouts' own predicate.
+
+        Read from the Question rows rather than from any state, because there is no state
+        to read: asking does not stop an agent and does not mark its row (#325).
+        `status.AgentStatus.blocked` is the same fact computed over the whole fleet at
+        once, and the two must not come apart — this one exists for the single-row callers
+        (`cleanup`) that have no snapshot in hand.
+        """
+        return bool(store.open_questions(self.db, asker=who, target=HUMAN))
+
+    def _open_question(self, qid: int):
+        """The open Question with this id, or a refusal naming what is wrong with it."""
+        q = store.get_question(self.db, qid)
+        if q is None:
+            raise KeyError(f"no such question: {qid}")
+        if q["state"] != store.Q_OPEN:
+            raise ValueError(f"question {qid} is already {q['state']}")
+        return q
+
+    def _deliver_answer(self, q, text: Optional[str], *, by: str) -> None:
+        """Put the answer in the asker's mailbox and ring for it. Never raises on a gone row."""
+        asker = q["asker"]
+        if store.get_agent(self.db, asker) is None:
+            return
+        body = (text if text
+                else f"question {q['id']} resolved with no answer text: {q['body']}")
+        store.put_message(self.db, from_agent=by, to_agent=asker, kind="tell", body=body)
+        self._ring(asker, f"{tag(by)} {self._say('notify.mail')}", mode=NORMAL, answer=True)
 
     # `sb status` is deliberately NOT here. It is a join of the store against herdr — what
     # an agent was told to be, against what its pane is doing — and belongs to neither, so
@@ -7645,18 +7725,23 @@ class Broker:
                     # was the only way out. `given_up_on` is the exemption; the wording is
                     # the rest of it.
                     #
-                    # Blocked is the one state in here a sweep must still say out loud.
-                    # An agent that is working will finish on its own and the next sweep
-                    # takes it; an agent that is BLOCKED is stopped, waiting on a person,
-                    # and the person most likely to see that line is the one who just ran
-                    # `sb cleanup` and is about to walk away believing the fleet is idle.
+                    # An agent with an open question for a PERSON is the one row in here a
+                    # sweep must still say out loud. An agent that is merely working will
+                    # finish on its own and the next sweep takes it; one that is waiting on
+                    # an answer is waiting on the person most likely to be the one who just
+                    # ran `sb cleanup` and is about to walk away believing the fleet is
+                    # idle. It used to be the `blocked` state that carried this; the state
+                    # is gone (#325) and the fact it stood for is read off the Question.
                     #
                     # `--force` is named only where it would be taken: it is illegal on a
                     # sweep (see above), so promising it to a sweep would be pointing at a
                     # command that answers with a refusal of its own.
-                    refuse(a, f"{a['state']}, not finished — it has not reported an end"
+                    asking = self._asking_human(a["name"])
+                    refuse(a, ("waiting on an answer from a person, not finished — it has "
+                               "not reported an end" if asking else
+                               f"{a['state']}, not finished — it has not reported an end")
                               + (". --force closes it anyway" if names else ""),
-                           expected=a["state"] != "blocked")
+                           expected=not asking)
                     continue
                 if a["state"] == GONE_STATE and not self._end_still_holds(a["name"]):
                     refuse(a, f"recorded {GONE_STATE}, but herdr still has its pane — "
@@ -8364,52 +8449,6 @@ class Broker:
         """
         return [a["name"] for a in self._descendants(name)
                 if a["state"] in store.LIVE_STATES and not a["ended_at"]]
-
-    def blocked_descendants(self, name: str) -> list[str]:
-        """Descendants that are already waiting on a person. The one-row rule's predicate.
-
-        Sibling of `live_descendants`, and the same store-only reading for the same reason:
-        `block` reports nothing to herdr at all, so our own row is the only place a blocked
-        agent differs from an idle one (`_is_blocked`).
-
-        A blocked agent is live by `live_descendants`' own test, so `ended_at` is checked
-        here too — an archived row that never cleared its block is not somebody the person
-        is still being asked by, and refusing a parent on account of it would be a gate
-        nothing could open.
-        """
-        return [a["name"] for a in self._descendants(name)
-                if a["state"] == "blocked" and not a["ended_at"]]
-
-    def _someone_below_is_waiting(self, waiting: Sequence[str]) -> str:
-        """The refusal text for a second block on one question — says whose row it is.
-
-        Names the agent and quotes its `why`, because the caller's next move depends on
-        whether that row is its own question already asked. One line per waiting agent,
-        then what to do instead: this is read by an agent that was about to reach a person
-        and now cannot, and a refusal with no route is how an agent starts inventing one.
-        """
-        rows = []
-        for who in waiting:
-            # The `why` lives in the event log and nowhere else — there is no column for it
-            # (`status._block_reasons` reads the same place for the board). Latest by `id`,
-            # not by timestamp: whole-second stamps make two blocks in one second a coin
-            # toss. A missing reason is not an error, only a barer line.
-            why = ""
-            row = self.db.execute(
-                "SELECT payload FROM events WHERE kind='blocked' AND agent=? "
-                "ORDER BY id DESC LIMIT 1", (who,)).fetchone()
-            if row:
-                try:
-                    why = (json.loads(row["payload"] or "{}") or {}).get("why") or ""
-                except json.JSONDecodeError:
-                    why = ""
-            rows.append(f"  {who}" + (f" — {why}" if why else ""))
-        return ("refused: somebody below you is already waiting on a person:\n"
-                + "\n".join(rows)
-                + "\nOnly one agent ever waits on a person for one question, so that row "
-                  "is theirs and not yours. Report `sb done` instead, saying who is "
-                  "waiting and what for. If your question is a different one, block once "
-                  "their row clears.")
 
     def pane_holding_descendants(self, name: str) -> list[str]:
         """Descendants that still hold a pane — why a closed row is still on the board.
@@ -9467,12 +9506,10 @@ class Broker:
                 continue
             if self._busy(who):
                 continue
-            # A blocked agent is not idle. Its mail waits, exactly as a busy agent's does,
-            # unless the human's answer is among it — that one both clears the block and
-            # is the news worth announcing.
+            # The human's own mail is an ANSWER: it is never held back behind a burst,
+            # because the agent it is going to is most likely stopped waiting for exactly
+            # it. Everything else takes the ordinary holdback below.
             answer = any(m["from_agent"] == HUMAN for m in mine)
-            if not answer and self._is_blocked(who):
-                continue
             if not answer and self._burst_still_arriving(who, mine):
                 continue
             # One doorbell for the whole backlog, so it names every sender waiting in it —
@@ -9667,8 +9704,6 @@ class Broker:
 
     def _fallback_inline(self, who: str, ring: dict, *, reason: str) -> bool:
         """Replace an unproved inline payload with a repairable inbox doorbell."""
-        if self._is_blocked(who):
-            return False
         rows = [store.get_message(self.db, mid) for mid in ring["inline_ids"]]
         senders = ", ".join(dict.fromkeys(
             row["from_agent"] for row in rows if row is not None)) or "switchboard"
@@ -10066,11 +10101,6 @@ class Broker:
                 raise Undeliverable(who, HerdrError(
                     "agent_finished", "it reported done and holds no live pane"))
             return False
-        if not force and not answer and self._is_blocked(who):
-            # Not idle — waiting on a person. Announcing anything else would cancel the
-            # block (see `_unblock_if_needed`) and bury the answer it is waiting for.
-            store.log_event(self.db, kind="ring_held", agent=who, reason="blocked")
-            return False
         if hold and not answer:
             # The explicit coalescing holdback. Ordinary NORMAL mail is never held merely
             # because the recipient is mid-turn; `agent prompt` queues it at the boundary.
@@ -10090,8 +10120,6 @@ class Broker:
             # an explicit holdback — and `block` never rings at all.
             store.log_event(self.db, kind=RING_HELD_BACK, agent=who)
             return False
-        if answer:
-            self._unblock_if_needed(who)
         inline_ids: list[int] = []
         if mode != INTERRUPT:
             inline, inline_ids = self._inline_mail(who, pending)
@@ -10181,9 +10209,9 @@ class Broker:
         Nothing can ring it again, so its mail queues forever.
 
         The cause is ours and is now known: a `pane report-agent` on the pane evicts the
-        named agent (`Herdr.report_state` measures it). `block` and `_unblock_if_needed`
-        used to make that call, which is what made blocking a one-way door; they no longer
-        report anything. `Broker.done` still does, so this remains reachable — for an agent
+        named agent (`Herdr.report_state` measures it). The old `sb block` and its unblock
+        used to make that call, which is what made blocking a one-way door; both are gone
+        along with the verb. `Broker.done` still does, so this remains reachable — for an agent
         that has just said it is finished, which is the case `_finished_and_unreachable`
         already covers.
 
@@ -10254,41 +10282,6 @@ class Broker:
             return None                            # a later ring got through after all
         return failed[1].get("error") or "herdr no longer answers to its name"
 
-    def _is_blocked(self, who: str) -> bool:
-        """Is this agent stopped waiting on a person, per our own store?
-
-        Our store and not herdr, because `block` reports nothing to herdr at all (see
-        there — a report would cost the agent its name), so herdr cannot tell a blocked
-        agent from an idle one and this is the only place the difference is recorded.
-        """
-        a = store.get_agent(self.db, who)
-        return bool(a and a["state"] == "blocked")
-
-    def _unblock_if_needed(self, who: str) -> None:
-        """Clear a block, because the human has answered it. Only that.
-
-        Called from `_ring` for an `answer=True` ring and nowhere else. It used to run
-        before EVERY delivery, which is what let a sibling's ordinary mail cancel a block.
-
-        Store-only, and deliberately: this runs one line before the doorbell, on an agent
-        whose name MUST still bind. It used to push herdr `working` here, on the reading
-        that a report re-registers the name — it does the opposite, and this was the second
-        of the two calls that made blocking a one-way door. Any `pane report-agent` evicts
-        the pane's named agent for good; see `block` for the measurement. Pushed here it
-        evicted the name in the same breath as the ring that needed it, so the human's
-        answer failed with `agent_not_found` on the line below while the block cleared
-        anyway — the block row went away and the answer never arrived.
-
-        Nothing needs the report. herdr's detector marks the pane working of its own accord
-        the moment the prompt lands, and our store is where "no longer blocked" is read
-        from (`_is_blocked`, `sb status --needs-me`).
-        """
-        a = store.get_agent(self.db, who)
-        if not a or a["state"] != "blocked" or not a["pane_id"]:
-            return
-        store.set_state(self.db, who, "working")
-        store.log_event(self.db, kind="unblocked", agent=who, reason="told_by_human")
-
     def _surface(self, who: str, text: str) -> None:
         try:
             self.h.notify(f"{who}: {text[:NOTIFY_CLIP]}")
@@ -10333,8 +10326,8 @@ class Broker:
     # annotating it and so evicts the name for good (`Herdr.report_state` carries the
     # measurement). Each one was removed as the bug it caused was found, `done` last, and
     # nothing was lost with any of them: herdr's own detector reads idle and working off
-    # the pane unprompted, and the two states it has no word for — blocked, done — have
-    # always lived in our store, which is what the board and `sb status` read.
-    # Anything reaching for a state write again should read `block`, `_unblock_if_needed`
-    # and `done` first: the eviction is silent, permanent, and only visible later as mail
-    # that can never be delivered.
+    # the pane unprompted, and the states it has no word for — `done`, and now an open
+    # Question — have always lived in our store, which is what the board and `sb status`
+    # read. Anything reaching for a state write again should read `done` first: the
+    # eviction is silent, permanent, and only visible later as mail that can never be
+    # delivered.

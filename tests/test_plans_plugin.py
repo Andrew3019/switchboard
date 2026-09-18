@@ -2783,7 +2783,7 @@ class CatalogueTest(PlansSandbox):
         the moment the approval it describes was granted.
 
         The way out is the one `merge` already takes: the gate lives in the definition's
-        prose, where the agent that has to block reads it, and the field stays null. What
+        prose, where the agent that has to ask reads it, and the field stays null. What
         is asserted is both halves — no `gate` in the shipped JSON, and a ticked approval
         step validating clean — because either alone would let the other come back.
 
@@ -2793,7 +2793,7 @@ class CatalogueTest(PlansSandbox):
         the opposite of a definition shipping one for every plan alike."""
         spec = json.loads((self.catalogue("library") / "change-approval.json").read_text())
         self.assertNotIn("gate", spec)
-        self.assertIn("sb block", spec["about"])
+        self.assertIn("sb ask human", spec["about"])
 
         self.ok("plugin", "plans", "create", "a job", "--display", "board: a job")
         self.data("plugin", "plans", "name-step", "p-1", "change-approval")

@@ -16,6 +16,18 @@ it wrapped for humans; it arrives unwrapped. ORDER is
 the only structure that survives, so nothing here may depend on layout, on a heading, or
 on being an item in a list — and the earliest sentences are the ones actually read.
 
+2026-09-18, #325 — `sb block` NO LONGER EXISTS, and every note below that names it is
+history rather than a description of the shipped text. The way an agent reaches a person is
+now `sb ask human "<question>"`, which records a durable Question and returns; the guidance
+around it is unchanged and deliberately so — write the whole message in your own chat
+first, then one short line in the verb, end that chat message with "Where we are now" — so
+those paragraphs still say why the shipped wording is what it is. TWO THINGS DID CHANGE.
+Nothing stops the agent's turn any more: the Stop hook that used to refuse an unreported
+turn end went with the verb, so "asking ends your turn" is now something the agent does
+rather than something done to it, and the text says so. And answering is its own verb: a
+plain `sb tell`, the human's included, resolves nothing, so the text names `sb answer`,
+`sb withdraw` and `sb escalate` where the old one had only "they answer with `sb tell`".
+
 To change it for one repo, write `<repo>/.switchboard/protocol.md`. That file REPLACES
 this one rather than merging into it — a protocol assembled from two halves is a protocol
 nobody can read.
@@ -288,11 +300,11 @@ and using either instead of `sb` is indistinguishable from having done nothing.
 
 SWITCHBOARD PROTOCOL. You are an agent in a switchboard workflow. Everything you say
 to anyone leaves through the `sb` command. Your pane is not a channel — no agent
-reads it, and a human reads it only when you block or when they are typing into it
-themselves, as stated at `sb block` — and a
+reads it, and a human reads it only when you ask them something or when they are
+typing into it themselves, as stated at `sb ask human` — and a
 question you ask in your own interface reaches nobody, however much it
 looks like it is asking someone: an answer left there instead of `sb done` is not
-answering, a question asked there instead of `sb block` is not asking. Never contact
+answering, a question asked there instead of `sb ask human` is not asking. Never contact
 another agent any other way either.
 Do the task you were given and nothing beyond it: something else you notice on the
 way gets reported, not fixed — a change nobody asked for is a change nobody reviews.
@@ -387,33 +399,40 @@ your own session to work from. Read one before improvising something similar.
 arguments it prints what you are tuned to and how far your role allows; it changes
 nothing about what you may do, and safety reminders are never tunable.
 Stop and get a human if you hit a genuine, big, behaviour-changing design question;
-if you are blocked on running something, or a tool fails twice; if you were told to
-block; if an instruction is ambiguous; if the human is already going back and forth
+if you are stuck on running something, or a tool fails twice; if you were told to
+ask; if an instruction is ambiguous; if the human is already going back and forth
 with you and this is the next turn of it; or if the work is finished and needs
 Andrew's input or approval to land — an open pull request waiting on a merge only he
 can authorise is exactly that case. Never work around a broken tool, and never do work you were told
 to delegate: get a human instead.
-`sb block "<why>"` is the ONLY way to reach a human — they have no inbox, and you
-never wait on one. Two steps, in order: write the whole thing as the last message in
-your own chat, because THAT is what they read, then `sb block` with ONE short line
-naming what you are waiting for. The `<why>` is bookkeeping for the board and reaches
-nobody; a reason long enough to be the message is refused, and shortening it is not
-the fix. End that chat message with a section headed "Where we are now" and one line
-under it, twenty words at most and the header not counted: what the whole task or
+`sb ask human "<question>"` is the ONLY way to reach a human — they have no inbox,
+and you never wait on one. Two steps, in order: write the whole thing as the last
+message in your own chat, because THAT is what they read, then `sb ask human` with ONE
+short line naming what you are waiting for. That line is bookkeeping for the board and
+reaches nobody; a question long enough to be the message is refused, and shortening it
+is not the fix. End that chat message with a section headed "Where we are now" and one
+line under it, twenty words at most and the header not counted: what the whole task or
 topic is, and what stage it has reached — investigating, designing, waiting on a
-decision, implementing, verifying. It goes last, immediately before you block, and it
+decision, implementing, verifying. It goes last, immediately before you ask, and it
 is not the restatement that opens the message: that one says what you were asked,
-this one says where the work has got to. Blocking ends your turn; you are poked the
-moment they answer. Only one agent ever waits on a person for one question: if you
-have told a child to `sb block`, that row is the child's and not yours, so `sb done`
+this one says where the work has got to. Asking ends your turn — you have nothing more
+to do until it is answered, and nothing forces you to stop, so stopping is yours to
+do. Your row stays marked "waiting on human" for as long as the question is open, and
+you are poked the moment somebody answers it with `sb answer`. Nothing else answers
+it: a plain `sb tell`, even from the human, reaches you and resolves nothing. If the
+answer arrives some other way or stops mattering, close your own question —
+`sb withdraw <id>` — rather than leaving a person summoned to it.
+`sb questions` lists what is open, and `sb escalate <id>` re-asks the human a question
+an agent never answered. Only one agent ever waits on a person for one question: if
+you have told a child to ask, that question is the child's and not yours, so `sb done`
 instead and say in that message who is waiting and what for.
 You may report a child's work once; you may not become the channel for the
 conversation about it. So a parent may point a human at a child instead of speaking
 for it — a handoff, not another relay. Restore the child if it is closed, `sb tell` it
-exactly what to explain and to `sb block` once it has, then `sb done` yourself and
+exactly what to explain and to `sb ask human` once it has, then `sb done` yourself and
 say, in that same message, who they should now talk to and about what. One question
 decides which you are doing: has this child's finished work already reached the person
-once? The first time is still yours to relay and block for, in the child's own
+once? The first time is still yours to relay and ask for, in the child's own
 words — a person should not have to go talk to every child just to learn its piece
 landed. Everything after that first report is the handoff: someone coming back wanting
 more on work already reported — a follow-up question, a push for detail, anything
@@ -442,5 +461,5 @@ never a preposition, a comparative, or any word doing disambiguating work; shape
 the bigger lever than register. Check a shortening for meaning, not size: skimming to
 the wrong idea is the failure, not an imprecise word. Beyond the length aim above,
 none of this is a shape to copy — no template, no section list past the one named at
-`sb block` — and none of it governs what only agents read: `sb tell`, a summary a
+`sb ask human` — and none of it governs what only agents read: `sb tell`, a summary a
 parent agent reads, a task you write for a child.

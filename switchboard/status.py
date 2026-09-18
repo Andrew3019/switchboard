@@ -46,10 +46,9 @@ Two other joins fall out of the same table:
     store: unended        herdr: not listed  →  GONE     (pane closed under it)
     store: anything       herdr: blocked     →  a human is being asked something in the TUI
 
-`unended` there is `working` OR `blocked` — `REAPABLE`, and pointedly not `RUNNING`. A
-blocked agent is not idle and must never be contradicted for looking idle, but a blocked
-agent whose pane has gone is as dead as any other, and its pane is the only thing that
-tells the two apart.
+`unended` there is `REAPABLE` — every state that never reported an end — and pointedly not
+`RUNNING`. An agent whose pane has gone is as dead as any other whatever it was doing, and
+its pane is the only thing that tells waiting from dead.
 
 Everything is computed from ONE `agent list` and one pass over the store. Per-agent herdr
 calls are what make a status command too slow to run reflexively, and a status command you
@@ -60,7 +59,7 @@ A third disagreement, in the mailbox rather than the pane:
     never announced AND never read            →  UNDELIVERED
 
 A doorbell can be held back rather than rung: `sb tell --when-idle` waits for the target's
-turn to end, and any message at all waits while the target is blocked. `broker.flush_pending`
+turn to end. `broker.flush_pending`
 rings those once the wait is over, and that introduces a way for mail to sit forever: if the
 flush never runs, nothing is on the agent's screen and nothing is in its inbox count.
 (The default mode rings straight away — `agent prompt` queues rather than interleaving, so
@@ -131,28 +130,28 @@ TURN_IDLE = config.setting("states.turn_idle")
 RUNNING = tuple(config.setting("states.running"))
 FINISHED = tuple(config.setting("states.finished"))
 
-# Store states that have never reported an end, and so can be found DEAD — `working` plus
-# `blocked`. Deliberately a second list rather than a widening of `RUNNING`, because the two
-# answer different questions about the same row and only one of them may include `blocked`:
+# Store states that have never reported an end, and so can be found DEAD. Deliberately a
+# second list rather than a widening of `RUNNING`, because the two answer different
+# questions about the same row:
 #
 #     RUNNING   "is this row claiming to be busy?"  → contradicted by an idle pane.
 #     REAPABLE  "could this row still be alive?"    → contradicted by NO pane.
 #
-# A blocked agent is legitimately not working. It stopped to ask a person and stays stopped
-# until answered, so everything `RUNNING` gates — `stalled`, `display_state`,
-# `turn_doubted` — must keep leaving it alone; putting `blocked` in that list would put
-# every blocked agent in the fleet on the board as a silent finish.
-# What `REAPABLE` gates is only `gone`, which needs `alive is False`: herdr answered and does
-# not have the pane. A blocked agent that is merely waiting is in that list like any other,
-# so it is untouched by this; one whose pane died is not, and before this it was the one
-# shape nothing in the fleet could ever notice — never reaped, never `failed`, its parent
-# never told, BLOCKED on the board forever.
+# What `REAPABLE` gates is only `gone`, which needs `alive is False`: herdr answered and
+# does not have the pane.
+#
+# IT IS WIDER THAN `RUNNING` BY ONE LEGACY WORD. `blocked` was the state `sb block` wrote,
+# and that verb is gone (#325) — waiting on a person is an open Question now and the agent
+# stays `working` the whole time. The word is kept in the list because live stores still
+# hold rows carrying it, and a row nothing can reap is the shape this list exists to catch:
+# never reaped, never `failed`, its parent never told, on the board forever.
 REAPABLE = tuple(config.setting("states.reapable"))
 
 # What a row becomes when herdr no longer has the agent (see `_record_gone`).
 #
 # `failed` rather than a new `lost` state, and the choice is deliberate. The store's state
-# column is a four-word closed vocabulary — working | blocked | done | failed — that `sb
+# column is a small closed vocabulary — working | done | failed, plus the legacy `blocked`
+# — that `sb
 # wait --for` accepts verbatim, that `[states]` groups into policy, and that every readout
 # renders; a fifth word costs all of those, and buys a distinction the state column is the
 # wrong place for. `failed` already means exactly what happened: the agent's turn ended
@@ -385,8 +384,7 @@ ATTENTION_TIMEOUT = config.setting("timeouts.attention_timeout")
 # idle always beats `stalled`".
 #
 # DERIVED AND NOT STORED, like every other reading on this row. The store's `state` column is
-# still the four-word self-report it always was (`working | blocked | done | failed`) and
-# nothing here rewrites it; this is what Switchboard CONCLUDES about an agent from what it
+# still the self-report it always was (`working | done | failed`) and nothing here rewrites it; this is what Switchboard CONCLUDES about an agent from what it
 # owns and awaits, which is a different fact and belongs in a different field.
 #
 # IT SITS BESIDE `idle_excuse` RATHER THAN REPLACING IT. The phrases are what two readouts
@@ -456,7 +454,7 @@ NEEDS_SETTLE = config.setting("display.needs_settle")
 #
 # The events table is written by whoever is doing the writing, and `agent=` on a row means
 # only "this row is about that name". For nearly every kind the two coincide: an agent's own
-# `sb` calls, its `done`, its `blocked`, its turn edges. These are the exceptions, and all of
+# `sb` calls, its `done`, its turn edges. These are the exceptions, and all of
 # them are one process acting ON an agent from outside it:
 #
 #     ring_*        the doorbell we tried to ring at it (`Broker._ring`), and whether the
@@ -872,7 +870,22 @@ class AgentStatus:
 
     @property
     def blocked(self) -> bool:
-        return self.state == "blocked"
+        """Is this agent waiting on an answer from a person?
+
+        AN OPEN HUMAN-TARGETED QUESTION, and nothing else. It used to be `state ==
+        "blocked"` — a word `sb block` wrote into the store — and both the verb and the
+        state are gone (#325). What is left is the fact itself, derived: `collect` fills
+        `blocked_why` from the open Questions this agent has aimed at the human
+        (`store.open_questions_by_asker`), and one of those is exactly what the word meant.
+
+        The NAME is kept rather than churned through every renderer and every published
+        envelope, and it is still the right word for the row: something is owed to this
+        agent that only a person can pay. What is gone is the claim that the agent is
+        *stopped* — nothing forces it to be any more (the Stop gate went with the verb), so
+        an agent may perfectly well be working with a question open, and `_derived_row`
+        reads the two together rather than assuming one from the other.
+        """
+        return self.blocked_why is not None
 
     @property
     def display_state(self) -> str:
@@ -921,13 +934,13 @@ class AgentStatus:
         upstream weak point) shows `idle` here rather than `working`, which is what the row
         is entitled to claim from what it observed. It never shows two answers at once.
 
-        A `done` or `blocked` row that is TAKING A TURN AGAIN reads `working`, and that is the
+        A terminal row that is TAKING A TURN AGAIN reads `working`, and that is the
         bug Andrew reported: an agent marks `done`, is then spoken to, and works — yet its
         STATE column stays `done` the whole time. `state` is a self-report about the TASK and
         it stays terminal until the agent's next `sb` command reopens it (`broker._revive`),
         which is lazy and may never come. But the turn edge is not lazy: `UserPromptSubmit`
         wrote `turn=working` the moment the agent was poked, and that is the same signal this
-        method already trusts over herdr for a running row. So a terminal or blocked row with
+        method already trusts over herdr for a running row. So a terminal row with
         our own turn signal live — `turn == working` AND herdr confirming the pane is there
         (`alive is True`) — is drawn `working`, exactly as the resumed agent is. `alive is
         True`, not merely truthy: with herdr unreachable (`alive is None`) nothing confirms the
@@ -936,22 +949,11 @@ class AgentStatus:
         same question of the same row — a waiting cohort that read the stored word while this
         column read the live one is how one child came to be `working` here and "already
         finished" there. This is a READING only: `state` is not
-        touched, so `stop_gate` still sees the report it wrote, `sb cleanup` still closes the
-        finished row, and `_revive` still does the real reopen when the agent acts.
+        touched, so `sb cleanup` still closes the finished row, and `_revive` still does
+        the real reopen when the agent acts.
 
-        TWO HONEST LIMITS, because in this repo the docstring is the record and both are real.
-
-        The claim above that the STATE word never disagrees with the row's other signals has
-        one exception, and it is the `blocked` case: this reconciles the WORD only, not the
-        summons flags. `blocked` (and so the `<< BLOCKED` marker, the `1 blocked` count and the
-        NEEDS YOU line) reads the raw `state`, which is still `blocked` until `_revive` clears
-        it, so a block just answered in its own pane shows `working` beside a lingering BLOCKED
-        until the agent runs one `sb` command. Transient, and arguably still true — the store
-        has not yet confirmed the answer landed — but it is one word saying `working` and
-        another saying blocked, so it is named rather than claimed away. (A `done` resume has
-        no such flag, so it reads clean.)
-
-        And the lost-`Stop`-right-after-`sb done` corner is WIDER than `alive is True` would
+        ONE HONEST LIMIT, because in this repo the docstring is the record and it is real.
+        The lost-`Stop`-right-after-`sb done` corner is WIDER than `alive is True` would
         suggest, so do not read that guard as bounding it. `sb done` deliberately does not
         report to herdr, so a finished agent stays in herdr's list — `alive is True` — until
         `sb cleanup` closes it, which on this fleet is days. If that agent's `Stop` was the one
@@ -990,7 +992,7 @@ class AgentStatus:
         A READING like the rest of `display_state`, and it inherits that method's guards
         rather than adding its own. `wait_excuse` is set in `collect` only for a live,
         non-expired declaration (`wait_is_fresh`), and this is reached only where the row is
-        already idle — never for a `working` turn (that returns above), a terminal or blocked
+        already idle — never for a `working` turn (that returns above), a terminal
         row (handled first), or one herdr has dropped (`alive is False` returns `idle`, since
         a pane that is gone is not waiting for anything). So it can only ever turn an `idle`
         into a `waiting`, which is exactly the override that was asked for.
@@ -1096,9 +1098,11 @@ class AgentStatus:
     def at_prompt(self) -> bool:
         """herdr's own detector says the TUI is waiting on a person.
 
-        We never report `blocked` to herdr ourselves (broker.block explains why), so this
-        only ever comes from herdr, and it means a permission prompt or similar is sitting
-        unanswered on screen.
+        We never report a state to herdr at all (`Herdr.report_state` carries the
+        measurement: any report evicts the pane's named agent for good), so this only ever
+        comes from herdr, and it means a permission prompt or similar is sitting unanswered
+        on screen. Nothing to do with a Question — that is our own object, and herdr has
+        never heard of it.
         """
         return self.herdr_state == BLOCKED
 
@@ -1122,36 +1126,27 @@ class AgentStatus:
     def ringable(self) -> bool:
         """Mail here that a doorbell could actually announce, right now.
 
-        `waiting_to_be_rung` says mail is stuck; this says a ring would move it. The two
-        differ in exactly one case and it is the expensive one: an agent that is BLOCKED
-        is not idle, it is stopped waiting on a person, and `broker._ring` holds its mail
-        back for as long as that lasts (`ring_held {"reason":"blocked"}`). Nothing about
-        that changes on its own — the only thing that lifts a block is the human's answer,
-        and that answer arrives as an `sb tell`, which flushes the doorbell in its own
-        process before the collector's next tick could. So there is nothing here for a
-        tick to discover, and a trigger that keeps looking pays a spawned process every
-        ten seconds for as long as the person takes to answer: 85 of them for one block
-        held thirteen minutes. Idle costs nothing — `notes/PRINCIPLES.md` C10.
+        `waiting_to_be_rung` says mail is stuck; this says a ring would move it, and
+        SINCE #325 THEY AGREE ON EVERY ROW. They used to differ in one case: an agent that
+        had called `sb block` was stopped waiting on a person, `broker._ring` held its mail
+        back for as long as that lasted, and a collector tick that kept rediscovering it
+        paid a spawned process every ten seconds for nothing (85 of them for one block held
+        thirteen minutes — `notes/PRINCIPLES.md` C10). There is no `blocked` state and no
+        such holdback any more: an agent with an open Question is an ordinary idle agent
+        and its mail rings like anyone else's.
 
-        The held mail itself is untouched and still `undelivered`: the board still says
-        `<< UNDELIVERED 2, 13m`, `--needs-me` still lists the agent, `flush_pending` still
-        re-derives it on every `sb` command, and it is delivered the moment the block is
-        answered. What stops is only the rediscovering.
-
-        A blocked agent whose backlog contains the human's own reply is ringable again,
-        because that ring is the one `_ring` lets through — and if the agent happens to be
-        mid-turn when it arrives, this is what keeps the doorbell chasing it afterwards.
+        Kept rather than folded into its sibling because both are published in `as_dict`
+        and read by the collector, and because the two questions are still different
+        questions — this one is about the doorbell, that one about the mailbox.
         """
-        if not self.undelivered:
-            return False
-        return self.undelivered_answer or not self.blocked
+        return self.undelivered > 0
 
     @property
     def needs_human(self) -> bool:
         """Something is owed to this agent, and only a person can pay it.
 
         `stalled` belongs here for the same reason the other three do, even though the
-        agent is not asking: its turn ended without `sb done` or `sb block`, so the store
+        agent is not asking: its turn ended without `sb done` or a Question, so the store
         will say `working` about it forever, no doorbell will ever ring it again, and
         `sb cleanup` will not touch it — its turn edge ended cleanly, so it is not a row
         switchboard ever gave up on, which is the only unfinished row a sweep takes.
@@ -1187,10 +1182,10 @@ class AgentStatus:
     def inferred_summons(self) -> bool:
         """Whether the reason to summon a human here is INFERRED rather than declared.
 
-        The two halves of NEEDS YOU are not the same kind of fact. `blocked` is a word the
-        agent wrote into the store when it stopped to ask, and `gone` is an absence herdr
-        confirmed and held for GONE_CONFIRM_GRACE; neither can be true for one tick and
-        false the next. These three are read fresh every tick off signals that do go the
+        The two halves of NEEDS YOU are not the same kind of fact. `blocked` is an open
+        Question this agent wrote down when it stopped to ask, and `gone` is an absence
+        herdr confirmed and held for GONE_CONFIRM_GRACE; neither can be true for one tick
+        and false the next. These three are read fresh every tick off signals that do go the
         other way a second later — a turn edge, a herdr screen-scrape — and they are
         exactly the rows that flashed into NEEDS YOU for a frame and back out.
 
@@ -1252,7 +1247,7 @@ class AgentStatus:
         That is the reversible direction: showing a dead row costs a line, hiding a live
         one costs the human an agent.
 
-        It does not read `state`. Not `finished`, not `gone`, not `blocked`. Archived
+        It does not read `state`. Not `finished`, not `gone`. Archived
         means one thing — herdr does not have this pane — and what the store believes
         about the agent is the STATE column's question, answered next to it.
         """
@@ -1773,7 +1768,7 @@ def _step_wakes(db: sqlite3.Connection,
     Scoped by `only` on the single-agent fast path, like every other scan in this file, so
     `sb inspect` hits `idx_events_agent` rather than grouping the fleet's whole event table.
     Read in Python rather than by a SQL `GROUP BY`, because the step is inside the payload
-    JSON — the same thing `_block_reasons` does with `why`, ordered by `id` so the last row
+    JSON — ordered by `id` so the last row
     read is the latest.
     """
     scope = " AND agent = ?" if only is not None else ""
@@ -1793,8 +1788,8 @@ def _step_wakes(db: sqlite3.Connection,
 
 
 def _derived_row(row, *, idle: bool, excuse: Optional[str], turn: Optional[str],
-                 alive: Optional[bool], child: bool, awaiting_task: bool,
-                 agent: bool, external: bool) -> str:
+                 alive: Optional[bool], asking_human: bool, child: bool,
+                 awaiting_task: bool, agent: bool, external: bool) -> str:
     """Which Appendix A row this agent is on — one of `DERIVED_STATES`.
 
     THE LADDER IS THE TABLE, read top to bottom, and the whole of what that ordering buys is
@@ -1807,12 +1802,19 @@ def _derived_row(row, *, idle: bool, excuse: Optional[str], turn: Optional[str],
     it is mid-turn, it is at work, and drawing "waiting on child" over a running agent is the
     misread `idle_excuse` already refuses to make.
 
-    `blocked` IS `waiting on human`, and it is tested above `waiting on child` rather than in
-    the table's position for it. `sb block` is an agent that stopped to ask a person and
-    stays stopped until answered — the single most specific thing that can be true about why
-    a row is not moving — and a lead that blocked while a child of its own happens to be
-    alive is waiting on the person, not on the child. The table's ordering is about which
-    derived obligation outranks which; a stored, declared stop outranks all of them.
+    `waiting on human` IS AN OPEN QUESTION AIMED AT A PERSON, and it is tested above
+    `waiting on child` rather than in the table's position for it. It is the single most
+    specific thing that can be true about why a row is not moving, and a lead that asked a
+    person something while a child of its own happens to be alive is waiting on the person,
+    not on the child. The table's ordering is about which derived obligation outranks which;
+    a question somebody DECLARED outranks all of them.
+
+    It used to be the `blocked` state, which `sb block` wrote and only a human could clear.
+    The reading is the same and the mechanism is not: the question is a durable object with
+    an id, several of them can be open at once, and none of them stops the agent — so this
+    is reached only when the row is parked, exactly like every other obligation here.
+    `awaiting_task` — a root that nobody has given a first task — is the second way to be
+    waiting on a human and is unchanged.
 
     `completed` sits BELOW the waiting rows, exactly as the table puts it, and that is not a
     detail: an agent that called `sb done` and left a question open displays `waiting on
@@ -1824,11 +1826,10 @@ def _derived_row(row, *, idle: bool, excuse: Optional[str], turn: Optional[str],
     `stalled` would be false while calling it a wait would invent an obligation nobody has.
     It reads `working`, which is what the row is entitled to claim from what was observed.
     """
-    blocked = row["state"] == "blocked" and not working_again(row["state"], turn, alive)
     finished = row["state"] in FINISHED and not working_again(row["state"], turn, alive)
-    if not (idle or blocked or finished):
+    if not (idle or finished):
         return WORKING
-    if blocked:
+    if asking_human:
         return WAITING_ON_HUMAN
     if child:
         return WAITING_ON_CHILD
@@ -1864,8 +1865,8 @@ def collect(
 
     `live_only` drops finished agents, but keeps any that still hold unread mail (mail on
     a finished agent is mail nobody will ever read unless it is visible).
-    `needs_me` keeps only agents that are blocked, sitting at a prompt, holding unread
-    mail, or stalled — the ones an action is owed to.
+    `needs_me` keeps only agents with an open question for a person, sitting at a prompt,
+    holding unread mail, or stalled — the ones an action is owed to.
     `mine` scopes to one agent's own subtree (pass `human` for the roots and everything
     under them, which for a human is the whole tree).
     `tree` is THE BOUNDARY rather than a filter: the names the caller is allowed to see at
@@ -1892,13 +1893,13 @@ def collect(
     end an agent's life on the strength of code nobody is running any more.
 
     `only` is the SINGLE-AGENT FAST PATH (#227): `inspect` needs one agent's row and used
-    to pay the whole-fleet collect to get it — the three `done`/`blocked`/activity scans
+    to pay the whole-fleet collect to get it — the three `done`/question/activity scans
     are `GROUP BY` over every event and message in the store and measured 7–11 s on a busy
     WSL fleet, all to read one cwd. With `only` set, the six per-fleet SQL aggregates are
     scoped to that agent — the event scans, which dominated the profile, hit
     `idx_events_agent` instead of grouping the whole table (the smaller `messages` scans on
     `from_agent` have no index and still walk that table) — so the row the caller asked for
-    is built with its OWN counts, activity, block reason and summary intact
+    is built with its OWN counts, activity, open question and summary intact
     — every other row is still built, but from empty aggregates, because nothing reads them.
     That partial data is exactly why `only` also forces `reap` off: `gone`/`stalled`/
     `turn_doubted` for the OTHER rows are now wrong (their idle clock reads from creation),
@@ -1934,7 +1935,7 @@ def collect(
     pending = _undelivered_counts(db, only)
     activity = _last_activity(db, only)
     awaiting_reply = _awaiting_reply(db, only)
-    why = _block_reasons(db, only)
+    why = _human_questions(db, only)
     summaries = _last_summaries(db, only)
     # WHAT EVERY AGENT OWNS, from whichever plugins derive it (§6, Appendix A Step). One
     # call for the whole fleet, and an empty answer on a caller with no repo — see
@@ -1974,7 +1975,7 @@ def collect(
     # a store too old for the column degrades to the bare-name match that shipped.
     tracks_terminal = bool(rows) and "terminal_id" in rows[0].keys()
     # Parents with work still out, by exactly the rule the stop gate asks it by
-    # (`hooks._has_live_child`: a child row still `working` or `blocked` and not ended).
+    # (a child row still `working` or `blocked` and not ended).
     # Computed from the rows already in hand rather than re-queried, so this costs nothing
     # and no reader needs a second connection.
     #
@@ -2095,7 +2096,7 @@ def collect(
         alive = alive_of[name]
         running = row["state"] in RUNNING and row["ended_at"] is None
         # The wider half of the same question, and the ONLY thing `gone` is built on: a row
-        # that never reported an end, whether it is working or blocked. See REAPABLE.
+        # that never reported an end. See REAPABLE.
         unended = row["state"] in REAPABLE and row["ended_at"] is None
         # A row with no session id that is younger than the spawn window is a CLAIM, not a
         # live agent: `delegate` writes it before herdr is called, and herdr will not list
@@ -2175,7 +2176,15 @@ def collect(
         # Phrases, not tokens, because two readouts want the same words and a second
         # vocabulary is how they come to disagree.
         idle_for = max(0, now - last)
-        excuse = ("awaiting first task" if awaiting
+        excuse = (
+                  # FIRST, above every other obligation, for `_derived_row`'s reason: a
+                  # question this agent declared to a person outranks anything derived
+                  # about it. Without this the row would be idle with nothing excusing it
+                  # — STALLED — which is exactly what the old `blocked` state kept it out
+                  # of, and the phrase has to exist here because `stalled` is "idle and no
+                  # excuse" and nothing else.
+                  "waiting on an answer from a person" if name in why
+                  else "awaiting first task" if awaiting
                   else wait_excuse if wait_excuse
                   else "waiting on children" if name in live_parent
                   else "waiting on a reply" if name in awaiting_reply
@@ -2203,6 +2212,9 @@ def collect(
         idle = bool(running and turn_over and alive is not False)
         derived = _derived_row(
             row, idle=idle, excuse=excuse, turn=turn, alive=alive,
+            # The open human Question, read off the same map `blocked_why` is filled from
+            # so the two cannot say different things about one row.
+            asking_human=(name in why),
             # `wait_is_fresh` and not `wait_mode`, and the distinction is the whole of a
             # bug this had: `wait_mode` is the DECLARATION, and only `sb reconcile` ever
             # clears it (`Broker.wake_expired_waits`). A declaration that outlived
@@ -2264,13 +2276,10 @@ def collect(
             derived_state=derived,
             wait_expired=wait_expired and idle and excuse is None,
             wait_excuse=wait_excuse,
-            # `unended` and not `running`, so a BLOCKED agent whose pane has gone is a death
-            # like any other. Nothing else about a blocked agent changes: it is still not
-            # `stalled` (that reads `running`), still not pinged, still waiting on its human
-            # — right up until herdr stops listing it, which is the only signal that tells a
-            # blocked agent waiting from a blocked agent gone. `alive is False` carries that
-            # on its own, and `_confirmed_gone` still makes it hold for GONE_CONFIRM_GRACE
-            # before anything is written.
+            # `unended` and not `running`, so a row carrying the legacy `blocked` state,
+            # and a row that never reported at all, are deaths like any other once their
+            # pane goes. `alive is False` carries that on its own, and `_confirmed_gone`
+            # still makes it hold for GONE_CONFIRM_GRACE before anything is written.
             gone=bool(unended and alive is False and not spawning),
             # THE THREE-VALUED VERDICT (§9), from the pre-pass above. `gone` is unchanged
             # beside it and still means what it always meant — the pane is not there — and
@@ -2286,7 +2295,11 @@ def collect(
             last_activity=last,
             workspace=row["workspace"],
             task=row["task"],
-            blocked_why=why.get(name) if row["state"] == "blocked" else None,
+            # THE OPEN HUMAN QUESTION, verbatim (#325). It is the field the readouts
+            # already draw, now sourced from the Question object instead of from the
+            # `blocked` state and the `blocked` event that the removed `sb block` wrote.
+            # None means nothing is owed to this agent by a person.
+            blocked_why=why.get(name),
             summary=summaries.get(name),
             undelivered=pending.get(name, (0, 0, False))[0],
             # Age of the OLDEST, not the newest: the question is how long this has been
@@ -3039,29 +3052,20 @@ def _awaiting_reply(db: sqlite3.Connection,
     return out
 
 
-def _block_reasons(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, str]:
-    """Why each blocked agent stopped — the thing the human actually needs.
+def _human_questions(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, str]:
+    """What each agent is waiting on a person for. -> {agent: question text}.
 
-    SQLite's min/max aggregate hands back the rest of the row it came from, so this is one
-    specific block per agent rather than an arbitrary one. Maxing on `id`, not
-    `created_at`: timestamps are whole seconds, and two blocks in the same second would
-    make "the latest" a coin toss.
+    THE ROW `blocked_why` USED TO COME FROM WAS AN EVENT. `sb block` wrote a `blocked`
+    event and this scanned the log for the latest one per agent; the verb is gone and the
+    fact is a durable object now, so this is a plain read of the open Questions aimed at
+    the human (`store.open_questions_by_asker`, which also drops the ones whose asker is
+    gone).
+
+    `only` scopes to one agent, exactly as the other scans here do for `inspect`'s
+    single-agent fast path.
     """
-    # `only` scopes to one agent so a single-agent reader (`inspect`) filters on
-    # `idx_events_agent` rather than grouping every blocked event in the fleet. See
-    # `collect`'s note.
-    scope = " AND agent = ?" if only is not None else ""
-    params = (only,) if only is not None else ()
-    out = {}
-    for r in db.execute(
-        "SELECT agent, payload, MAX(id) FROM events "
-        f"WHERE kind='blocked' AND agent IS NOT NULL{scope} GROUP BY agent", params
-    ):
-        try:
-            out[r["agent"]] = (json.loads(r["payload"] or "{}") or {}).get("why") or ""
-        except json.JSONDecodeError:
-            continue
-    return {k: v for k, v in out.items() if v}
+    from . import store                      # local: keeps this module importable alone
+    return store.open_questions_by_asker(db, store.Q_HUMAN, only)
 
 
 def _last_summaries(db: sqlite3.Connection, only: Optional[str] = None) -> dict[str, str]:
@@ -3069,7 +3073,7 @@ def _last_summaries(db: sqlite3.Connection, only: Optional[str] = None) -> dict[
 
     Two sources, and the mailbox wins where it has one: the message is the summary the
     parent actually received, whereas the event is clipped for debugging. Maxing on `id`
-    for the same reason as `_block_reasons` — one-second timestamps cannot order two
+    for the same reason as every other latest-wins read here — one-second timestamps cannot order two
     summaries.
 
     A ROOT agent has no parent and the human has no mailbox, so its `done` writes no
@@ -3652,7 +3656,7 @@ def _flags(a: AgentStatus) -> str:
     if a.at_prompt:
         f.append("<< AT PROMPT")
     elif a.blocked:
-        f.append("<< BLOCKED")
+        f.append("<< ASKING")
     return ("  " + " ".join(f)) if f else ""
 
 
@@ -3736,13 +3740,12 @@ def _attention(snap: Snapshot) -> list[str]:
                            f"Steps/Questions held"
                            f"  →  its work is on its branch: sb inspect {a.name}")
             elif a.blocked:
-                # Says whose answer counts: only the human's `tell` clears a block
-                # (`Broker.tell` passes `answer=(me == HUMAN)`). Another agent's mail is
-                # written and then held, so telling one without that caveat sends an agent
-                # off to unblock something it cannot unblock.
-                why = a.blocked_why or "no reason recorded"
-                out.append(f"  {a.name:<{w}}  blocked: {why[:70]}"
-                           f"  →  the human answers it: sb tell {a.name} \"...\"")
+                # Names the verb that actually closes it. A bare `sb tell` reaches the
+                # agent and resolves NOTHING (#325) — only `sb answer <id>` records the
+                # answer against the question and wakes the asker for it.
+                why = a.blocked_why or "no question recorded"
+                out.append(f"  {a.name:<{w}}  asking you: {why[:70]}"
+                           f"  →  answer it: sb answer <id> \"...\" (ids: sb questions)")
             elif a.at_prompt:
                 out.append(f"  {a.name:<{w}}  waiting at a prompt in its own TUI"
                            f"  →  sb inspect {a.name}")
@@ -3810,24 +3813,13 @@ def _attention(snap: Snapshot) -> list[str]:
         out.append("mid-turn (`agent prompt` interleaves), and released when it goes idle.")
         out.append("Mail an agent read of its own accord is never counted here, however we")
         out.append("came to ring — it is already in front of it.")
-        # A blocked agent is the one case where "when it goes idle" is not merely late but
-        # wrong: `_ring`/`flush_pending` hold its mail on `_is_blocked`, and only the
-        # human's own `tell` lifts that. Said here rather than left to the reader, because
-        # a row that reads "waiting, blocked" under the sentence above looks like something
-        # that will resolve itself.
-        blocked = [a for a in pending if a.blocked]
-        if blocked:
-            out.append("A blocked agent is the exception: its mail is held until the human")
-            out.append("answers the block, not until it goes idle. Answering releases it.")
         for a in pending:
             out.append(f"  {a.name:<{w}}  {a.undelivered} waiting, "
                        f"oldest {fmt_age(a.undelivered_age)}, "
                        f"{'still working' if a.state in RUNNING and not a.stalled else a.state}")
         out.append(f"  {'':<{w}}  →  sb inspect <name> to read it; the doorbell rings when "
                    f"the agent next goes idle")
-        if blocked:
-            out.append(f"  {'':<{w}}  →  for a blocked one, when the human answers: "
-                       f"sb tell <name> \"...\"")
+
 
     drift = [a for a in snap.agents if a.stalled or a.gone or a.signal_drift]
     if drift:
@@ -4024,8 +4016,8 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
     # `hooks.py`), `herdr` is the pane's screen. `-` for a row no hook has fired for.
     out.append(f"  state      {a.state}   turn: {a.turn or '-'}   "
                f"herdr: {_herdr_cell(a)}{_flags(a)}")
-    if a.blocked and a.blocked_why:
-        out.append(f"  blocked    {a.blocked_why}")
+    if a.blocked_why:
+        out.append(f"  asking     {a.blocked_why}")
     out.append(f"  age        {fmt_age(a.age)}   idle {fmt_age(a.idle)}")
     out.append(f"  workspace  {a.workspace or '-'}")
     out.append(f"  cwd        {d.cwd or '-'}")
@@ -4036,19 +4028,9 @@ def render_detail(d: Detail, *, now: Optional[int] = None) -> str:
         out.append("")
         out.append(f"UNDELIVERED — {len(d.undelivered)} written, never announced to it, "
                    f"never read (oldest {fmt_age(a.undelivered_age)})")
-        if a.blocked:
-            # This agent is blocked, so the generic sentence below is false for it: its
-            # mail is held on `_is_blocked` in `_ring`/`flush_pending` and nothing but the
-            # human's `tell` releases it. Going idle is not a state it passes through —
-            # `block` stopped reporting herdr state at all.
-            out.append("  This agent is blocked, so its mail is held until the human")
-            out.append("  answers the block — not until it goes idle. Until then it does")
-            out.append("  not know these exist. Anything it has already read is excluded —")
-            out.append("  every row below has `read: false`.")
-        else:
-            out.append("  The doorbell is held while an agent is mid-turn and released when it")
-            out.append("  goes idle; until then this agent does not know these exist. Anything")
-            out.append("  it has already read is excluded — every row below has `read: false`.")
+        out.append("  The doorbell is held while an agent is mid-turn and released when it")
+        out.append("  goes idle; until then this agent does not know these exist. Anything")
+        out.append("  it has already read is excluded — every row below has `read: false`.")
         for m in d.undelivered:
             out.append(f"  [{m['id']}] from {m['from']}: {clip(m['body'], 90)}")
 
@@ -4103,8 +4085,8 @@ def render_compact_detail(d: Detail) -> str:
     out = [head]
     out.append(f"  task       {clip(a.task, 160) if a.task else '(none recorded)'}")
     out.append(f"  workspace  {a.workspace or '-'}")
-    if a.blocked and a.blocked_why:
-        out.append(f"  blocked    {clip(a.blocked_why, 160)}")
+    if a.blocked_why:
+        out.append(f"  asking     {clip(a.blocked_why, 160)}")
     if d.undelivered:
         out.append(f"  mail       {len(d.undelivered)} undelivered, oldest "
                    f"{fmt_age(a.undelivered_age)}")
