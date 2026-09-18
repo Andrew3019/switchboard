@@ -96,7 +96,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from . import config
 from . import panel
@@ -152,6 +152,27 @@ RECONCILE_SWEEP = 600.0
 # "is any PR open" without opening a plugin's state directory, and the whole shape of this
 # seam is that it does not (see `switchboard/obligations.py`).
 OBSERVE_GAP = 60.0
+# How long the spawned `sb plugin plans observe` is given, as against `DOORBELL_TIMEOUT`'s
+# thirty seconds for the other three triggers.
+#
+# THIS IS THE BUG THAT MADE IT ITS OWN NUMBER. The poller makes two `gh api` calls per plan
+# with an open pull request, so its run time is a property of the FLEET while
+# `DOORBELL_TIMEOUT` is sized for a local command that flushes a mailbox. Once a repo's
+# open-PR plans crossed thirty seconds' worth of round trips, `subprocess.run` killed the
+# child mid-poll — and because `observe` deliberately writes nothing until it has asked about
+# every plan in its batch (that ordering is what closes a much worse race), NOTHING from the
+# poll landed, not even the plans already asked about. Every subsequent tick repeated the
+# same doomed walk. §7's "polling is the correctness floor" stopped being reached at all, on
+# exactly the busy fleet the design calls normal, with nothing on any screen to say so.
+#
+# THE TWO HALVES OF THE FIX ARE HERE AND IN THE PLUGIN, and neither is enough alone. The
+# plugin caps one run at `OBSERVE_BATCH` plans at `OBSERVE_GH_TIMEOUT` each, which makes the
+# worst case a number this file can be sized against — 8 × 2 × 10 s = 160 s — instead of an
+# unbounded one. This is that number with headroom. Sized OVER the cap rather than under it
+# on purpose: a healthy-but-busy run being killed is the failure being fixed, and a timeout
+# that still cuts the batch short would only move the cliff rather than remove it. Not larger
+# still, because a wedged `gh` holds a collector thread for exactly this long.
+OBSERVE_TIMEOUT = 180.0
 # The floor between two attempts at the fleet-stats cold call, in seconds. Not a tunable,
 # for `DOORBELL_GAP`'s reason: it decides what a store that cannot be opened costs. The
 # cold call is primed once at startup (`FleetStats`), and if the store was not there yet —
@@ -224,6 +245,10 @@ class State:
     observations: int = 0
     last_observe: Optional[float] = None
     observe_error: Optional[str] = None
+    # Whether a poll is in flight right now. The only one of the four triggers that needs
+    # this, because it is the only one whose command may outlive its own gap — see
+    # `run_observer` and `OBSERVE_TIMEOUT`.
+    observing: bool = False
     # The auto-restore, counted like the two triggers above because it is the same shape
     # again — and published for a reason they do not have: this is the one trigger that
     # brings whole agents back, so "did it fire, and did the command it ran work" is a
@@ -522,10 +547,20 @@ def run_observer(state: State, db_path: Optional[Path]) -> bool:
     the spawned command's own first act is to decide there is nothing to do. `OBSERVE_GAP`
     is what makes that affordable.
 
+    ONE AT A TIME, which the other three triggers do not need and this one does. Their
+    commands finish well inside their gap; this one is allowed `OBSERVE_TIMEOUT`, which is
+    longer than `OBSERVE_GAP`, so without a guard a slow poll would have a second poll
+    spawned on top of it every minute for as long as it lasted — two processes walking the
+    same plans, writing the same files, each undoing what the other had just read. The guard
+    also makes the gap mean what it says under every sizing of those two numbers, rather than
+    only while one happens to exceed the other.
+
     In-process memory, like every other trigger's: a replacement collector polling once more
     than it needed to costs one `gh` call, and the observation is idempotent.
     """
     now = panel.now()
+    if state.observing:
+        return False
     if state.last_observe is not None and now - state.last_observe < OBSERVE_GAP:
         return False
     sb = doorbell_sb()
@@ -535,9 +570,15 @@ def run_observer(state: State, db_path: Optional[Path]) -> bool:
         return False
     state.last_observe = now
     state.observations += 1
+    state.observing = True
+
+    def released() -> None:
+        state.observing = False
+
     threading.Thread(target=_run_sb,
                      args=(sb, "plugin", db_path, state, "observe"),
-                     kwargs={"flags": ("plans", "observe")}, daemon=True).start()
+                     kwargs={"flags": ("plans", "observe"), "timeout": OBSERVE_TIMEOUT,
+                             "done": released}, daemon=True).start()
     return True
 
 
@@ -812,7 +853,8 @@ def _doorbell_cwd(db_path: Optional[Path]) -> Optional[str]:
 
 def _run_sb(sb: str, verb: str, db_path: Optional[Path], state: State,
             which: str = "doorbell", *, flags: Sequence[str] = (),
-            env: Optional[dict] = None) -> None:
+            env: Optional[dict] = None, timeout: float = DOORBELL_TIMEOUT,
+            done: Optional[Callable[[], None]] = None) -> None:
     """The spawned half, shared by the collector's triggers. Swallows everything: a trigger that
     fails is a line in the counters, never a collector that dies.
 
@@ -822,18 +864,30 @@ def _run_sb(sb: str, verb: str, db_path: Optional[Path], state: State,
     would be a lie on forty screens.
 
     `env` is None for the two triggers whose command does not care who is asking, and the
-    fleet environment for the one that does — see `fleet_env`."""
+    fleet environment for the one that does — see `fleet_env`.
+
+    `timeout` defaults to the thirty seconds every trigger shared, and is a parameter because
+    one of them stopped being a fast local command: see `OBSERVE_TIMEOUT` for what a blanket
+    number cost the poller. A trigger whose run time scales with the fleet has to say so here
+    rather than inherit a number sized for flushing a mailbox.
+
+    `done` runs when the child has finished, however it finished — the hook an in-flight
+    guard needs, since the guard has to be released on the timeout and the crash as much as
+    on the clean exit."""
     cwd = _doorbell_cwd(db_path)
     field = f"{which}_error"
     argv = [sb, verb, *flags]
     try:
         p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
-                           timeout=DOORBELL_TIMEOUT, env=env)
+                           timeout=timeout, env=env)
         setattr(state, field, None if p.returncode == 0 else
                 (p.stderr or p.stdout
                  or f"sb {' '.join(argv[1:])} exited {p.returncode}").strip()[:200])
     except Exception as e:                     # noqa: BLE001 — never fatal, by design
         setattr(state, field, str(e)[:200])
+    finally:
+        if done is not None:
+            done()
 
 
 def tick(paths: panel.Paths, state: State, db_path: Optional[Path],

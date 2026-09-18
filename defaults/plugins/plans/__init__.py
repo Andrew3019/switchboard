@@ -727,6 +727,33 @@ DEFAULT_KIND = "implement"
 _DEF_KIND = {"implementation": "implement", "review": "review",
              "create-pr": "open_pr", "merge": "merge"}
 
+# How long ONE `gh api` call is given, and how long one of `observe`'s is.
+#
+# THE SECOND NUMBER IS SMALLER ON PURPOSE. `GH_TIMEOUT` is the budget for a call a person is
+# waiting on — `merge`, `comment`, the Open PR bundle — where the only thing worse than slow
+# is giving up on a round trip that was about to succeed. `observe` is nobody's foreground:
+# it runs unattended on a timer, it makes two calls per plan, and its whole run has to fit
+# inside a bound the collector will actually wait for (`collector.OBSERVE_TIMEOUT`). A call
+# that has not answered in ten seconds is one this poll should drop and the next one should
+# retry, because dropping it costs a minute of staleness and waiting on it costs the rest of
+# the plans in the batch.
+GH_TIMEOUT, OBSERVE_GH_TIMEOUT = 30, 10
+
+# HOW MANY OPEN-PR PLANS ONE `observe` VISITS, and the whole of what bounds its wall time.
+#
+# The bound has to be a property of the RUN and not of the fleet, because the collector gives
+# the command a fixed number of seconds and a fleet grows. Without a cap, a repo simply
+# accumulated open-PR plans until `plans × 2 × per-call` crossed that timeout, at which point
+# the child was killed mid-flight, phase 3 never ran, NOTHING from the poll landed, and every
+# subsequent tick repeated the same doomed walk — §7's "polling is the correctness floor"
+# silently stopping for good, on exactly the busy fleet the design treats as normal.
+#
+# Eight, against `OBSERVE_GH_TIMEOUT`: the worst case is 8 × 2 × 10 s = 160 s, which
+# `collector.OBSERVE_TIMEOUT` is sized over. At the ~1 s a healthy `gh api` actually takes it
+# is ~16 s, so the cap is not what decides the common case — it is what stops the rare one
+# being unbounded. What is NOT visited this run is not skipped: see `_observe_order`.
+OBSERVE_BATCH = 8
+
 # Long enough for a real sentence, short enough that a plan stays readable when it is shown.
 # Anything longer wants a brief, and briefs are files a checkpoint can point at.
 MAX_TEXT = 500
@@ -2880,9 +2907,13 @@ def _pr_int(value: Any) -> Optional[int]:
     return int(text) if re.fullmatch(r"[1-9]\d*", text) else None
 
 
-def _pull(ctx, pr: int) -> tuple[dict, Optional[Result]]:
-    """The pull request as GitHub holds it right now — head, state and branch."""
-    got, bad = _github(ctx, [f"repos/{{owner}}/{{repo}}/pulls/{pr}"])
+def _pull(ctx, pr: int, *, timeout: int = GH_TIMEOUT) -> tuple[dict, Optional[Result]]:
+    """The pull request as GitHub holds it right now — head, state and branch.
+
+    `timeout` is the caller's budget for the one call. It is the foreground one by default
+    and `OBSERVE_GH_TIMEOUT` from the poller, which has a whole batch to get through.
+    """
+    got, bad = _github(ctx, [f"repos/{{owner}}/{{repo}}/pulls/{pr}"], timeout=timeout)
     if bad:
         return {}, bad
     try:
@@ -2977,8 +3008,9 @@ def _record_landing(ctx, plan_id: str, who: str, reason: Optional[str], *,
     _write(ctx.state_dir, doc, seal)
 
 
+
 def _github(ctx, argv: list[str], *, body: Optional[str] = None,
-            payload: Optional[dict] = None):
+            payload: Optional[dict] = None, timeout: int = GH_TIMEOUT):
     """One bounded `gh api` call, returned as `(process, refusal)`.
 
     JSON goes through stdin so a full plan is neither shell-expanded nor exposed as an
@@ -2996,7 +3028,7 @@ def _github(ctx, argv: list[str], *, body: Optional[str] = None,
         got = subprocess.run(["gh", "api", *argv], cwd=str(_here(ctx)),
                              input=json.dumps(payload) if payload is not None else None,
                              stdin=subprocess.DEVNULL if payload is None else None,
-                             capture_output=True, text=True, timeout=30)
+                             capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
         why = f"could not reach GitHub through gh: {e}"
         return None, Result(ok=False, human=why, data={"error": why})
@@ -3097,26 +3129,41 @@ def observe(ctx, args) -> Result:
     to apply the fact to, which the re-read gets for free: the second `_find` misses, or
     `_observing` no longer names a PR, and the fact is dropped rather than resurrected onto
     a plan that has moved past it.
+
+    ONE RUN IS BOUNDED AND THE REST CARRIES OVER. Phase 2 visits at most `OBSERVE_BATCH`
+    plans, least-recently-observed first (`_observe_order`), and stamps `observed_at` on each
+    one it reaches. That is what makes the run's worst-case wall time a property of this file
+    rather than of how many pull requests a repo happens to have open — the collector gives
+    the command a fixed number of seconds, and a command that could need more than that, on a
+    fleet that grows, eventually gets killed on every single tick and lands nothing at all.
+    Nothing is skipped: what is not visited this run has the oldest stamp next run, so every
+    open-PR plan is reached within `ceil(n / OBSERVE_BATCH)` polls.
     """
     who = ctx.agent or "human"
     # PHASE 1 — what to ask about. The document is dropped at the end of this block and
     # nothing below reads it; only ids and numbers survive into the slow half.
     doc, _seal = _read_logged(ctx)
-    asking = [(str(plan.get("id")), *_observing(plan)) for plan in doc["plans"]]
-    asking = [(pid, pr, head) for pid, pr, head in asking if pr is not None]
+    asking = _observe_order(doc["plans"])
+    waiting = max(0, len(asking) - OBSERVE_BATCH)
+    asking = asking[:OBSERVE_BATCH]
     del doc, _seal
 
     # PHASE 2 — GitHub. Seconds per plan, and the store is not held open across any of it.
     facts: list[tuple] = []
     skipped: list[dict] = []
     for pid, pr, head in asking:
-        pull, bad = _pull(ctx, pr)
+        pull, bad = _pull(ctx, pr, timeout=OBSERVE_GH_TIMEOUT)
         if bad:
+            # Stamped anyway, via an empty fact below — a plan whose PR cannot be fetched
+            # must not become the permanently-oldest entry that wins every batch for ever
+            # while the plans behind it are never reached.
             skipped.append({"plan": pid, "pr": pr,
                             "error": str((bad.data or {}).get("error") or "")[:200]})
+            facts.append((pid, pr, None, None))
             continue
         facts.append((pid, pr, pull,
-                      _ci(ctx, str(pull.get("head", {}).get("sha") or head or ""))))
+                      _ci(ctx, str(pull.get("head", {}).get("sha") or head or ""),
+                          timeout=OBSERVE_GH_TIMEOUT)))
 
     # PHASE 3 — apply, against the store as it is NOW.
     doc, seal = _read_logged(ctx)
@@ -3126,6 +3173,19 @@ def observe(ctx, args) -> Result:
         plan = _find(doc, pid)
         if plan is None:
             continue                    # landed, deleted or renumbered while we asked
+        # BEFORE the facts are applied and whether or not there were any, because this is
+        # the fairness record and not a result: a plan GitHub refused to talk about has been
+        # visited, and must go to the back of the queue like every other one.
+        #
+        # It costs a file write per visited plan per run, and that is the price of the cap
+        # being fair rather than a rotation that could starve the same plans for ever. It is
+        # strictly CHEAPER than what it replaced: every open-PR plan in the repo used to be
+        # rewritten every minute because `ci`'s timestamp always differed (see `_ci_fact`),
+        # and this is at most `OBSERVE_BATCH` of them.
+        plan["observed_at"] = int(time.time())
+        changed = True
+        if pull is None:
+            continue
         why = f"PR #{pr} observed {'merged' if pull.get('merged') else pull.get('state')}"
         if pull.get("merged"):
             for step in _of_kind(plan, MERGE_KIND):
@@ -3147,14 +3207,58 @@ def observe(ctx, args) -> Result:
                 moved.append({"plan": pid, "step": step.get("id"),
                               "to": FAILED, "why": why})
                 changed = True
-        if fact is not None and fact != plan.get("ci"):
+        # Compared WITHOUT `at`, which is the reading and not the fact. Every `_ci` call
+        # stamps a fresh `at`, so comparing whole dicts made every observation a change and
+        # rewrote every open-PR plan's file every minute for ever — churn on a store several
+        # worktrees share, saying nothing.
+        if fact is not None and _ci_fact(fact) != _ci_fact(plan.get("ci")):
             plan["ci"] = fact
-            changed = True
     if changed:
         _write(ctx.state_dir, doc, seal)
     human = "; ".join(f"{m['plan']}/{m['step']} → {m['to']} ({m['why']})" for m in moved)
-    return Result(human=human or "nothing observed", data={"moved": moved,
-                                                           "skipped": skipped})
+    return Result(human=human or "nothing observed",
+                  data={"moved": moved, "skipped": skipped,
+                        "visited": [pid for pid, _pr, _head in asking],
+                        "waiting": waiting})
+
+
+def _observe_order(plans: list) -> list[tuple]:
+    """The open-PR plans `observe` should ask about, least-recently-observed first.
+
+    -> `[(plan_id, pr_number, recorded_head), ...]`.
+
+    THE FAIRNESS RULE, and the whole of it. `observed_at` is stamped on every plan a run
+    reaches, so the ones a capped run did not get to sort ahead of the ones it did on the
+    next run, and a plan that has never been observed at all sorts ahead of everything. No
+    cursor, no global marker, no new document-level shape: the ordering key is a scalar on
+    the plan it describes, which is also the only thing that stays right when plans are
+    added, landed or deleted between runs.
+
+    Tie-broken on the plan's own number so that a run is deterministic — several plans
+    stamped in the same second are visited in a fixed order rather than dict order, which is
+    what makes the carry-over testable.
+    """
+    out = []
+    for plan in plans:
+        if not isinstance(plan, dict):
+            continue
+        pr, head = _observing(plan)
+        if pr is None:
+            continue
+        try:
+            at = int(plan.get("observed_at") or 0)
+        except (TypeError, ValueError):
+            at = 0                      # a hand-edit put something else there; never seen
+        out.append((at, _num(_PLAN_ID, plan.get("id")) or 0, str(plan.get("id")), pr, head))
+    out.sort()
+    return [(pid, pr, head) for _at, _n, pid, pr, head in out]
+
+
+def _ci_fact(given: Any) -> tuple:
+    """A CI reading without its timestamp — what makes two of them the same fact."""
+    if not isinstance(given, dict):
+        return ()
+    return (str(given.get("state") or ""), str(given.get("head") or ""))
 
 
 def _observing(plan: dict) -> tuple[Optional[int], Optional[str]]:
@@ -3180,7 +3284,7 @@ def _of_kind(plan: dict, kind: str) -> list[dict]:
             if isinstance(s, dict) and _kind_of(s) == kind]
 
 
-def _ci(ctx, head: str) -> Optional[dict]:
+def _ci(ctx, head: str, *, timeout: int = GH_TIMEOUT) -> Optional[dict]:
     """The combined check state of one commit, as a plan-level fact. None if it cannot be got.
 
     A FACT AND NOT A GATE (§4, "Remote CI is neither a Step nor a merge precondition"). It is
@@ -3202,7 +3306,7 @@ def _ci(ctx, head: str) -> Optional[dict]:
     if not head:
         return None
     got, bad = _github(ctx, [f"repos/{{owner}}/{{repo}}/commits/{head}/check-runs",
-                             "--paginate"])
+                             "--paginate"], timeout=timeout)
     if bad or got is None:
         return None
     try:

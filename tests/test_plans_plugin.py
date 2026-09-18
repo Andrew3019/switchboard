@@ -7652,3 +7652,73 @@ class ObserveTest(PlansSandbox):
         # And `observe`'s own fact landed too — the re-read is not a way of dropping it.
         merge = next(s for s in after["steps"] if s.get("kind") == "merge")
         self.assertEqual(merge["progress"], "done")
+
+    def many_plans_with_open_prs(self, n: int) -> list[str]:
+        """`n` plans each recording an open, unlanded PR. -> their ids, in creation order."""
+        for i in range(n):
+            self.ok("plugin", "plans", "create", f"job {i}",
+                    "--display", f"board: job {i}", "--step", "build = write it",
+                    "--lib", "create-pr", "--lib", "merge")
+        doc = self._doc()
+        for i, plan in enumerate(doc["plans"]):
+            plan["change"] = {"path": "shaped", "pr": {"number": 100 + i,
+                                                       "head": self.HEAD}, "landing": None}
+        self._save(doc)
+        return [p["id"] for p in doc["plans"]]
+
+    def test_one_run_is_capped_and_the_rest_is_picked_up_by_the_next(self):
+        """A run's wall time is a property of this file, not of how many PRs are open.
+
+        THE BUG THIS PINS. The collector gives `observe` a fixed number of seconds. Uncapped,
+        a repo simply accumulated open-PR plans until `plans × 2 × per-call latency` crossed
+        that timeout — at which point the child was killed mid-flight and, because nothing is
+        written until the whole batch has been asked about, NOTHING from the poll landed.
+        Every following tick repeated the same doomed walk, so polling stopped happening at
+        all, permanently, with nothing on any screen to say so.
+
+        The cap alone would be a starvation bug wearing a fix's clothes, so the two halves
+        are asserted together: at most `OBSERVE_BATCH` per run, and the ones that waited go
+        FIRST next time. `observed_at` is what carries that across runs, and it is stamped on
+        every plan a run reaches — including one GitHub refused to answer about, which
+        otherwise stays permanently oldest and wins every batch for ever.
+        """
+        # A literal, because the plugin is not imported until the first command runs and the
+        # cap is read off the module itself — the assertions below are written against
+        # whatever it actually is, so this only has to be comfortably more than it.
+        made = self.many_plans_with_open_prs(11)
+        cap = _plans().OBSERVE_BATCH
+        self.assertLess(cap, len(made), "the cap has to bite for this test to mean anything")
+
+        with self.github(state="open"):
+            first = self.data("plugin", "plans", "observe")
+            second = self.data("plugin", "plans", "observe")
+
+        waited = len(made) - cap
+        self.assertEqual(len(first["visited"]), cap)
+        self.assertEqual(first["waiting"], waited)
+        # The ones that waited are the first of the next run, because nothing else has an
+        # older stamp than "never observed".
+        self.assertEqual(set(second["visited"][:waited]),
+                         set(made) - set(first["visited"]))
+        # And two runs reach every plan, which is `ceil(n / OBSERVE_BATCH)` for this n.
+        self.assertEqual(set(first["visited"]) | set(second["visited"]), set(made))
+
+    def test_a_plan_github_will_not_answer_about_still_goes_to_the_back_of_the_queue(self):
+        """Otherwise it is permanently the oldest, wins every batch, and starves the rest."""
+        made = self.many_plans_with_open_prs(2)
+        real_run = subprocess.run
+
+        def refuse(argv, *a, **kw):
+            argv = list(argv)
+            if argv[:2] == ["gh", "api"]:
+                return subprocess.CompletedProcess(argv, 1, "", "HTTP 502")
+            return real_run(argv, *a, **kw)
+
+        with mock.patch("subprocess.run", side_effect=refuse):
+            first = self.data("plugin", "plans", "observe")
+            second = self.data("plugin", "plans", "observe")
+
+        self.assertEqual([s["plan"] for s in first["skipped"]], made)
+        # Stamped despite the refusal, so the ordering is by visit and not by success.
+        self.assertTrue(all(p.get("observed_at") for p in self._doc()["plans"]))
+        self.assertEqual(second["visited"], first["visited"])   # both visited, both stamped
