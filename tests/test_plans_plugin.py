@@ -67,6 +67,24 @@ from test_shipped_plugins import ShippedSandbox  # noqa: E402
 from test_workspace import FakeHerdr  # noqa: E402
 
 
+def _plans_module():
+    """The shipped plans plugin, imported as a module rather than driven as a subprocess.
+
+    Every other test in this file goes through a real `sb` against a real store, which is
+    the right shape for anything a person can type. It is the wrong shape for one thing:
+    `status`'s `gone` flag needs herdr to answer AND not list the agent, and whether a herdr
+    is answering at all depends on the machine the tests run on (this class's own docstring
+    says so). So the two predicates that read that flag are exercised directly on the row
+    shape `sb status --all --json` publishes, which is the same dict either way.
+    """
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / "defaults" / "plugins" / "plans"
+    spec = importlib.util.spec_from_file_location("plans_under_test", path / "__init__.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _same_id(step: dict, sid: str) -> bool:
     """Is this the step that id names? By NUMBER, which is how the plugin compares ids.
 
@@ -4430,6 +4448,63 @@ class LivenessTest(PlansSandbox):
         self.assertNotIn("condition", self._doc()["plans"][0])
         for word in ("dormant", "live"):
             self.assertNotIn(f'"{word}"', self._raw())
+
+    def test_a_plan_whose_only_agent_is_awaiting_restore_is_dormant_not_live(self):
+        """The readout three-valued liveness broke, fixed. A RESTORABLE absence — a machine
+        restart with the checkout still on disk — is deliberately never written back as
+        `failed` (migration_sb_v2.md §9), so the row sits at `working` until `sb restore`.
+        Read off the state column alone, a plan whose only agent crashed that way said
+        `live` for ever about a worktree with nothing running in it — while the step right
+        above it on the same `show` page already said its owner was `dead`, because `owner`
+        reads `gone` and `condition` did not. Both read it now.
+
+        Driven on the row shape rather than through `sb`: see `_plans_module`.
+        """
+        mod = _plans_module()
+
+        class Stub(mod._Live):
+            def __init__(self, rows):
+                self.rows = rows
+
+            def agents(self):
+                return self.rows
+
+            def worktree(self, plan):
+                return mod.HERE
+
+        plan = {"workspace": "ws-1", "steps": [{"progress": "open"}]}
+        crashed = {"name": "w1", "workspace": "ws-1", "state": "working", "gone": True}
+
+        self.assertEqual(Stub({"w1": crashed}).condition(plan), (mod.DORMANT, mod.HERE))
+        # And it is a state the plan comes back from, which is the whole of `dormant`.
+        back = dict(crashed, gone=False)
+        self.assertEqual(Stub({"w1": back}).condition(plan), (mod.LIVE, mod.HERE))
+        # One agent still there keeps the whole plan live, restart or no restart.
+        mixed = {"w1": crashed, "w2": dict(back, name="w2")}
+        self.assertEqual(Stub(mixed).condition(plan), (mod.LIVE, mod.HERE))
+
+    def test_dormancy_is_wider_than_death_and_a_done_owner_is_not_dead(self):
+        """The asymmetry the two predicates keep, and the reason they are not one function.
+        `condition` asks "is anybody at work", so a `done` agent counts towards dormancy.
+        `owner` asks "did this agent die", and `done` is a healthy finish — folding the two
+        together would put DEAD beside the owner of every step anybody ever completed."""
+        mod = _plans_module()
+        self.assertTrue(mod._stopped({"state": "done"}))
+        self.assertTrue(mod._stopped({"state": "working", "gone": True}))
+        self.assertFalse(mod._stopped({"state": "working"}))
+        self.assertFalse(mod._stopped({}))          # a snapshot too old to carry either
+
+        class Stub(mod._Live):
+            def __init__(self, rows):
+                self.rows = rows
+
+            def agents(self):
+                return self.rows
+
+        self.assertEqual(Stub({"w1": {"state": "done", "display_state": "done"}})
+                         .owner("w1"), "done")
+        self.assertEqual(Stub({"w1": {"state": "working", "gone": True}})
+                         .owner("w1"), mod.DEAD)
 
     def test_a_workspace_with_no_agents_at_all_is_not_dormant(self):
         """No agent is not the same fact as every agent closed, and `any()` over an empty

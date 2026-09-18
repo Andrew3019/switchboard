@@ -581,6 +581,27 @@ DEAD, UNSEEN = "dead", "unknown"
 # agent on a worktree in one of these is what "dormant" means.
 CLOSED = ("done", "failed")
 
+
+def _stopped(row) -> bool:
+    """Has this agent stopped working, whatever its row still says? For DORMANCY only.
+
+    The state column alone was this test, and three-valued liveness broke it
+    (migration_sb_v2.md §9): a RESTORABLE absence — a machine restart, a killed pane, with
+    the checkout still on disk — is deliberately never written back as `failed` any more.
+    The row sits at `working` until `sb restore` brings it back, so a plan whose only agent
+    crashed that way counted as somebody at work for ever, on a worktree with nothing
+    running in it.
+
+    `gone` is sb's own flag for that and is already what `_Live.owner` reads, so this adds
+    no second opinion: it is the state column OR the flag, and the two readouts on one
+    `show` page now agree about the same agent.
+
+    WIDER THAN `owner`'s DEAD, deliberately. `done` is a healthy finish and belongs here —
+    dormancy is "nobody is at work", not "somebody died" — while calling it a death would
+    put DEAD beside the owner of every step anybody ever completed.
+    """
+    return str(row.get("state") or "") in CLOSED or bool(row.get("gone"))
+
 # The catalogue, shipped beside this file rather than kept in per-repo state: definitions
 # and templates are what the plugin KNOWS, not what a repo has done, and a repo that wants
 # its own puts a whole `plans` plugin under `.switchboard/plugins/` — which replaces this one
@@ -7688,7 +7709,10 @@ class _Live:
         state = str(row.get("state") or "")
         # `gone` as well as `failed`: `gone` is sb saying this agent never reported an end
         # and its pane is not there any more, which is the death a lead needs to see now
-        # rather than after the confirmation grace writes `failed` into the row for real.
+        # rather than after the confirmation grace writes `failed` into the row for real —
+        # and, since §9's three-valued liveness, for a restorable absence never at all.
+        # NOT `_stopped`, which is the wider question `condition` asks: `done` is a healthy
+        # finish and calling it a death would put DEAD beside every step anybody completed.
         if state == "failed" or row.get("gone"):
             return DEAD
         # `display_state` is the store's own reconciliation of the state column against
@@ -7774,6 +7798,17 @@ class _Live:
         a plan comes back from: restore one and the next render says live again. Nothing is
         deleted at any point on this ladder — cleanup means dropping out of a UI, and the
         record is plain text that is kept.
+
+        "Closed" here is `owner`'s test and not the state column alone, and the two have to
+        stay the same test or one `show` page contradicts itself. Since three-valued
+        liveness (migration_sb_v2.md §9) a RESTORABLE absence is never written back as
+        `failed` — a machine restart leaves the row sitting at `working` indefinitely,
+        waiting for `sb restore` — so a plan whose only agent crashed that way read `live`
+        for ever, with nothing running in its worktree, while the step right above it
+        already said its owner was `dead`. `gone` is the flag both now read: sb saying this
+        agent never reported an end and its pane is not there. A plan whose agents are all
+        merely awaiting restore is exactly the DORMANT case this ladder describes —
+        restore one and the next render says live again, which is the sentence above.
         """
         where = self.worktree(plan)
         steps = plan.get("steps") or []
@@ -7806,7 +7841,7 @@ class _Live:
             # the agents on this worktree belong to another. `_Live.owner` already refuses
             # to read that scoping as a death; this must not read it as a dormancy.
             return LIVE, where
-        if any(str(a.get("state") or "") not in CLOSED for a in mine):
+        if any(not _stopped(a) for a in mine):
             return LIVE, where
         return DORMANT, where
 
