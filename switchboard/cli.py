@@ -1462,13 +1462,26 @@ def _main(argv: Optional[list[str]], capture: dict[str, Any]) -> int:
         # second one a minute later is what confirms it (`status._confirmed_gone`).
         gone = sorted(a.name for a in snap.agents if a.gone)
         woken = b.wake_expired_waits(a.name for a in snap.agents if a.wait_expired)
+        # THE STOPPED-OWNER BACKSTOP'S FIRST HALF (migration_sb_v2.md §6). Here rather than
+        # on its own trigger for the reason the expired-wait wake is here: this verb already
+        # runs unattended on the collector's timer with a fresh, reaped snapshot in hand,
+        # and the rows this wakes are stamped by the same `collect` that decided `gone` two
+        # lines up. A second unattended command would be a second opinion about the same
+        # snapshot, arriving a tick later.
+        #
+        # The wake is NOT the attention item and does not make one: `status._stopped_owners`
+        # has already decided which of these rows a person is being called to, and this only
+        # tries the quieter thing first.
+        held = b.wake_stopped_owners(a for a in snap.agents if a.stopped_step)
         human = []
         if gone:
             human.append(f"gone: {', '.join(gone)}")
         if woken:
             human.append(f"expired waits: {', '.join(woken)}")
+        if held:
+            human.append(f"stopped owners woken: {', '.join(held)}")
         _emit(args, "; ".join(human) if human else "nothing to reconcile",
-              {"gone": gone, "expired_waits": woken})
+              {"gone": gone, "expired_waits": woken, "woken_owners": held})
         return 0
 
     try:

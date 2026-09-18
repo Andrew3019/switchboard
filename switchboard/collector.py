@@ -138,6 +138,20 @@ SOURCE_CHECK_GAP = 45.0
 # where the store is; these two only decide how often a process is spawned to do it.
 RECONCILE_GAP = 10.0
 RECONCILE_SWEEP = 600.0
+# The floor between two remote-fact polls, in seconds — the derivation tick's polling half
+# (migration_sb_v2.md §7, "a webhook is an optimization, polling is the correctness floor").
+# Not a tunable, for `DOORBELL_GAP`'s reason, and MUCH larger than the other gaps because
+# what it rate-limits is not a local process but a GitHub API call per open pull request.
+# The latency being bought is "a merge somebody did in a browser shows up within a minute
+# instead of never", and a minute does that as well as two seconds would while costing a
+# sixtieth as much of a rate limit that is shared with every other `gh` in the fleet.
+#
+# Cost when there is nothing to poll: one spawned `sb` that reads the plan files, finds no
+# plan with an open PR, and exits. A repo with no plans pays that once a minute and nothing
+# else — which is why there is no snapshot-side question gating it. The collector cannot ask
+# "is any PR open" without opening a plugin's state directory, and the whole shape of this
+# seam is that it does not (see `switchboard/obligations.py`).
+OBSERVE_GAP = 60.0
 # The floor between two attempts at the fleet-stats cold call, in seconds. Not a tunable,
 # for `DOORBELL_GAP`'s reason: it decides what a store that cannot be opened costs. The
 # cold call is primed once at startup (`FleetStats`), and if the store was not there yet —
@@ -203,6 +217,13 @@ class State:
     reconciles: int = 0
     last_reconcile: Optional[float] = None
     reconcile_error: Optional[str] = None
+    # The remote-fact poller, counted like the two above and for the third time for the same
+    # reason. This one is the most invisible of the four — its work happens on GitHub and
+    # lands in a plugin's files — so the counter is the only thing that says it ran at all,
+    # and `observe_error` is where a `gh` that is not authenticated shows up.
+    observations: int = 0
+    last_observe: Optional[float] = None
+    observe_error: Optional[str] = None
     # The auto-restore, counted like the two triggers above because it is the same shape
     # again — and published for a reason they do not have: this is the one trigger that
     # brings whole agents back, so "did it fire, and did the command it ran work" is a
@@ -231,6 +252,14 @@ def snapshot(db_path: Optional[Path] = None):
     A store too old or too new for this collector therefore surfaces as "could not read
     the tree: no such column: agents.branch" on forty screens, which is what a viewer
     should say — rather than being quietly migrated to suit a stale reader.
+
+    `repo` is the CHECKOUT, and it is passed for the same reason `cli.main` passes it: two
+    of `collect`'s readings are resolved against a repo rather than against the store. The
+    ROLE column's divergence marker was the first; the Step-shaped obligations of §6 are the
+    second, and they are the one every board this publishes to now draws — an agent
+    `awaiting external` reads as `stalled` without them. `_doorbell_cwd` is the same worktree
+    this process's triggers already spawn `sb` in, so there is one answer to "where are we"
+    rather than two that could point at different repos.
     """
     from . import store                    # the one module the renderers may not have
     from .herdr import Herdr
@@ -240,8 +269,10 @@ def snapshot(db_path: Optional[Path] = None):
             else store.connect(readonly=True)
     except Exception as e:                 # not a repo, no store yet, unreadable, ...
         return None, f"store unavailable: {e}"
+    here = _doorbell_cwd(db_path)
     try:
-        return status_mod.collect(db, Herdr(), reap=False), None
+        return status_mod.collect(db, Herdr(), reap=False,
+                                  repo=Path(here) if here else None), None
     except Exception as e:
         return None, f"could not read the tree: {e}"
     finally:
@@ -424,7 +455,7 @@ def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
     the reason the module note gives: this one is version-stale on purpose and must not be
     the place a rule lives (the four-hour doorbell incident was exactly that mistake).
 
-    **Two triggers.** A gone name fires it on the doorbell's rule — that work list empties
+    **Three triggers.** A gone name fires it on the doorbell's rule — that work list empties
     itself, because `_record_gone` writes `failed` and `gone` reads `state in REAPABLE`, so
     the row drops out of the set for good. Gone names are deliberately NOT deduped by name:
     the repeat is bounded by `GONE_CONFIRM_GRACE` and is not waste but the debounce itself,
@@ -438,16 +469,26 @@ def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
     In-process memory, like `last_doorbell`: a replacement collector re-sweeping once costs
     one process, and the reap is idempotent.
 
-    Ordinary STALLED agents remain passive. One narrower wake is intentional: a row whose
+    Ordinary STALLED agents remain passive. Two narrower wakes are intentional: a row whose
     explicit wait expired triggers this command so the agent can check status and either
-    resume or declare waiting again. The wait declaration itself is the once-only memory;
-    the current `sb reconcile` clears it after queueing the prompt.
+    resume or declare waiting again, and — since wave 5 — a row that has STOPPED while still
+    owning an unfinished Step (§6). The wait declaration itself is the once-only memory; the
+    current `sb reconcile` clears it after queueing the prompt. The stopped-owner wake has
+    no declaration to clear, so its once-only memory is its own `step_wake_sent` event,
+    which is also the clock `attention_timeout` runs against.
     """
     now = panel.now()
     gone = sorted(a.name for a in snap.agents if a.gone)
     expired = sorted(a.name for a in snap.agents if getattr(a, "wait_expired", False))
+    # THE THIRD TRIGGER, on the same rule as the other two: one question of the snapshot
+    # already in hand, then one `sb` command that decides everything else. A stopped agent
+    # still holding an unfinished Step wants waking (§6), and `Broker.wake_stopped_owners`
+    # is what decides whether it is actually due one — this only asks whether there is
+    # anybody to ask about. `getattr` for `wait_expired`'s reason: a snapshot published by a
+    # collector running older code has no such field.
+    held = sorted(a.name for a in snap.agents if getattr(a, "stopped_step", None))
     due = state.last_reconcile is None or now - state.last_reconcile >= RECONCILE_SWEEP
-    if not gone and not expired and not due:
+    if not gone and not expired and not held and not due:
         return False
     if state.last_reconcile is not None and now - state.last_reconcile < RECONCILE_GAP:
         return False
@@ -460,6 +501,43 @@ def run_reconciler(snap, state: State, db_path: Optional[Path]) -> bool:
     state.reconciles += 1
     threading.Thread(target=_run_sb, args=(sb, "reconcile", db_path, state, "reconcile"),
                      daemon=True).start()
+    return True
+
+
+def run_observer(state: State, db_path: Optional[Path]) -> bool:
+    """Poll the remote facts no local event announces — `sb plugin plans observe`.
+    -> whether one started.
+
+    THE TICK'S POLLING HALF (§7). A pull request merged in a browser, a head force-pushed, a
+    PR closed: none of them runs an `sb` command, so none of them reaches derived state
+    except by somebody asking. This is the asking, and it is on this loop for the reason the
+    other three triggers are — it is the one process in a fleet that runs on a timer whether
+    or not anybody is looking at anything.
+
+    NO SNAPSHOT QUESTION, and that is the one way this differs from its three siblings. They
+    each ask the snapshot already in hand whether there is work; whether any plan has an open
+    PR is a question about a PLUGIN'S state, which this process may not open (see
+    `switchboard/obligations.py` for the seam, and why a renderer-adjacent process asking a
+    plugin is not the same thing as reading its files). So the gate is the timer alone, and
+    the spawned command's own first act is to decide there is nothing to do. `OBSERVE_GAP`
+    is what makes that affordable.
+
+    In-process memory, like every other trigger's: a replacement collector polling once more
+    than it needed to costs one `gh` call, and the observation is idempotent.
+    """
+    now = panel.now()
+    if state.last_observe is not None and now - state.last_observe < OBSERVE_GAP:
+        return False
+    sb = doorbell_sb()
+    if sb is None:
+        state.observe_error = ("no `sb` in this checkout's `bin/` and none on PATH — "
+                               "nothing can poll remote facts")
+        return False
+    state.last_observe = now
+    state.observations += 1
+    threading.Thread(target=_run_sb,
+                     args=(sb, "plugin", db_path, state, "observe"),
+                     kwargs={"flags": ("plans", "observe")}, daemon=True).start()
     return True
 
 
@@ -813,6 +891,13 @@ def tick(paths: panel.Paths, state: State, db_path: Optional[Path],
         if not reaping:
             run_auto_restore(snap, state, db_path)
         run_usage_resume(snap, state, db_path)
+        # THE FOURTH TRIGGER, and the only one with no snapshot question in front of it —
+        # see `run_observer` for why a process that may not open a plugin's state directory
+        # cannot ask whether any plan has an open PR, and what `OBSERVE_GAP` buys instead.
+        # Independent of the other three for `ring_doorbell`'s reason: a fleet with a PR out
+        # usually has no dead pane and no stuck mail, so a shared gate would mean each
+        # mechanism only ran when another had work.
+        run_observer(state, db_path)
 
     state.wrote_at = at
     panel.publish(paths, panel.envelope(last_good or {}, state.as_dict(),

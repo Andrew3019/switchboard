@@ -711,6 +711,10 @@ _STEP_ID = re.compile(r"^(?:s(?:tep)?-)?(\d+)$", re.IGNORECASE)
 # came from declares `"completion": "system"` (Andrew, #314 A4 — a repo's own `deploy` kind can
 # be one Switchboard completes on observing the fact).
 _KIND_SYSTEM = ("open_pr", "merge")
+# The two system kinds by name, for the code that cares WHICH of them it is holding rather
+# than only that it is one — the Open PR bundle, `observe`, and `derive.py`'s Appendix A
+# states. Unpacked from the tuple above so there is one list of system kinds, not two.
+OPEN_PR_KIND, MERGE_KIND = _KIND_SYSTEM
 _KIND_JUDGMENT = ("implement", "review", "research", "design")
 _STEP_KINDS = _KIND_SYSTEM + _KIND_JUDGMENT
 SYSTEM, JUDGMENT = "system", "judgment"
@@ -841,6 +845,10 @@ def register(reg):
                       help="close the review step as the PR opens although its recorded "
                            "reviewer worked on the implementation; recorded as self-reviewed"),
               reg.arg("--reason", help="why, for the changelog")])
+    reg.command(
+        "observe", observe, audience="both",
+        help="poll GitHub for the remote facts no local event announces — a PR merged or "
+             "closed, and the head's check state — and move what they settle")
     reg.command(
         "step", step_verb, audience="both",
         help="`step retry <step>` — re-run a failed Open PR bundle, idempotently: the checks "
@@ -3036,6 +3044,135 @@ def open_pr(ctx, args) -> Result:
     return _bundle(ctx, args.plan, args, verb="open-pr")
 
 
+def observe(ctx, args) -> Result:
+    """Poll GitHub for the remote facts no local event announces, and move what they settle.
+
+    THE CORRECTNESS FLOOR OF THE DERIVATION TICK (migration_sb_v2.md §7): "Remote facts reach
+    Switchboard by webhook where the host provides one and by polling on the tick otherwise;
+    a webhook is an optimization, polling is the correctness floor." Nothing local fires when
+    a person merges a pull request in a browser, so without this a landed change sits on
+    every board as `Needs Human Review` until somebody types a verb — which is the state the
+    whole wave exists to stop an agent having to declare.
+
+    THREE FACTS AND NOTHING ELSE. A PR observed MERGED closes the plan's `merge`-kind step,
+    which is what takes the Plan to `complete` (Appendix A: "a `merge`-kind Step whose PR is
+    observed merged → `complete` from any state"). A PR observed CLOSED WITHOUT MERGING puts
+    the `open_pr`-kind step back to `failed` ("a system Step whose remote fact was later
+    observed false (PR closed)"), which is the one direction a completed system step may move
+    in. And the head's check rollup is recorded as a plan-level `ci` fact — a fact and NOT a
+    step and NOT a merge precondition (§4), so nothing here gates on it and nothing waits.
+
+    IT DOES NOT LAND ANYTHING AND MUST NOT. `change.landing` is the landing AUTHORITY's
+    record — who authorised this merge and against which head — and an observation is not an
+    authorisation. `merge` still writes it when `merge` runs; this only records that the
+    world moved, so a merge somebody did in a browser reads as done without a machine
+    inventing a person's approval for it. That is also why the step closes with the `auto-tick`
+    action, like every other fact this file works out for itself.
+
+    EVERY PLAN IN THE REPO, not this worktree's. A pull request is a fact about the repo, and
+    this runs from the collector's cwd — whichever checkout that happens to be — so scoping
+    it to `_here` would leave every other worktree's PR unobserved for as long as nobody
+    stood in it.
+
+    NEVER RAISES AND NEVER REFUSES. It runs unattended on a timer with nobody to read a
+    refusal, so a `gh` that will not answer, a PR that has vanished and a plan whose record
+    is half-written are each one plan skipped, reported in `data` and nowhere else.
+    """
+    doc, seal = _read_logged(ctx)
+    who = ctx.agent or "human"
+    moved: list[dict] = []
+    skipped: list[dict] = []
+    changed = False
+    for plan in doc["plans"]:
+        pr, head = _observing(plan)
+        if pr is None:
+            continue
+        pull, bad = _pull(ctx, pr)
+        if bad:
+            skipped.append({"plan": plan.get("id"), "pr": pr,
+                            "error": str((bad.data or {}).get("error") or "")[:200]})
+            continue
+        why = f"PR #{pr} observed {'merged' if pull.get('merged') else pull.get('state')}"
+        if pull.get("merged"):
+            for step in _of_kind(plan, MERGE_KIND):
+                if str(step.get("progress") or "") != OPEN:
+                    continue
+                _log(ctx, plan, who, DERIVED, why, _progress(step, DONE, None),
+                     step=step.get("id"))
+                moved.append({"plan": plan.get("id"), "step": step.get("id"),
+                              "to": DONE, "why": why})
+                changed = True
+        elif str(pull.get("state") or "") == "closed":
+            for step in _of_kind(plan, OPEN_PR_KIND):
+                if str(step.get("progress") or "") != DONE:
+                    continue
+                step["progress"] = FAILED
+                step["failure"] = {"op": "pull request", "detail": why}
+                _log(ctx, plan, who, DERIVED, why, f"{step['id']} done → {FAILED}",
+                     step=step.get("id"))
+                moved.append({"plan": plan.get("id"), "step": step.get("id"),
+                              "to": FAILED, "why": why})
+                changed = True
+        fact = _ci(ctx, str(pull.get("head", {}).get("sha") or head or ""))
+        if fact is not None and fact != plan.get("ci"):
+            plan["ci"] = fact
+            changed = True
+    if changed:
+        _write(ctx.state_dir, doc, seal)
+    human = "; ".join(f"{m['plan']}/{m['step']} → {m['to']} ({m['why']})" for m in moved)
+    return Result(human=human or "nothing observed", data={"moved": moved,
+                                                           "skipped": skipped})
+
+
+def _observing(plan: dict) -> tuple[Optional[int], Optional[str]]:
+    """The PR this plan is still waiting on, and its recorded head. `(None, None)` if none.
+
+    A plan is worth a `gh` call when it has opened a pull request and nothing has landed it:
+    before the first, there is no remote fact to observe, and after the second the plan's own
+    record already says how it ended. `merge` writing `landing` is therefore also what stops
+    this paying for a plan forever.
+    """
+    change = plan.get("change")
+    if not isinstance(change, dict) or isinstance(change.get("landing"), dict):
+        return None, None
+    pr = change.get("pr")
+    if not isinstance(pr, dict):
+        return None, None
+    return _pr_int(pr.get("number")), _sha(pr.get("head"))
+
+
+def _of_kind(plan: dict, kind: str) -> list[dict]:
+    """This plan's steps of one KIND — never of one name. See `_KIND_SYSTEM`."""
+    return [s for s in (plan.get("steps") or ())
+            if isinstance(s, dict) and _kind_of(s) == kind]
+
+
+def _ci(ctx, head: str) -> Optional[dict]:
+    """The combined check state of one commit, as a plan-level fact. None if it cannot be got.
+
+    A FACT AND NOT A GATE (§4, "Remote CI is neither a Step nor a merge precondition"). It is
+    recorded because a person reading a board wants to know whether the PR they are about to
+    merge is green, and for no other reason: nothing in this file reads it back, no verb
+    waits on it, and a red one refuses nothing.
+
+    Three words out of GitHub's four: `success` is green, `failure`/`error` are red, and
+    `pending` is pending. A commit with no checks configured at all comes back from this
+    endpoint as `pending` with an empty list, which is honest — nothing has said anything.
+    """
+    if not head:
+        return None
+    got, bad = _github(ctx, [f"repos/{{owner}}/{{repo}}/commits/{head}/status"])
+    if bad or got is None:
+        return None
+    try:
+        rollup = json.loads(got.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    state = str((rollup or {}).get("state") or "")
+    word = {"success": "green", "failure": "red", "error": "red"}.get(state, "pending")
+    return {"state": word, "head": head, "at": int(time.time())}
+
+
 def step_verb(ctx, args) -> Result:
     """`step retry <step>`: re-run a FAILED Open PR bundle.
 
@@ -4230,8 +4367,8 @@ def name_step(ctx, args) -> Result:
 # What a READ adds to a plan and its steps — derived live, resolved from the library, or
 # computed from the store — and never stores. A document carrying them back carries nothing.
 _VIEW_PLAN = frozenset({"version", "condition", "worktree", "roles", "tokens", "incomplete",
-                        "advisories", "file"})
-_VIEW_STEP = frozenset({"owner_status"})
+                        "advisories", "file", "landing"})
+_VIEW_STEP = frozenset({"owner_status", "state"})
 # SYSTEM-HELD: what the store and the verbs own. An agent's document never overrides these,
 # so an edit read before a tick cannot un-tick the step by handing the old progress back.
 # `kind` and `def` on a step are not in here because a CHANGE to either is refused rather than
@@ -7911,10 +8048,26 @@ def _viewed(shown: dict, live: _Live, *, tokens: bool = False) -> dict:
     one thing here that costs a subprocess per agent (see `_Live.tokens`). `list` renders a
     board and must not pay it; a terminal `show` has nowhere to draw it either.
     """
-    steps = [dict(s, kind=_kind_of(s), owner_status=live.owner(s.get("owner")))
+    # THE APPENDIX A DERIVED STATES (§6, #324), from the one place they are computed. A
+    # reader of `show` and `status.collect` read the same function over the same document —
+    # `derive.py` — so a step that `awaiting external` excuses its owner for cannot draw
+    # `open` here while the fleet's readout calls it `blocked`.
+    # Imported here and not at the top: `derive` imports this module's own vocabulary, so a
+    # module-level import either way round is a cycle. Local, it is resolved after both
+    # modules exist — the same shape `status.collect` uses for `store`.
+    from . import derive
+    derived = derive.step_states(shown)
+    steps = [dict(s, kind=_kind_of(s), owner_status=live.owner(s.get("owner")),
+                  state=derived.get(str(s.get("id") or "")))
              for s in (shown.get("steps") or ())]
     condition, where = live.condition(shown)
-    out = dict(shown, steps=steps, condition=condition, worktree=where)
+    # `landing` BESIDE `condition` and not instead of it: they are different axes and both
+    # are real. `condition` is whether anybody is at work on this plan (live/dormant/
+    # finished/abandoned); `landing` is where the CHANGE has got to (`in progress` /
+    # `Needs Human Review` / `complete`). A dormant plan with a PR out is both, and
+    # collapsing the two would lose whichever one the reader happened to want.
+    out = dict(shown, steps=steps, condition=condition, worktree=where,
+               landing=derive.plan_condition(shown, derived))
     # The agents that actually MOVED this plan — the `by` of every tick and skip — which is
     # the same join both stats want and is read once for the two of them.
     who = [c["by"] for c in _closings(out).values() if c.get("by")]
@@ -8308,6 +8461,7 @@ def _step_lines(steps: list) -> list[str]:
     where it is, and a skipped step whose reason is twenty lines down in the changelog is
     the absence this design exists to avoid — `show` is the place a plan is read in full.
     """
+    from . import derive                  # local, for `_viewed`'s reason: `derive` imports us
     out = []
     for s in steps:
         # Nine, because an id is `step-<n>` now and `s-<n>` on a plan made before that:
@@ -8330,6 +8484,15 @@ def _step_lines(steps: list) -> list[str]:
             bits.append(f"[{_flat(_defkey(s))}]")
         if s.get("obliged_by"):
             bits.append(f"obliged by {_flat(s['obliged_by'])}")
+        # THE DERIVED STATE, and only where it says something the stored word does not.
+        # `progress` is in the column at the front of this line and is what somebody TYPED;
+        # this is what Switchboard concludes (`derive.step_states`). They agree on most
+        # steps — an `open` step that is eligible is `active` and saying both would be the
+        # same fact twice — so the two readings the stored word cannot express are the only
+        # ones drawn: `pending`, which is "open but not yours to start yet", and `blocked`,
+        # which is a merge waiting on a person and the reason its owner is not stalled.
+        if s.get("state") in (derive.PENDING, derive.BLOCKED):
+            bits.append(_flat(s["state"]))
         if s.get("gate"):
             # The word on the line and the sentence below it. A lead scanning a plan needs
             # to see WHICH steps end in a human without reading every exit condition, and

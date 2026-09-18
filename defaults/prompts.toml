@@ -181,6 +181,21 @@ mail = "A message could not be delivered inline. Run: sb inbox"
 # collector snapshot.
 wait_expired = "Your declared wait expired. Run `sb status`, then continue the work or declare the appropriate `sb waiting` state again if it is still genuinely pending."
 
+# An agent has stopped — reported `done`, or gone quiet with nothing explaining it — while a
+# Step of a plan it owns is still `active` or `failed` (migration_sb_v2.md §6, "a stopped
+# owner does not hide an incomplete Step"). Switchboard wakes the owner BEFORE it puts the
+# Step in front of a person, so that an ordinary Step-to-Step handoff stays inside the agent
+# tree rather than poisoning `Needs You`.
+#
+# Three exits and the message names all three, because "finish it" alone is the one reading
+# that is often wrong: the agent may have finished and forgotten to close the step, may no
+# longer be the right owner, or may genuinely have dropped it. A release is a legitimate
+# answer and saying so is what stops an agent inventing work to justify the step.
+#
+# The step id is a placeholder because it has to be: this wake is about one step, and an
+# agent holding several would otherwise have to guess which one woke it.
+step_wake = "You still own {step}, which is not finished and nothing else is advancing. Run `sb plugin plans show {plan}`, then either complete it, hand it on (`sb plugin plans release <step> --reason ...`), or say what is blocking it. If you already finished it, close it — an open step reads to everyone downstream as work nobody did."
+
 # What restarts a parent whose turn ended while a child was working. Without this the
 # parent would have to poll, which costs it a turn every time it looks.
 #

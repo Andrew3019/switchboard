@@ -502,6 +502,45 @@ gone_confirm_grace = 60.0
 # deliberately the smallest number that is not zero and still means something.
 stalled_floor = 3.0
 
+# How long an agent with NO explained reason to be idle must stay that way before the
+# idleness is read as a stall (`status.STALL_THRESHOLD`, migration_sb_v2.md §6: "if none of
+# those explains it and the agent has done nothing for longer than `stall_threshold` ... it
+# is `stalled`"). The repo-configurable threshold Appendix A names, and it is the term that
+# decides; `stalled_floor` above is not that and must not be turned into it.
+#
+# THE TWO ARE STRUCTURALLY DIFFERENT AND BOTH APPLY. `stalled_floor` is an anti-flicker
+# EXCUSE — an idle row younger than it says "just finished a turn", which is why it lives in
+# the excuse ladder and why `stalled` is exactly "idle and no excuse". This is a DURATION
+# TERM on top of that: past the floor, past every explained-idle row of Appendix A, and
+# still nothing for this long. A repo that wants a quieter `--needs-me` raises this and
+# leaves the floor where it is.
+#
+# THE DEFAULT IS THE FLOOR'S OWN VALUE, deliberately, so that shipping this knob changes no
+# fleet's reading of any row on the day it lands: every agent that was stalled before is
+# stalled now, at the same second. It is the one honest default for a threshold whose right
+# value is a property of how a particular fleet works — a repo whose agents routinely think
+# for minutes between `sb` commands turns it up, and until somebody measures that, inventing
+# a larger number here would quietly hide real stalls from `sb status --needs-me` on every
+# fleet at once.
+stall_threshold = 3.0
+
+# How long a wake sent to a stopped agent that still holds an incomplete Step may go unacted
+# on before that Step is put in front of a person (`status.ATTENTION_TIMEOUT`,
+# migration_sb_v2.md §6: "If the owner is not restorable, or the wake has not been acted on
+# within `attention_timeout`, the Step surfaces as a `Needs You` item").
+#
+# SEPARATE FROM `stall_threshold` ON PURPOSE, and §7 says why in as many words: "This timer
+# is separate from `stall_threshold` so tuning stall detection does not change how long an
+# orphaned Question survives." One is how long unexplained silence is tolerated, the other is
+# how long a delivered poke is given to work — different questions about different subjects,
+# and a fleet that wants to be nagged less about stalls must not thereby lose track of a step
+# nobody is advancing.
+#
+# Fifteen minutes. The wake is a message into a live pane and an agent that is going to act
+# on one acts within a turn or two; this is sized so that an ordinary step-to-step handoff
+# never reaches a person, and a handoff that genuinely fell on the floor does.
+attention_timeout = 900.0
+
 # How long an explicit `sb waiting` remains quiet before Switchboard asks the agent to
 # check again. Sixty minutes clears ordinary background work without turning a forgotten
 # wait into permanent immunity from STALLED. On expiry the unattended reconciler sends one

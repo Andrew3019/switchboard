@@ -56,7 +56,7 @@ from . import sweep as sweep_mod
 from . import validate
 from . import herdr as herdr_mod
 from .herdr import WORKING, Agent, Herdr, HerdrError
-from .status import (GONE_CONFIRM_GRACE, GONE_STATE, REAPABLE, RUNNING,
+from .status import (ATTENTION_TIMEOUT, GONE_CONFIRM_GRACE, GONE_STATE, REAPABLE, RUNNING,
                      WAIT_EXCUSE_GRACE, fmt_age, is_closed, working_again)
 from . import live
 
@@ -165,6 +165,8 @@ LIFECYCLE_PROMPTS = (
      "a child finished and its report could not be delivered inline"),
     ("notify.wait_expired",
      "a declared `sb waiting` outlived `timeouts.wait_excuse_grace`"),
+    ("notify.step_wake",
+     "a plan Step this agent owns is incomplete while this agent has stopped"),
     ("notify.interrupt",
      "`sb tell --interrupt` cancels what this agent is doing, mid-turn"),
     ("notify.needs_reply",
@@ -6480,6 +6482,55 @@ class Broker:
                                 mode=wait["mode"], cohort=wait["cohort"])
                 woken.append(who)
         return woken
+
+    def wake_stopped_owners(self, rows: Iterable) -> list[str]:
+        """Poke each stopped agent that still owns an unfinished Step. -> who was poked.
+
+        THE FIRST HALF OF THE BACKSTOP (migration_sb_v2.md §6): "Switchboard first wakes the
+        owner — delivering a message that reactivates a `completed`-but-live owner, held for
+        a not-live one until restore — which keeps an ordinary Step-to-Step handoff inside
+        the agent tree rather than poisoning `Needs You`." A person is only reached if this
+        does not work, and `status.ATTENTION_TIMEOUT` is timed from the poke this sends.
+
+        `wake_expired_waits`' shape, deliberately, and the same two guards. The condition is
+        rechecked against a live read rather than trusted from the collector's snapshot, and
+        a prompt that will not go leaves nothing stamped — so an unobserved failure shows up
+        as the item this was trying to avoid, never as a silently renewed quiet.
+
+        HELD FOR A NOT-LIVE OWNER, and this is what "held ... until restore" is in code: a
+        prompt into a pane herdr does not have raises, nothing is written down, and the next
+        pass tries again. So the timeout never starts running against an agent that was
+        never actually reached, and a restored agent is woken on the first pass after it
+        comes back. Nothing queues, nothing expires, and there is no second mechanism.
+
+        ONE POKE PER `ATTENTION_TIMEOUT` WINDOW. This runs on the collector's timer, so
+        without a gap a stopped owner would be prompted every ten seconds for as long as it
+        stayed stopped — and the whole point of the timer is that a poke is given time to
+        work. The stamp is the event `status._step_wakes` reads, so the gap and the timeout
+        are one clock rather than two that could disagree.
+        """
+        poked = []
+        for row in rows:
+            who, step = row.name, row.stopped_step
+            if not step:
+                continue
+            sent = self.db.execute(
+                "SELECT MAX(created_at) at FROM events "
+                "WHERE kind='step_wake_sent' AND agent=?", (who,)).fetchone()
+            last = sent["at"] if sent else None
+            if last is not None and store.now() - last < ATTENTION_TIMEOUT:
+                continue
+            plan = step.split("/", 1)[0]
+            text = f"{tag('sb')} {self._say('notify.step_wake', step=step, plan=plan)}"
+            try:
+                self.h.prompt(who, text)
+            except HerdrError as e:
+                store.log_event(self.db, kind="step_wake_failed", agent=who,
+                                step=step, error=str(e))
+                continue
+            store.log_event(self.db, kind="step_wake_sent", agent=who, step=step)
+            poked.append(who)
+        return poked
 
     def _inline_mail(self, who: str,
                      mine: Sequence[sqlite3.Row]) -> tuple[Optional[str], list[int]]:
