@@ -1394,60 +1394,113 @@ class StatusTest(unittest.TestCase):
 
     # -- blocked ----------------------------------------------------------
 
-    def test_blocked_carries_its_reason(self):
+    def test_an_open_human_question_carries_its_text(self):
+        """`blocked_why` is the question now (#325), not the reason of a removed verb, and
+        `blocked` is derived from it rather than from any stored state."""
         store.create_agent(self.db, name="w1", role="worker")
-        store.set_state(self.db, "w1", "blocked")
-        store.log_event(self.db, kind="blocked", agent="w1", why="cannot find the config")
+        store.create_question(self.db, asker="w1", target=store.Q_HUMAN,
+                              body="cannot find the config")
         snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]))
         a = self.by_name(snap)["w1"]
         self.assertTrue(a.blocked)
         self.assertTrue(a.needs_human)
+        self.assertEqual(a.state, "working")          # asking is not a state
         self.assertEqual(a.blocked_why, "cannot find the config")
         self.assertIn("cannot find the config", status.render(snap))
 
-    def test_blocked_is_never_reported_as_stalled(self):
-        """`blocked` is not a running state, so idleness is expected, not drift."""
-        store.create_agent(self.db, name="w1", role="worker")
-        store.set_state(self.db, "w1", "blocked")
-        snap = status.collect(self.db, FakeHerdr([alive("w1", "idle")]))
-        self.assertFalse(self.by_name(snap)["w1"].stalled)
+    def test_an_agent_waiting_on_a_person_is_never_reported_as_stalled(self):
+        """It is idle for a declared reason, which is what `stalled` means it is not.
 
-    def test_a_blocked_agents_undelivered_mail_is_not_explained_as_waiting_for_idle(self):
-        """The explanation branches, because the mechanism does.
-
-        A blocked agent's mail is held on `_is_blocked` in `_ring`/`flush_pending` and
-        released by the human's answer alone — going idle is not a state it passes
-        through. The unbranched sentence told the reader to wait for something that will
-        never happen.
+        This is the one thing the `blocked` state was doing that a derived reading has to
+        keep doing: without the excuse, an agent that asked and stopped would be idle with
+        nothing explaining it and would read STALLED the moment its floor elapsed.
         """
         store.create_agent(self.db, name="w1", role="worker")
-        store.set_state(self.db, "w1", "blocked")
+        store.create_question(self.db, asker="w1", target=store.Q_HUMAN, body="which one?")
+        later = store.now() + int(status.STALL_THRESHOLD) + 1
+        a = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("w1", "idle")]), now=later))["w1"]
+        self.assertFalse(a.stalled)
+        self.assertEqual(a.idle_excuse, "waiting on an answer from a person")
+        self.assertEqual(a.derived_state, status.WAITING_ON_HUMAN)
+
+    def test_waiting_on_human_outranks_waiting_on_child(self):
+        """Appendix A's ordering intent: a lead that asked a person something is waiting on
+        the person, not on a child that happens to still be alive."""
+        store.create_agent(self.db, name="lead", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead")
+        store.create_question(self.db, asker="lead", target=store.Q_HUMAN, body="which?")
+        rows = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("lead", "idle"), alive("kid", "working")])))
+        self.assertEqual(rows["lead"].derived_state, status.WAITING_ON_HUMAN)
+
+    def test_resolving_the_question_clears_the_row(self):
+        store.create_agent(self.db, name="w1", role="worker")
+        qid = store.create_question(self.db, asker="w1", target=store.Q_HUMAN, body="?")
+        store.end_question(self.db, qid, state=store.Q_RESOLVED, answer="yes", by="human")
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))["w1"]
+        self.assertFalse(a.blocked)
+        self.assertIsNone(a.blocked_why)
+
+    def test_a_question_aimed_at_an_agent_is_not_on_the_humans_row(self):
+        """Only a human-targeted Question marks a row for a person."""
+        store.create_agent(self.db, name="lead", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead")
+        store.create_question(self.db, asker="kid", target="lead", body="which branch?")
+        rows = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("kid", "idle"), alive("lead", "working")])))
+        self.assertFalse(rows["kid"].blocked)
+        self.assertIsNone(rows["kid"].blocked_why)
+        # It explains the ASKER's idle turn instead, in Appendix A's own word.
+        self.assertEqual(rows["kid"].derived_state, status.WAITING_ON_AGENT)
+        self.assertFalse(rows["kid"].stalled)
+
+    def test_a_question_nobody_is_left_to_answer_explains_nothing(self):
+        """Same rule at the other end: a target whose row has ended will never answer, so
+        the asker is an ordinary silent agent from there on."""
+        store.create_agent(self.db, name="lead", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           session_id="s2")
+        store.create_question(self.db, asker="kid", target="lead", body="which branch?")
+        store.set_state(self.db, "lead", "done")
+        later = store.now() + int(status.STALL_THRESHOLD) + 1
+        rows = self.by_name(status.collect(
+            self.db, FakeHerdr([alive("kid", "idle"), alive("lead", "idle")]), now=later))
+        self.assertTrue(rows["kid"].stalled)
+
+    def test_a_root_awaiting_its_first_task_is_still_waiting_on_a_human(self):
+        """The second way into `WAITING_ON_HUMAN`, unchanged by #325."""
+        store.create_agent(self.db, name="top", role="dispatcher", is_top=True)
+        self.db.execute("UPDATE agents SET awaiting_task=1 WHERE name='top'")
+        self.db.commit()
+        a = self.by_name(status.collect(self.db, FakeHerdr([alive("top", "idle")])))["top"]
+        self.assertEqual(a.derived_state, status.WAITING_ON_HUMAN)
+
+    def test_an_agent_with_a_question_is_still_told_the_doorbell_waits_for_idle(self):
+        """Its mail is NOT held any more (#325 removed the block holdback), so the ordinary
+        sentence is the true one for it too."""
+        store.create_agent(self.db, name="w1", role="worker")
+        store.create_question(self.db, asker="w1", target=store.Q_HUMAN, body="?")
         store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
         out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))
-        self.assertIn("held until the human", out)
-        self.assertIn("not until it goes idle", out)
-
-    def test_an_unblocked_agent_is_still_told_the_doorbell_waits_for_idle(self):
-        """The branch is an exception, not a replacement: this case is unchanged."""
-        store.create_agent(self.db, name="w1", role="worker")
-        store.put_message(self.db, from_agent="x", to_agent="w1", kind="tell", body="a")
-        out = status.render(status.collect(self.db, FakeHerdr([alive("w1")])))
         self.assertIn("released when it goes idle", out)
         self.assertNotIn("not until it goes idle", out)
 
-    def test_the_blocked_row_names_who_can_actually_answer(self):
-        """Only the human's `tell` clears a block (`answer=(me == HUMAN)`)."""
+    def test_the_row_names_the_verb_that_actually_answers(self):
+        """A bare `sb tell` resolves nothing, so pointing a person at one would send them
+        to do something that leaves the question exactly where it was."""
         store.create_agent(self.db, name="w1", role="worker")
-        store.set_state(self.db, "w1", "blocked")
-        store.log_event(self.db, kind="blocked", agent="w1", why="which branch?")
+        store.create_question(self.db, asker="w1", target=store.Q_HUMAN,
+                              body="which branch?")
         out = status.render(status.collect(self.db, FakeHerdr([alive("w1", "idle")])))
-        self.assertIn("the human answers it: sb tell w1", out)
+        self.assertIn("sb answer", out)
+        self.assertNotIn("sb tell w1", out)
 
-    def test_the_latest_block_reason_wins(self):
+    def test_the_latest_question_wins(self):
+        """One agent, several open questions, one line to draw."""
         store.create_agent(self.db, name="w1", role="worker")
-        store.log_event(self.db, kind="blocked", agent="w1", why="first")
-        store.log_event(self.db, kind="blocked", agent="w1", why="second")
-        store.set_state(self.db, "w1", "blocked")
+        store.create_question(self.db, asker="w1", target=store.Q_HUMAN, body="first")
+        store.create_question(self.db, asker="w1", target=store.Q_HUMAN, body="second")
         snap = status.collect(self.db, FakeHerdr())
         self.assertEqual(self.by_name(snap)["w1"].blocked_why, "second")
 
@@ -1552,7 +1605,7 @@ class StatusTest(unittest.TestCase):
         store.create_agent(self.db, name="busy", role="worker")
         store.create_agent(self.db, name="stuck", role="worker")
         store.create_agent(self.db, name="mail", role="worker")
-        store.set_state(self.db, "stuck", "blocked")
+        store.create_question(self.db, asker="stuck", target=store.Q_HUMAN, body="which?")
         store.put_message(self.db, from_agent="x", to_agent="mail", kind="tell", body="a")
         snap = status.collect(self.db, FakeHerdr([alive("busy"), alive("mail")]),
                               needs_me=True)
@@ -1620,7 +1673,7 @@ class StatusTest(unittest.TestCase):
     def test_a_cycle_does_not_hang_the_ancestor_walk_under_a_filter(self):
         store.create_agent(self.db, name="a", role="worker", parent="b")
         store.create_agent(self.db, name="b", role="worker", parent="a")
-        store.set_state(self.db, "a", "blocked")
+        store.create_question(self.db, asker="a", target=store.Q_HUMAN, body="which?")
         snap = status.collect(self.db, FakeHerdr(), needs_me=True)
         self.assertIn("a", {x.name for x in snap.agents})
 
@@ -1741,7 +1794,8 @@ class StatusTest(unittest.TestCase):
 _STATUS_JSON_SAMPLE = {                                  # a minimal legal argv per verb
     "start": [], "delegate": ["do a thing"],
     "tell": ["w1", "hi"], "inbox": [], "waiting": [],
-    "done": ["finished"], "block": ["why"],
+    "done": ["finished"], "ask": ["human", "which branch?"], "answer": ["1", "main"],
+    "resolve": ["1"], "withdraw": ["1"], "escalate": ["1"], "questions": [],
     # Summary optional — a bare `sb close` is the silent self-close.
     "close": [],
     "status": [], "presets": [], "models": [], "init": [], "doctor": [],
@@ -2251,13 +2305,14 @@ class ArchivedTest(unittest.TestCase):
         self.assertIn("2 agents", status.render(snap))
 
     def test_an_archived_agent_that_needs_a_person_is_still_named_in_full(self):
-        """The sharp end of "archived is archived". A blocked agent whose pane died is a
-        question nobody can answer any more, so it may be collapsed out of the tree but it
-        must not become invisible: NEEDS YOU reads `snap.agents` and never sees collapse.
+        """The sharp end of "archived is archived". An agent whose pane died holding a
+        question for a person is one nobody can answer any more, so it may be collapsed out
+        of the tree but it must not become invisible: NEEDS YOU reads `snap.agents` and
+        never sees collapse.
         """
         store.create_agent(self.db, name="w1", role="worker", session_id="s1")
-        store.set_state(self.db, "w1", "blocked")
-        store.log_event(self.db, kind="blocked", agent="w1", why="which database?")
+        store.create_question(self.db, asker="w1", target=store.Q_HUMAN,
+                              body="which database?")
         snap = self.collect(FakeHerdr([]), now=self.old())
         out = status.render(snap)
 

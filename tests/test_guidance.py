@@ -540,7 +540,7 @@ class SubtractiveTest(Fixture, unittest.TestCase):
         """Obj. 12 — the win is partial and claimed only for reminder-shaped rules.
         Identity and orientation prose has no later turn to wait for."""
         p = config.protocol(self.repo)
-        for kept in ("sb done", "sb block", "sb delegate", "sb inbox"):
+        for kept in ("sb done", "sb ask human", "sb delegate", "sb inbox"):
             self.assertIn(kept, p)
 
 

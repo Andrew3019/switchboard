@@ -187,13 +187,13 @@ class TheCarveOutsStandTest(SignalFixture, unittest.TestCase):
         self.b.tell([self.w1], "stop, do this instead", me=HUMAN, mode=INTERRUPT)
         self.assertEqual([who for who, _ in self.rings()], [self.w1])
 
-    def test_a_block_is_not_held_by_a_signal(self):
+    def test_a_question_to_a_person_is_not_held_by_a_signal(self):
         self.b.grant(self.w1, CAP_SPAWN, me=self.lead)
         self.assertTrue(self.b._holdback_open(self.w1))
-        self.b.block("need a person", me=self.w1)
+        self.b.ask(HUMAN, "need a person", me=self.w1)
         # It writes no message row at all — it reaches a person through `_surface`.
         self.assertEqual([m["kind"] for m in self.mail(self.w1)], [SIGNAL])
-        self.assertTrue(any(e["kind"] == "blocked"
+        self.assertTrue(any(e["kind"] == "question_asked"
                             for e in store.recent_events(self.db, agent=self.w1)))
 
 

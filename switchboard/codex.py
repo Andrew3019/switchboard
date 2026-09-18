@@ -147,7 +147,7 @@ def private_tmp(home: Path) -> Optional[Path]:
 
         bwrap: execvp codex-linux-sandbox: No such file or directory
 
-    That is EVERY command, `sb done` and `sb block` among them, so the agent cannot even
+    That is EVERY command, `sb done` and `sb ask` among them, so the agent cannot even
     say what happened. Found live, 2026-08-25, against codex-cli 0.149.1 (bug report
     `2026-08-25-134902`): a QA agent cloned this repo into its scratch directory under
     /tmp, which put the store — and so every per-agent home under it — inside /tmp.

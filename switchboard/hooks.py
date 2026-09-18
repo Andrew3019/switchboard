@@ -1,16 +1,10 @@
-"""The Stop gate, and the activity signal — both of them turn edges.
+"""The two turn edges — the activity signal, and nothing else.
 
-`sb done` is asked for by the protocol and, until this file existed, enforced by nothing:
-an agent could end its turn silently and its work stayed invisible until a person noticed.
-That happened four times on 2026-08-11. This is the mechanical half — a `Stop` hook that
-refuses the end of a turn nobody reported.
-
-The second thing this file does is answer "is this agent working right now?" from the same
-two edges. Switchboard had no signal of its own for that: it asked herdr, which infers it
-by matching Claude's spinner glyphs in the terminal title, and Claude Code 2.1.228 changed
-those glyphs — so herdr reported idle for every pane on this machine, including agents
-provably mid-tool-call. One cosmetic change upstream took
-out hold-until-free delivery and made the board lie. So we record the fact ourselves:
+Switchboard had no signal of its own for "is this agent working right now?": it asked
+herdr, which infers it by matching Claude's spinner glyphs in the terminal title, and
+Claude Code 2.1.228 changed those glyphs — so herdr reported idle for every pane on this
+machine, including agents provably mid-tool-call. One cosmetic change upstream took out
+hold-until-free delivery and made the board lie. So we record the fact ourselves:
 
     UserPromptSubmit  ->  agents.turn = 'working'      a turn began
     Stop              ->  agents.turn = 'idle'         a turn ended
@@ -23,8 +17,16 @@ than the existing 72-second grace and the longest ran 18 minutes, so no timeout 
 edges cost nothing per tool call, about 74 ms once per turn, and need no timeout at all: a
 long tool call is inside a turn that began and has not ended, however long it runs.
 
-The turn-STARTED edge carries a third thing since the guidance ledger (spec §2.4). What the
-CLI does with a `UserPromptSubmit` hook's stdout — add it to the agent's context — is a
+THIS FILE USED TO ENFORCE. A `Stop` gate refused the end of a turn nobody had reported,
+handing the agent a reason and another turn, with a per-agent cap and four waivers to keep
+it from nagging an agent that had done nothing wrong. It is gone (#325). A silent finish is
+now a PASSIVE reading and nothing speaks to the agent about it: the turn edge below is
+recorded, the row goes idle with no excuse, and `status` draws it STALLED and lists it in
+`--needs-me`. The enforcement's own waivers went with it — there is no decision left for
+them to waive — and so did `sb block`, which was half of what the reason string offered.
+
+The turn-STARTED edge carries a second thing since the guidance ledger (spec §2.4). What
+the CLI does with a `UserPromptSubmit` hook's stdout — add it to the agent's context — is a
 per-turn injection channel that was deliberately going unused, and `guidance.deliver` is
 what now speaks on it. No new hook, no new settings entry, no new process: the hook that
 already fired once per turn returns a line when a rule applies to that agent, and the empty
@@ -39,22 +41,17 @@ Three pieces:
 * `codex_hook_commands()` is the same two hooks for the other provider. Codex's hook
   system is Claude-Code-shaped on purpose — same event names, same output schema, same
   `stop_hook_active` flag — so only the WIRING differs: a TOML block in the agent's
-  private `CODEX_HOME` rather than a settings JSON handed over as `--settings`. The
-  decision below is shared and is not written twice.
-* `stop_gate()` is the decision, run once per turn end by `bin/sb-stop-hook`.
+  private `CODEX_HOME` rather than a settings JSON handed over as `--settings`.
 * `mark_turn()` is the signal, written by `bin/sb-activity-hook` at the start of a turn
-  and by `run()` at the end of one — AFTER the gate has decided, and only if the turn is
-  actually being allowed to end. See `run()`.
+  and by `run()` at the end of one.
 
 Verified against the real CLI rather than the docs (2026-08-11): with `--settings <file>`
-and **no** `--bare`, the hook fires; `--bare` skips hooks entirely and would have produced
-a gate that never ran. Printing `{"decision": "block", "reason": …}` on stdout with exit 0
-blocks the stop and gives the model another turn. On that next turn the payload carries
-`stop_hook_active: true`, which is the loop cap below.
+and **no** `--bare`, the hook fires; `--bare` skips hooks entirely.
 
-Everything here fails OPEN. A gate that cannot tell who is calling, or that cannot open the
-store, must let the turn end: the cost of a missed nudge is a stalled row that `status`
-already names, and the cost of a false block is an agent that can never stop.
+Everything here fails OPEN. A hook that cannot tell who is calling, or that cannot open the
+store, records nothing and lets the turn end: the cost of a missed edge is a row whose
+signal is stale, which `status.AgentStatus.signal_drift` already cross-checks, and the cost
+of a raised hook is an agent that can never stop.
 """
 
 from __future__ import annotations
@@ -70,20 +67,6 @@ from typing import Any, Optional
 
 from . import guidance
 from . import store
-
-# The states that mean "this agent reported". `blocked` is a report — it is the one way an
-# agent reaches a person — and `failed` is a turn that ended on purpose too.
-REPORTED = ("done", "blocked", "failed")
-
-# What the agent is told when it tries to finish without one. It names the cap on purpose:
-# an agent that believes it will be nagged forever starts inventing reports to escape.
-BLOCK_REASON = (
-    "switchboard: your turn cannot end without a report. Call "
-    '`sb done "<summary>"` if the work is finished — your summary is the only thing '
-    "your parent ever sees — or "
-    '`sb block "<why>"` if you need a human. Nothing you write in this pane reaches '
-    "anyone. You will only be stopped once; if neither verb applies, say why and stop."
-)
 
 _SETTINGS_DIRNAME = "hooks"
 
@@ -205,19 +188,18 @@ def codex_hook_commands(cwd: Optional[Path] = None) -> dict[str, str]:
     payload carries `session_id`, `stop_hook_active` and `transcript_path`, and a
     `{"decision":"block"}` on stdout re-opens the turn exactly as it does for Claude.
 
-    So the DECISION is shared. `stop_gate`, `mark_turn`, `run` and `run_activity` are
-    provider-agnostic already and are not duplicated here; what differs is where the
-    wiring is written — a TOML block in the agent's private `CODEX_HOME` instead of a
-    settings JSON — and that is all this returns. `switchboard/codex.py` turns it into
-    TOML; the matcher, the shape and the timeout are its business, not this file's.
+    So the DECISION is shared. `mark_turn`, `run` and `run_activity` are provider-agnostic
+    already and are not duplicated here; what differs is where the wiring is written — a
+    TOML block in the agent's private `CODEX_HOME` instead of a settings JSON — and that is
+    all this returns. `switchboard/codex.py` turns it into TOML; the matcher, the shape and
+    the timeout are its business, not this file's.
 
-    THE CAP IS NOT OPTIONAL HERE. `_already_nudged` is a defensive cap for Claude and a
-    mandatory one for codex: openai/codex#37937 is an open bug in which a Stop hook that
-    keeps blocking loops with no escape at all. The cap is what stops the gate meeting
-    that bug — one block per agent until it reports — and it lives in the shared decision
-    above precisely so this path cannot be wired up without it.
+    NOTHING HERE CAN LOOP ANY MORE, and that is worth naming because it used to be the
+    delicate part. openai/codex#37937 is an open bug in which a Stop hook that keeps
+    blocking loops with no escape at all; the gate that could do that is gone (#325) and
+    `run` returns `{}` unconditionally, so the shared decision cannot meet that bug.
 
-    Returns {} rather than raising, for `stop_hook_args`' reason: enforcement is worth a
+    Returns {} rather than raising, for `stop_hook_args`' reason: the signal is worth a
     lot, but not a spawn.
     """
     try:
@@ -309,89 +291,6 @@ def _claim_session(db: sqlite3.Connection, row: sqlite3.Row,
         return row
 
 
-def _has_live_child(db: sqlite3.Connection, name: str) -> bool:
-    return db.execute(
-        "SELECT 1 FROM agents WHERE parent=? AND state IN ('working', 'blocked') "
-        "AND ended_at IS NULL LIMIT 1",
-        (name,),
-    ).fetchone() is not None
-
-def _awaiting_reply(db: sqlite3.Connection, name: str) -> bool:
-    """Has this agent asked a question that has not been answered yet?
-
-    `sb tell <who> "..." --needs-reply` is how the protocol says to ask another agent
-    something, and it says in the same breath that nothing waits: you send, you end your
-    turn, you are poked when the answer comes. An agent doing exactly that had no verb —
-    `done` reads as finished and `block` summons a person to a row whose only fault was
-    following the instructions — so the gate demanded a report there was nothing to make.
-    There is no third verb to invent: the right end for that turn is simply the end of it.
-
-    The same three conditions `status._awaiting_reply` excuses a STALLED row on, asked of
-    one agent, and deliberately the same so the two cannot disagree about one state:
-
-    - a `needs_reply` message from this agent with nothing back from its recipient since.
-      A later question supersedes an answered earlier one, so only the most recent
-      unanswered question excuses anything.
-    - the recipient is still open. An agent whose `sb done` has landed will never answer.
-    - the question is still deliverable (`undeliverable_at`), which is the same sentence
-      one step earlier: nothing is coming.
-
-    When any of those stops holding, the excuse ends and the agent is a silent finish like
-    any other — it shows as STALLED on the board and in `--needs-me` from there, which is
-    why this may excuse a turn without bound in time.
-
-    `>=` on the timestamps for `status._awaiting_reply`'s reason: they are whole seconds,
-    and a reply written in the same second as the question would otherwise never count.
-    """
-    return db.execute(
-        "SELECT 1 FROM messages q JOIN agents a ON a.name = q.to_agent "
-        " WHERE q.from_agent = ? AND q.needs_reply = 1 "
-        "   AND q.undeliverable_at IS NULL AND a.ended_at IS NULL "
-        "   AND NOT EXISTS (SELECT 1 FROM messages r "
-        "                    WHERE r.from_agent = q.to_agent "
-        "                      AND r.to_agent = q.from_agent "
-        "                      AND r.id <> q.id AND r.created_at >= q.created_at) "
-        " LIMIT 1",
-        (name,),
-    ).fetchone() is not None
-
-
-def _explicit_wait(db: sqlite3.Connection, name: str) -> bool:
-    """A current ``sb waiting`` intent is a legitimate quiet turn."""
-    row = store.get_agent(db, name)
-    return bool(row is not None and "wait_mode" in row.keys() and row["wait_mode"])
-
-
-def _already_nudged(db: sqlite3.Connection, name: str) -> bool:
-    """Has this agent been stopped once already, with nothing reported since?
-
-    THE CAP, and the reason it lives here rather than in `stop_hook_active`. That flag is
-    real and it arrives — measured twice, on the second stop of a chain the gate itself
-    caused — but it is scoped to ONE stop-chain, and a chain is one user prompt. Anything
-    that pokes the agent starts a new one: a doorbell ring, a `tell`, a person typing.
-    Reproduced in an isolated clone: an agent was blocked, allowed through on its
-    second stop with `stop_hook_active: true`, then told one thing and blocked again on the
-    next stop with the flag false and a new `prompt_id`. Two blocks, one agent, nothing
-    wrong with the flag — the cap was simply never the property the design claimed.
-
-    So the cap is asked of the store, which outlives every chain: the newest of this
-    agent's block/report events. `stop_gate_blocked` on top means we nudged it and it has
-    said nothing since, so it is nudged no further — a silent agent from there on is the
-    board's to show and nobody's to chase, and `BLOCK_REASON` promises exactly this ("you
-    will only be stopped once"), which until now it could not keep.
-
-    A report resets it, and that is the intended re-arm rather than a leak: an agent that
-    called `sb done` and is then spoken to in its pane is `working` again, and its next
-    silent turn-end is a new silence worth one nudge.
-    """
-    row = db.execute(
-        "SELECT kind FROM events WHERE agent=? AND kind IN "
-        "('stop_gate_blocked', 'done', 'blocked') ORDER BY id DESC LIMIT 1",
-        (name,),
-    ).fetchone()
-    return row is not None and row["kind"] == "stop_gate_blocked"
-
-
 def mark_turn(payload: dict, db: sqlite3.Connection, turn: str) -> Optional[str]:
     """Record a turn edge for whoever is calling. -> the agent named, or None.
 
@@ -404,8 +303,7 @@ def mark_turn(payload: dict, db: sqlite3.Connection, turn: str) -> Optional[str]
     `claude` session that is not one of ours, and the point of hanging both hooks off the
     per-spawn settings file is that no session of the human's is ever touched.
 
-    The event is logged against NO agent, with the target in its payload, and that is the
-    same deliberate choice `stop_gate`'s cap makes for the same reason:
+    The event is logged against NO agent, with the target in its payload, deliberately:
     `status._last_activity` counts every event that NAMES an agent, so logging a turn edge
     against the agent would reset its idle clock — and the idle clock is what says an agent
     has gone quiet at all. Anything that pokes an agent is a prompt, the prompt starts a
@@ -478,72 +376,6 @@ def record_usage_limit(payload: dict, db: sqlite3.Connection) -> Optional[str]:
     return a["name"]
 
 
-def stop_gate(payload: dict, db: sqlite3.Connection) -> Optional[str]:
-    """The reason to refuse this turn's end, or None to let it end.
-
-    The order of the checks is the design, so it is worth reading as a list.
-
-    **`stop_hook_active` first, and unconditionally.** It is true only on a turn that this
-    gate itself caused: block a turn, the agent takes another, it ends, and this lets that
-    second end through. At most one stop per stop-chain.
-
-    **`_already_nudged` last, and it is the real cap.** A stop-chain is one user prompt,
-    so the flag above caps nothing an agent is poked through — a ring, a `tell`, a person
-    typing each start a fresh chain with the flag false, which is how one agent came to be
-    blocked twice twelve seconds apart. The store remembers instead: one block per agent
-    until it reports something. A nudged agent that still will not report is then the
-    board's problem — it reads STALLED and stays there — which is the right division: the
-    hook prevents the ordinary case, it does not fight the pathological one.
-
-    **An unresolvable caller ends its turn.** Not one of ours, or one we cannot name yet.
-
-    **Five legitimate ends without a report**, and only five: an agent still holding its
-    placeholder task (`awaiting_task`) was told to wait for one; an agent that declared an
-    intentional wait with `sb waiting` was told to end its turn rather than poll for the
-    background work or the child cohort it named (`_explicit_wait`); an agent that asked
-    another agent a question with `tell --needs-reply` was told to end its turn and be poked
-    with the answer (`_awaiting_reply`); a parent with a live child was told to delegate and
-    end its turn, and blocking that would push it to report `done` over work still running;
-    and an agent that already reported has nothing to add.
-
-    Anything else is the silent finish this exists to stop.
-    """
-    if payload.get("stop_hook_active"):
-        return None
-    a = _agent_row(db, payload)
-    if a is None:
-        return None
-    if a["state"] in REPORTED:
-        return None
-    if a["awaiting_task"]:
-        return None
-    if _explicit_wait(db, a["name"]):
-        store.log_event(db, kind="stop_gate_waived", target=a["name"],
-                        reason="waiting")
-        return None
-    if _awaiting_reply(db, a["name"]):
-        # Logged against NO agent, with the target in the payload, for `stop_gate_capped`'s
-        # reason: `status._last_activity` counts every event that names an agent, so writing
-        # this against the waiting agent would reset the idle clock that carries it once the
-        # excuse ends. The waiver is history; the state lives in the unanswered message.
-        store.log_event(db, kind="stop_gate_waived", target=a["name"], reason="awaiting_reply")
-        return None
-    if _has_live_child(db, a["name"]):
-        # Logged rather than silent: this is the one exemption that could hide a real
-        # silent finish, so it should be visible on the board that it was used.
-        store.log_event(db, kind="stop_gate_waived", agent=a["name"], reason="live_children")
-        return None
-    if _already_nudged(db, a["name"]):
-        # Logged against NO agent, with the target in the payload, for `_turn_edge`'s
-        # reason: `status._last_activity` counts every event that names an agent, so
-        # writing this against the target would reset the idle clock on the silent agent
-        # this hand-off exists to pass on.
-        store.log_event(db, kind="stop_gate_capped", target=a["name"])
-        return None
-    store.log_event(db, kind="stop_gate_blocked", agent=a["name"])
-    return BLOCK_REASON
-
-
 def _open(stdin_text: str, db_path: Optional[Path]) -> tuple[dict, Optional[sqlite3.Connection]]:
     """Payload and store, or `(…, None)` if either is unusable. Shared by both hooks.
 
@@ -563,42 +395,33 @@ def _open(stdin_text: str, db_path: Optional[Path]) -> tuple[dict, Optional[sqli
 
 
 def run(stdin_text: str, db_path: Optional[Path] = None) -> dict[str, Any]:
-    """The `Stop` hook: payload in, hook response out. Never raises, never blocks on error.
+    """The `Stop` hook: payload in, hook response out. -> always `{}`.
 
-    The response shape is the one the CLI honours, verified by running it: a `block`
-    decision on stdout with exit 0. An empty object lets the turn end.
+    The empty object lets the turn end, and it is the ONLY thing this returns now. The gate
+    that used to answer `{"decision": "block", "reason": …}` here is gone (#325): an agent
+    that ends a turn without reporting simply ends, and the silence surfaces on the board
+    rather than being argued with in the pane. The shape is kept — a dict the caller
+    serialises — because `bin/sb-stop-hook` prints whatever is truthy and both providers
+    read the same schema, so a future non-blocking field has somewhere to go.
 
     `db_path` is the store the spawn named in the settings file. Falling back to resolving
     it from the cwd would be resolving it from wherever the agent happens to stand.
 
-    **The gate decides first, and the idle mark is written only if it is letting the turn
-    end.** That order is the whole of the composition and it is the likeliest bug in the
-    activity signal, so it is worth stating why: a blocked stop is not the end of a turn.
-    The agent is handed `BLOCK_REASON` and keeps going — same session, same turn, more
-    tool calls — and `UserPromptSubmit` does NOT fire again for it, because nothing new was
-    submitted. Marking idle there would say a working agent is free, which is precisely the
-    lie this signal was built to stop telling: its mail would be delivered mid-turn and
-    the board would show it idle while it worked. When that continued turn finally does end, this runs again with
-    `stop_hook_active` set, the gate returns None, and the mark is written then.
-
-    A hook that cannot open the store writes nothing and blocks nothing. The signal then
-    keeps whatever it last said, which for a turn that is ending means it says `working`
-    for longer than it should — the same shape as the crash case, and covered by the same
-    cross-check (`status.AgentStatus.signal_drift`).
+    A hook that cannot open the store writes nothing. The signal then keeps whatever it
+    last said, which for a turn that is ending means it says `working` for longer than it
+    should — the same shape as the crash case, and covered by the same cross-check
+    (`status.AgentStatus.signal_drift`).
     """
     payload, db = _open(stdin_text, db_path)
     if db is None:
         return {}
     try:
-        reason = stop_gate(payload, db)
-        if reason is None:
-            # The turn really is ending. See the docstring: order is load-bearing.
-            mark_turn(payload, db, store.TURN_IDLE)
+        mark_turn(payload, db, store.TURN_IDLE)
     except Exception:                            # noqa: BLE001 — never trap an agent
         return {}
     finally:
         db.close()
-    return {"decision": "block", "reason": reason} if reason else {}
+    return {}
 
 
 def run_activity(stdin_text: str, db_path: Optional[Path] = None) -> str:

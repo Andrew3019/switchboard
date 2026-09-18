@@ -8,7 +8,7 @@
 #
 # WHAT BELONGS HERE, and what does not. Only REMINDER-shaped rules: "before your next
 # action, remember X". Identity and orientation prose — who you are, who reads you, why
-# `sb block` exists — has no later turn to wait for; it must be true from turn one, so it
+# `sb ask human` exists — has no later turn to wait for; it must be true from turn one, so it
 # stays in the spawn prompt and moving it here would break the agent's first turn. Moving a
 # rule here means DELETING it there: a rule in both places is paid for twice and drifts.
 #

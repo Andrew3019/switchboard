@@ -74,7 +74,7 @@ def build_record(
     """Build the wire record written for one invocation.
 
     ``argv`` is the COMPLETE argument vector as typed, free-text bodies included — task
-    descriptions, ``--tell`` messages, block reasons, plugin arguments. This deliberately
+    descriptions, ``--tell`` messages, question text, plugin arguments. This deliberately
     reverses the earlier privacy bound (commit 10f7334, which kept bodies out of the
     record) on Andrew's direct instruction: the sink is local-only, and the argument text
     is the missing half of every "what was the fleet actually doing" question a

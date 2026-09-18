@@ -378,10 +378,10 @@ def wants_you(a) -> bool:
 def marker(a) -> str:
     """The trouble with this agent, or "". RANK ONE of the row's tail.
 
-    Strictly ranked and only ever one: an agent that is both gone and blocked is
+    Strictly ranked and only ever one: an agent that is both gone and asking is
     gone, and the row says the thing a human would act on first.
 
-    The two declared ones — GONE, BLOCKED — are drawn the instant they are seen.
+    The two declared ones — GONE, ASKING — are drawn the instant they are seen.
     The inferred ones wait for `settled`, so a row that is between turns says
     what it is FOR rather than announcing a stall that outlives no frame; the
     state column beside it still reads `idle` the whole time.
@@ -401,7 +401,10 @@ def marker(a) -> str:
     if a.at_prompt and a.settled:
         return "AT PROMPT — waiting on you"
     if a.blocked:
-        return f"BLOCKED — {a.blocked_why or 'no reason recorded'}"
+        # The open human Question, verbatim (#325). It used to be the `sb block` reason and
+        # said BLOCKED; the verb is gone and so is any claim that the agent has stopped —
+        # what is true is that it is asking YOU something and nothing else will answer it.
+        return f"ASKING — {a.blocked_why or 'no question recorded'}"
     if a.wait_excuse:
         return a.wait_excuse
     if not a.settled:
@@ -506,7 +509,7 @@ def detail_bits(a) -> list[tuple[str, str, str]]:
     answer to the only hard question the row asks: at sixty columns they will not
     all fit, so what goes first and what goes at all?
 
-        1. `marker`     — GONE, AT PROMPT, BLOCKED, STALLED, NO SESSION.
+        1. `marker`     — GONE, AT PROMPT, ASKING, STALLED, NO SESSION.
                           Something is wrong and a human is the only fix.
         2. `mail_note`  — undelivered or unread. Often the thing that would
                           unblock rank one, so it is never crowded out by it.
@@ -534,7 +537,7 @@ def _compose(bits, cols: int) -> str:
     only while it can still say something (`_MIN_BIT`); below that it is not
     drawn, because half a word is not worth a third of the line. And a piece
     gives up room ahead of MAIL specifically, up to `_MAIL_RESERVE`, so that a
-    long BLOCKED reason cannot hide the answer that would end the block. Nothing
+    long ASKING question cannot hide the answer that would end it. Nothing
     reserves for the tail: context is what this line sheds first.
     """
     out: list[str] = []

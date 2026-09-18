@@ -115,9 +115,8 @@ MAX_DUTY = 0.25
 # is woken within seconds instead of never", which ten does as well as two.
 #
 # It is a floor and not a bound: it divides the cost of a stuck target, it does not end
-# it. A target that stays stuck for hours — a blocked agent waiting on a person — costs a
-# process every ten seconds for all of them, which is why that case is kept out of the
-# trigger's work list entirely rather than merely rate-limited (`ring_doorbell`).
+# it. A target that stays stuck for hours costs a process every ten seconds for all of
+# them, which is what the floor is dividing (`ring_doorbell`).
 DOORBELL_GAP = 10.0
 # How long the spawned `sb` is given before it is given up on. It is one flush and a
 # handful of herdr calls; anything past this is a herdr that is not answering, and waiting
@@ -423,9 +422,9 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
     The minimal trigger, and deliberately nothing more. It answers one question from the
     snapshot it already has — is anybody holding a message that has never been announced?
     — and if so runs one `sb` command. That command flushes the doorbell at startup like
-    every `sb` command does, which is the entire mechanism; who is idle, who is busy, who
-    is blocked and what is safe to ring are decisions `Broker.flush_pending` already
-    makes, and duplicating any of them here would be a second opinion in a second process.
+    every `sb` command does, which is the entire mechanism; who is idle, who is busy and
+    what is safe to ring are decisions `Broker.flush_pending` already makes, and
+    duplicating any of them here would be a second opinion in a second process.
 
     This doorbell trigger does not look at stalled agents, correct a state or ping anyone.
     An ordinary agent that is idle without reporting only shows on the board and in
@@ -435,17 +434,11 @@ def ring_doorbell(snap, state: State, db_path: Optional[Path]) -> bool:
     and the snapshot's `undelivered` is derived from the same pair `flush_pending` chases
     (`status._undelivered_counts`), so this cannot ask for a ring that will not happen.
 
-    `ringable` and not `undelivered`, for the one case where that is not enough. Mail for
-    a BLOCKED agent is undelivered and must stay that way — the agent is waiting on a
-    person, not idle — so `flush_pending` looks at it, holds it, and changes nothing,
-    every ten seconds, for as long as the human takes. Measured: 85 spawned processes for
-    one block held thirteen minutes, bounded by nothing but the person. Nothing about the
-    mail changes here — it stays held, still counted, still on the board — and nothing
-    needs this trigger to deliver
-    it, because the only thing that lifts a block is an `sb tell` from the human, which
-    flushes in its own process. `AgentStatus.ringable` is the predicate and it lives in
-    `status.py` beside the count it refines, so this and `flush_pending` cannot come to
-    disagree about which mail a ring would move.
+    `ringable` and not `undelivered`, and the two now agree on every row — see
+    `AgentStatus.ringable` for the case that used to separate them (mail held behind a
+    `sb block`, which is gone) and for why the predicate is kept. It lives in `status.py`
+    beside the count it refines, so this and `flush_pending` cannot come to disagree about
+    which mail a ring would move.
     """
     now = panel.now()
     if state.last_doorbell is not None and now - state.last_doorbell < DOORBELL_GAP:
