@@ -1658,6 +1658,17 @@ def collect(
     # The stop gate already exempts the same rows itself (`hooks.stop_gate`) and is
     # deliberately left alone: its copy of this test now agrees with the flag instead of
     # correcting it.
+    #
+    # SINCE WAVE 4 THE TWO AGREE ON THE CASE THAT MATTERS AND NOT ON THE WHOLE TEST, and
+    # the difference is worth naming rather than leaving to be found. `hooks._has_live_child`
+    # is DB-only by necessity — a hook runs with no herdr to ask — so it reads the state
+    # and `ended_at` half and nothing else. A RESTORABLE child is `working` in both, which
+    # is the answer §9 wants from both ("`waiting on child` requires a child that is still
+    # `live` or `restorable`"), so the one case wave 4 is about reads the same either side.
+    # A NOT-RESTORABLE child drops out of this set on the reading, and out of the stop
+    # gate's a confirmation grace later when `_record_gone` writes its end — which is the
+    # same lag the stop gate always had, not a new disagreement.
+    #
     # THE LIVENESS PRE-PASS (§9). The join with herdr and the three-valued verdict it
     # produces are needed BEFORE the row build, because `live_parent` below is a fact about
     # children that the parents' own rows then read — so it cannot be computed inside the
