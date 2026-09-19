@@ -913,18 +913,24 @@ class BrokerTest(unittest.TestCase):
         agent that has it. `--name` naming a live agent is what makes that reachable."""
         store.create_agent(self.db, name="orch", role="lead", workspace="ws",
                            branch="ws", cwd=str(self.repo))
-        self.b.delegate("t", topic="t", role="worker", me="orch")
-        # `dispatch` and not `spawn`: `spawn` is in the worker SEED since 2026-08-31, and
-        # a grant of it would be indistinguishable from the seed in this manifest.
-        self.b.grant("worker-t", "dispatch", me="orch", reason="needs one helper")
+        # A capability this REPO mints: since #326 every shipped one is in every role's
+        # seed, so a grant of one would be indistinguishable from the seed in this manifest.
+        (self.repo / ".switchboard").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".switchboard" / "roles.toml").write_text(
+            '[deployer]\ncapabilities = ["deploy"]\n')
+        self.restart_sb()
+        store.create_agent(self.db, name="orch2", role="deployer", workspace="ws",
+                           branch="ws", cwd=str(self.repo), parent="orch")
+        self.b.delegate("t", topic="t", role="worker", me="orch2")
+        self.b.grant("worker-t", "deploy", me="orch2", reason="needs one helper")
         caps = self.b.effective_instructions(
-            role="worker", name="worker-t", parent="orch")["capabilities"]
+            role="worker", name="worker-t", parent="orch2")["capabilities"]
         self.assertTrue(caps["live"])
-        self.assertIn("dispatch", caps["held"])
-        self.assertNotIn("dispatch", caps["seed"])
+        self.assertIn("deploy", caps["held"])
+        self.assertNotIn("deploy", caps["seed"])
         self.assertEqual(
             [(g["capability"], g["granted_by"], g["reason"]) for g in caps["grants"]],
-            [("dispatch", "orch", "needs one helper")])
+            [("deploy", "orch2", "needs one helper")])
 
     def test_the_manifest_lists_guidance_and_says_which_rows_can_reach_this_agent(self):
         """The ledger is deliberately NOT in the spawn prompt (`guidance.py`), which is
@@ -940,20 +946,22 @@ class BrokerTest(unittest.TestCase):
             '[[rule]]\nid = "on-children"\n'
             'when = [{fact = "live_children", op = ">=", value = 1}]\n'
             'text = "Cohort rule."\n\n'
-            '[[rule]]\nid = "lead-only"\nrole = "lead"\ntext = "Lead rule."\n')
-        rows = self.rules(role="lead")
+            '[[rule]]\nid = "reviewer-only"\nrole = "reviewer"\ntext = "Reviewer rule."\n')
+        rows = self.rules(role="reviewer")
         self.assertTrue(rows["always"]["included"])
         self.assertEqual(rows["always"]["source"], str(sw / "guidance.toml"))
         self.assertEqual(rows["always"]["ownership"], "external-to-switchboard")
-        self.assertTrue(rows["needs-fork"]["included"])        # a lead is seeded `fork`
+        self.assertTrue(rows["needs-fork"]["included"])        # every role is seeded `fork`
         self.assertFalse(rows["on-children"]["included"])
         self.assertIn("turn-conditional", rows["on-children"]["resolution"])
         self.assertIn("live_children >= 1", rows["on-children"]["condition"])
-        self.assertIn("lead-only", rows)
+        self.assertIn("reviewer-only", rows)
+        # Another role's row is not this agent's business. The capability-keyed row is
+        # included for everybody since #326 — every role is seeded every shipped string —
+        # so the row that resolves to "not yours" is the role-keyed one.
         worker = self.rules(role="worker")
-        self.assertFalse(worker["needs-fork"]["included"])
-        self.assertIn("does not hold fork", worker["needs-fork"]["resolution"])
-        self.assertNotIn("lead-only", worker)
+        self.assertTrue(worker["needs-fork"]["included"])
+        self.assertNotIn("reviewer-only", worker)
 
     def test_just_in_time_rows_never_enter_the_standing_prompt(self):
         """The one property the whole addition rests on. Guidance and doorbells are bought
@@ -997,7 +1005,7 @@ class BrokerTest(unittest.TestCase):
         there are roles, and which."""
         self.b.delegate("t", topic="t", role="worker", me="orch")
         joined = " ".join(self.h.started[0]["prompts"])
-        for role in ("dispatcher", "lead", "worker", "qa", "researcher", "reviewer"):
+        for role in ("dispatcher", "worker", "researcher", "reviewer"):
             with self.subTest(role=role):
                 self.assertIn(role, joined)
 

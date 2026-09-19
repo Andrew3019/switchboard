@@ -33,6 +33,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import broker as broker_mod  # noqa: E402
+from switchboard import roles as roles_mod  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard.broker import HUMAN, SIGNAL  # noqa: E402
 from switchboard.cli import build_parser  # noqa: E402
@@ -467,13 +468,17 @@ class PointerOnlyTest(PromoteFixture, unittest.TestCase):
 
     def test_the_promoted_leads_capability_set_is_untouched(self):
         """Obj. 31. Seeding composes and promote is not part of it: the lead's caps were
-        seeded by the ORDINARY `delegate` that created it, `template(lead) ∩
-        passable(researcher)`, and a promote neither re-seeds nor re-checks them."""
+        seeded by the ORDINARY `delegate` that created it — its full role template — and a
+        promote neither re-seeds nor re-checks them.
+
+        The researcher is narrowed by hand since #326: no shipped role is short of
+        `write-tracked` any more, and the last assertion is the one that needs it."""
         top = self.top()
-        res = self.b.delegate("t", topic="r", role="researcher", me=top)
-        self.b.grant(res, broker_mod.CAP_SPAWN, me=top)
+        self.b.roles["reader"] = roles_mod.Role(
+            name="reader", capabilities=frozenset({broker_mod.CAP_SPAWN}))
+        res = self.b.delegate("t", topic="r", role="reader", me=top)
         self.b.grant(res, broker_mod.CAP_WRITE_TRACKED, me=top, delegable=True)
-        lead = self.b.delegate("t", topic="l", role="lead", me=res)
+        lead = self.b.delegate("t", topic="l", role="worker", me=res)
         before = store.held_capabilities(self.db, lead)
         self.b.done("handed over", me=res, preserve_children=True)
         self.assertEqual(store.held_capabilities(self.db, lead), before)

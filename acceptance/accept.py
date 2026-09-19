@@ -505,7 +505,7 @@ def check_doorbell(clone: Clone, rid: str, log: Log) -> Check:
     c = Check(2, "a child's report wakes its parent")
     t0 = now()
     ptopic, ctopic = f"{rid}-p", f"{rid}-c"
-    parent, child = spawned(ptopic, "lead"), spawned(ctopic)
+    parent, child = spawned(ptopic), spawned(ctopic)
     ctok = f"CHILD-{rid}"
 
     # THE DEFERRED PATH, FORCED, and forced by shell rather than by asking an agent to be
@@ -523,11 +523,12 @@ def check_doorbell(clone: Clone, rid: str, log: Log) -> Check:
         f"LATER, only if you are told that you have mail, run: sb inbox — and then finish "
         f"by running: sb done \"WOKEN <paste here the exact text of what you read>\"")
 
-    # `--role lead` because the parent's whole job here is to delegate, and since
-    # phase 5 a role without delegate rights is refused outright. Left at the default
-    # (`worker`) this check failed with the parent's own `sb delegate` refused, which reads
-    # as "the child never reported" and is not what it is measuring.
-    spawn = clone.sb("delegate", parent_task, "--name", ptopic, "--role", "lead",
+    # No `--role`: the default is `worker`, whose whole job here is to delegate, and since
+    # #326 delegation is an ordinary agent capability that no role is short of. This used to
+    # pass `--role lead` because a role without delegate rights was refused outright and the
+    # default was one — the refusal read as "the child never reported", which is not what
+    # this is measuring.
+    spawn = clone.sb("delegate", parent_task, "--name", ptopic,
                      "--json", timeout=SPAWN_S)
     if spawn.rc != 0:
         c.ok, c.seconds = False, now() - t0

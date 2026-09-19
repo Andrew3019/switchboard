@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from switchboard import roles as roles_mod  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard.broker import HUMAN, Broker  # noqa: E402
 
@@ -283,11 +284,13 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
     """
 
     def _bare_role(self, name: str = "dogsbody") -> str:
-        """A role declared without `spawn`, which is now the only way one exists."""
-        (self.repo / ".switchboard").mkdir(exist_ok=True)
-        (self.repo / ".switchboard" / "roles.toml").write_text(
-            f"[{name}]\ndelegate = false\n")
-        self.b = Broker(self.db, self.h, repo=self.repo)   # roles.toml is read on build
+        """A role holding no `spawn`, handed straight to the broker's table.
+
+        SINCE #326 NO DEFINITION DECLARES ONE: roles are soft guidance, a file's
+        `capabilities` list only widens, and every role resolves to the whole vocabulary.
+        The gate is dormant, not gone, so the test narrows the template itself — the shape
+        a repo re-arming role restrictions would put back."""
+        self.b.roles[name] = roles_mod.Role(name=name, capabilities=frozenset())
         return name
 
     def test_a_bare_role_is_refused(self):
@@ -297,7 +300,7 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             self.b.delegate("t", topic="t", role="worker", me="w")
         self.assertIn("does not spawn", str(cm.exception))
-        self.assertIn("lead", str(cm.exception))          # and what CAN, by name
+        self.assertIn("worker", str(cm.exception))        # and what CAN, by name
 
     def test_the_refusal_costs_no_row_and_no_pane(self):
         store.create_agent(self.db, name="w", role=self._bare_role(), parent=self._top())
@@ -312,11 +315,13 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
     def test_bareness_is_a_field_on_the_role_not_the_role_s_name(self):
         """Vocabulary is data — a repo that names its leaf role something else, or its
         orchestrating role something else, must still get the right answer. A check against
-        the literal string `worker` breaks the moment either is renamed."""
-        (self.repo / ".switchboard").mkdir(exist_ok=True)
-        (self.repo / ".switchboard" / "roles.toml").write_text(
-            "[foreman]\ndelegate = true\n[dogsbody]\ndelegate = false\n")
-        b = Broker(self.db, self.h, repo=self.repo)     # reads the file just written
+        the literal string `worker` breaks the moment either is renamed.
+
+        The two roles are built rather than declared in a file since #326; what is being
+        tested — that the gate reads the TEMPLATE and not the name — is unchanged."""
+        b = Broker(self.db, self.h, repo=self.repo)
+        b.roles["foreman"] = roles_mod.Role(name="foreman")
+        b.roles["dogsbody"] = roles_mod.Role(name="dogsbody", capabilities=frozenset())
         store.create_agent(self.db, name="f", role="foreman", parent=self._top(),
                            workspace="api", branch="api", cwd=str(self.repo))
         store.create_agent(self.db, name="d", role="dogsbody", parent="f",
@@ -352,12 +357,20 @@ class BareAgentCannotDelegateTest(Fixture, unittest.TestCase):
                            cwd=str(self.repo))
         self.assertTrue(self.b.delegate("t", topic="t", role="worker", me="old"))
 
-    def test_delegating_with_the_retired_name_files_the_child_as_a_lead(self):
+    def test_delegating_with_a_retired_name_files_the_child_as_a_worker(self):
         """The alias resolves all the way, so the row says what the agent actually is: it
-        is holding the lead prompt, and a row saying `orchestrator` would be a third answer
-        to a question that already has two."""
-        kid = self.b.delegate("t", topic="t", role="orchestrator", me=self._top())
-        self.assertEqual(store.get_agent(self.db, kid)["role"], "lead")
+        is holding the worker prompt, and a row saying `orchestrator` would be a third
+        answer to a question that already has two.
+
+        `lead`, `builder`, `qa` and `py-qa` joined `orchestrator` in that table when #326
+        stopped shipping them — one alias each is the migration for every repo that does
+        not keep them as custom roles, and a repo that does keeps them, because a defined
+        role wins over an alias."""
+        top = self._top()
+        for retired in ("orchestrator", "lead", "builder", "qa", "py-qa"):
+            with self.subTest(role=retired):
+                kid = self.b.delegate("t", topic=retired, role=retired, me=top)
+                self.assertEqual(store.get_agent(self.db, kid)["role"], "worker")
 
 
 # ---------------------------------------------------------------------------

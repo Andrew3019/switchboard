@@ -173,14 +173,20 @@ effort   = "medium"
 #
 # WHAT THE GATES BELOW DO (the mechanical half, which is a closed fact and therefore code):
 #
-#   forbidden_roles — refused outright for `lead`, `dispatcher` and `reviewer`, whoever
-#     names it. This tier is for an implementation leaf; an agent that splits work, routes
-#     it, or gives a verdict on somebody else's change is not that, and `--model
-#     gpt-luna-max-effort` on one of those roles is an error rather than a judgment call.
-#     `worker` and `builder` are what it is for, and they are not listed here because the
-#     list is what is REFUSED — a repo's own leaf role gets the tier without editing this.
-#     Role names, so a repo that renames its reviewer renames it here too; the behavioural
-#     half of that name lives at `[vocabulary] review_role` in settings.toml.
+#   forbidden_roles — refused outright for `dispatcher` and `reviewer`, whoever names it.
+#     This tier is for work being implemented; an agent that routes work, or gives a verdict
+#     on somebody else's change, is not that, and `--model gpt-luna-max-effort` on one of
+#     those roles is an error rather than a judgment call. `worker` is what it is for, and
+#     it is not listed here because the list is what is REFUSED — a repo's own leaf role
+#     gets the tier without editing this. Role names, so a repo that renames its reviewer
+#     renames it here too; the behavioural half of that name lives at `[vocabulary]
+#     review_role` in settings.toml.
+#
+#     `lead` LEFT THIS LIST WITH THE ROLE (#326): it is no longer shipped, and the shipped
+#     alias resolves it to `worker`, which is not refused. A repo that keeps a `lead` of its
+#     own and wants it kept off this tier adds the name back in its own models file. This is
+#     a TIER policy and not a capability — #326 took away what a role may DO, and left which
+#     model a role runs on exactly where it was.
 #
 #   enabled_by — the tier resolves only while `[routing] gpt_luna_direct_enabled` is true,
 #     and it ships TRUE since 2026-09-07, so the tier is available to name without every
@@ -191,8 +197,9 @@ effort   = "medium"
 #     failing to load — `defaults/settings.toml` has the argument.
 #
 # HOW A SPAWN LANDS HERE, and there is one way: `--model gpt-luna-max-effort` by hand, on a
-# `worker` or a `builder`, typed by whoever judged the work direct. No shipped role names
-# this tier as its default. `builder` did, between 2026-09-07 and 2026-09-10 (Andrew), and
+# `worker`, typed by whoever judged the work direct. No shipped role names this tier as its
+# default. `builder` did, between 2026-09-07 and 2026-09-10 (Andrew, before #326 folded that
+# role into `worker`), and
 # what that cost is why it stopped: the tier arrived without anyone choosing it, so it no
 # longer signalled that somebody had judged the work direct. Naming it is the judgment, and
 # which of the two leaves you spawn stays a choice about the ROLE rather than a way of
@@ -204,7 +211,7 @@ effort   = "medium"
 provider        = "codex"
 model           = "gpt-5.6-luna"
 effort          = "max"
-forbidden_roles = ["lead", "dispatcher", "reviewer"]
+forbidden_roles = ["dispatcher", "reviewer"]
 enabled_by      = "routing.gpt_luna_direct_enabled"
 
 # THE CONTEXT BUDGET, overriding what the model's own catalog entry says. Codex keys,

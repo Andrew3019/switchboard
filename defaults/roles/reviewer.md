@@ -1,7 +1,16 @@
 +++
 model = "careful"
-capabilities = ["spawn", "write-tracked"]
-# SCOPED WRITE, and it is a change (2026-08-27). This was `[]` — read-only, on the argument
+# NO `capabilities` LINE, since #326: roles are soft guidance and not permission classes,
+# so every role resolves to the whole vocabulary (`roles.ROLE_CAPABILITIES`). What this role
+# does and does not do is said in the prompt below, where an agent can read it and judge it,
+# rather than enforced by a gate that refuses it.
+#
+# WHAT THE ROLE MAY DO IS NO LONGER THE QUESTION (#326): every role resolves to the whole
+# vocabulary, so a reviewer arrives able to write, spawn and merge, and the independence
+# this role exists for rests entirely on the prompt below — which is where it already
+# rested. The history that got it there is worth keeping, and follows.
+#
+# SCOPED WRITE (2026-08-27), back when the seed decided it. This was `[]` — read-only, on the argument
 # that a reviewer which edits the thing it is reviewing has reviewed nothing. That argument
 # holds for the DESIGN it is judging and not for the one case the design now names: a minor
 # is local, unambiguous, inside the approved contract and verifiable without a design

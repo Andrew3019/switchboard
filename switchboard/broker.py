@@ -1326,8 +1326,10 @@ class Broker:
         return store.get_agent(self.db, agent)
 
     def _held_of(self, row: sqlite3.Row) -> set:
-        """What this row may DO. From the table when it has been seeded, DERIVED when it
-        has not.
+        """What this row may DO: the stored set UNIONED with its role's live template.
+
+        The union is #326's migration for a running fleet — see `_template_of`. The rest
+        of this is the older story, and still true:
 
         A NULL `seed_capabilities` is a row written before the substrate existed — an older
         store, or a row inserted straight into `agents` by something that never read a role
@@ -1345,8 +1347,8 @@ class Broker:
         except (IndexError, KeyError, TypeError):
             seed = None                 # a store or a stub row older than the column
         if seed is None:
-            return set(self.seed_for(row["role"], bool(_column(row, "is_top"))))
-        return store.held_capabilities(self.db, row["name"])
+            return self._template_of(row)
+        return self._template_of(row) | store.held_capabilities(self.db, row["name"])
 
     def _passable_of(self, row: sqlite3.Row) -> set:
         """What this row may PASS DOWN — held ∪ delegable-only. Same derived fallback.
@@ -1360,8 +1362,25 @@ class Broker:
         except (IndexError, KeyError, TypeError):
             seed = None
         if seed is None:
-            return set(self.seed_for(row["role"], bool(_column(row, "is_top"))))
-        return store.passable_capabilities(self.db, row["name"])
+            return self._template_of(row)
+        return self._template_of(row) | store.passable_capabilities(self.db, row["name"])
+
+    def _template_of(self, row: sqlite3.Row) -> set:
+        """What this row's ROLE is seeded with TODAY — the live template, re-read per gate.
+
+        THE UNION WITH IT IS #326's MIGRATION, and it is what keeps a running fleet whole.
+        Roles are soft guidance now: every role resolves to the whole vocabulary. But an
+        agent spawned BEFORE that change carries the narrow set its role's template had at
+        the time, written into `agent_capabilities` at spawn — a live `qa` holding `spawn`
+        alone, a `py-qa` holding `write-tracked` alone. Reading only those rows would leave
+        exactly the agents that exist today refused for a role reason nothing else believes
+        in any more, which is the orphan this change is not allowed to create.
+
+        So the held set is the stored rows UNIONED with what the role resolves to now. It
+        only ever widens: a grant is still additive and still recorded, and no agent loses
+        something it was seeded with because a template moved under it.
+        """
+        return set(self.seed_for(row["role"], bool(_column(row, "is_top"))))
 
     def passable_for(self, agent: str) -> Optional[set]:
         """What this agent may hand DOWN with `sb grant`. `None` means "no ceiling".

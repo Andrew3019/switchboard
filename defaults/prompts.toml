@@ -78,7 +78,8 @@ operator_menu = "Open your very first message to the human with this offer, what
 # role, spawned by the one agent that acts on nobody's instruction but the person's, so a
 # researcher it spawns is one the person spawned on their own instruction and reads directly.
 # Gated in `effective_instructions` on `role == RESEARCHER_ROLE and is_top(parent)`; a
-# researcher spawned by a lead or worker is an ordinary sub-research and never sees this.
+# researcher spawned by a worker (or any other agent) is an ordinary sub-research and never
+# sees this.
 #
 # A NUDGE, NOT A RULE (Andrew, 2026-09-01: "this shouldn't be a 'hard guideline' but a strong
 # encouragement/nudge ... not load bearing but would be nice if it did what i wanted"). So it
@@ -87,7 +88,7 @@ operator_menu = "Open your very first message to the human with this offer, what
 # person wants here, and leaves the agent free. The behaviour it encourages: report findings
 # in the agent's OWN chat and `sb ask human` so the person reads them directly, skip the notes
 # file and the `sb done`/`sb tell` back up to the dispatcher, and — the one thing worth
-# telling the dispatcher — mention it if a worker or lead was spawned to carry out a fix.
+# telling the dispatcher — mention it if a worker was spawned to carry out a fix.
 #
 # The person reads an open question and the parent reads a `done` summary and nothing else, so a
 # researcher that `done`s here has reported to the dispatcher, which then relays to the
@@ -115,7 +116,7 @@ report — the person handles this with you directly, and after each thing they 
 answering in chat and asking again fits better than reporting done; they close you when
 they are finished.
 The one thing still worth telling the dispatcher, just for its own information, is if you
-spawned your own worker or lead to carry out a fix the person confirmed.
+spawned your own worker to carry out a fix the person confirmed.
 """
 
 # Added only when the agent is being placed in a named workspace.

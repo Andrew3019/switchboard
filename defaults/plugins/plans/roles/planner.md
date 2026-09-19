@@ -1,8 +1,13 @@
 +++
 model = "strong"
-capabilities = ["spawn"]
-# A planner may commission the independent plan review its specialty calls for. It carries
-# no `write-tracked`: its writes are the plan and gitignored briefs, never implementation.
+# NO `capabilities` LINE, since #326: roles are soft guidance and not permission classes,
+# so every role resolves to the whole vocabulary (`roles.ROLE_CAPABILITIES`). What this role
+# does and does not do is said in the prompt below, where an agent can read it and judge it,
+# rather than enforced by a gate that refuses it.
+#
+# A planner commissions the independent plan review its specialty calls for, and its writes
+# are the plan and gitignored briefs, never implementation. That used to be half a seed — it
+# carried no `write-tracked` — and since #326 it is the prompt's alone.
 +++
 
 <!--

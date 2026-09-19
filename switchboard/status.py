@@ -2466,6 +2466,13 @@ def _capability_sets(row, caps: dict, templates: Optional[dict]) -> dict:
 
     Everything else reads the table: `held` is what `require_capability` answers to, and
     `delegable` is the pass-through half, kept apart for the reason `--delegable` exists.
+
+    THE TEMPLATE IS UNIONED IN, exactly as `Broker._held_of` does it and for the same
+    reason (#326): a row seeded before roles became soft guidance carries the narrow set its
+    role's template had at the time, and the gate reads that row against the template as it
+    stands now. Rendering the raw rows instead would draw a NARROWED mark on every agent in
+    a running fleet the moment this shipped — a mark saying the row is refused something it
+    is not.
     """
     try:
         seeded = row["seed_capabilities"] is not None
@@ -2475,7 +2482,7 @@ def _capability_sets(row, caps: dict, templates: Optional[dict]) -> dict:
     if not seeded or template is None:
         return {}
     held, deleg = caps.get(row["name"], (set(), set()))
-    return {"caps_held": sorted(held), "caps_delegable": sorted(deleg),
+    return {"caps_held": sorted(set(held) | set(template)), "caps_delegable": sorted(deleg),
             "caps_template": list(template)}
 
 

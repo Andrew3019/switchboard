@@ -46,15 +46,15 @@ class Fixture:
         return name
 
     def _nonspawning_role(self, name: str = "drone") -> str:
-        """A role holding no `spawn`, and it has to be declared to get one: since
-        2026-08-31 every SHIPPED role holds it, so that a leaf can put up the review of
-        its own change instead of handing the review back up. The refusal side of the
-        gate still has to be tested, and a repo's own `roles.toml` is how a deployment
-        declares a role without it — which is now the only way such a role exists."""
-        (self.repo / ".switchboard").mkdir(exist_ok=True)
-        (self.repo / ".switchboard" / "roles.toml").write_text(
-            f"[{name}]\ndelegate = false\n")
-        self.b = Broker(self.db, self.h, repo=self.repo)   # roles.toml is read on build
+        """A role holding no `spawn`, handed straight to the broker's table.
+
+        NO FILE CAN DECLARE ONE ANY MORE (#326): roles are soft guidance, so a definition's
+        `capabilities` list only ever widens and every role resolves to the whole
+        vocabulary. The GATE is untouched and dormant rather than removed, and these tests
+        are what keeps it covered — so they narrow the template directly, which is exactly
+        what a repo re-arming role restrictions would be changing `roles.ROLE_CAPABILITIES`
+        to do."""
+        self.b.roles[name] = roles_mod.Role(name=name, capabilities=frozenset())
         return name
 
 
@@ -69,10 +69,10 @@ class SpawnGateParityTest(Fixture, unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             self.b.require_capability("w", CAP_SPAWN)
         self.assertIn("does not spawn agents", str(cm.exception))
-        self.assertIn("lead", str(cm.exception))       # and what CAN, by name
+        self.assertIn("worker", str(cm.exception))     # and what CAN, by name
 
     def test_a_delegating_role_is_still_allowed(self):
-        store.create_agent(self.db, name="l", role="lead", parent=self._top(),
+        store.create_agent(self.db, name="l", role="worker", parent=self._top(),
                            workspace="api", branch="api")
         self.b.require_capability("l", CAP_SPAWN)      # does not raise
 
@@ -166,30 +166,25 @@ class RoleBundleTest(Fixture, unittest.TestCase):
     """Phase 1 — the role side becomes DATA. A role carries a default capability bundle
     instead of a `delegate` bool, and what an agent is seeded with is that bundle."""
 
-    def test_each_shipped_role_seeds_its_own_bundle(self):
-        """§6.2's table, one assertion per role. `fork` reaches the `lead` seed because its
-        template names it (D2): the fork DECISION is still the stamp's (`mints_space`), so
-        a seeded lead's ordinary spawns are unaffected — what the cap buys it is the right
-        to ASK, with `delegate(isolation="own")`. Every other bundle is untouched, because
-        none of them named `fork` in the first place."""
-        expected = {
-            "dispatcher": ["dispatch", "spawn", "write-tracked"],
-            "lead":       ["dispatch", "fork", "spawn", "write-tracked"],
-            "worker":     ["spawn", "write-tracked"],
-            "builder":    ["spawn", "write-tracked"],   # a worker that writes code
-            "researcher": ["spawn"],                    # read-only; a spawn cannot widen it
-            "reviewer":   ["spawn", "write-tracked"],   # scoped minor fixes, 2026-08-27
-            "qa":         ["spawn"],                    # read-only by default
-        }
-        for role, caps in expected.items():
+    def test_every_shipped_role_seeds_the_whole_vocabulary(self):
+        """#326: a role is not a permission class, so there is no per-role table left to
+        assert — every one of them seeds everything, and the assertion that carries weight
+        is that no shipped role is missing anything.
+
+        It replaces §6.2's table (`dispatcher` no `fork`, `researcher` and `qa` no
+        `write-tracked`, and so on), which was the permission classes this change removed."""
+        self.assertEqual(sorted(self.b.roles), ["dispatcher", "planner", "researcher",
+                                                "reviewer", "worker"])
+        for role in self.b.roles:
             with self.subTest(role=role):
-                self.assertEqual(self.b.seed_for(role, is_top=False), caps)
+                self.assertEqual(self.b.seed_for(role, is_top=False),
+                                 sorted(roles_mod.CAPABILITIES))
 
     def test_the_top_takes_its_fixed_set_and_never_write_tracked(self):
         """§2.0: the top is a placement, a stamp and a FIXED bundle — not a template. It
         holds `fork` because forking is what a top is for, and never `write-tracked`,
         which is the whole invariant over a person's own checkout."""
-        for role in ("dispatcher", "lead", "worker"):
+        for role in ("dispatcher", "worker", "researcher"):
             with self.subTest(role=role):
                 self.assertEqual(self.b.seed_for(role, is_top=True),
                                  ["dispatch", "fork", "spawn"])
@@ -202,60 +197,47 @@ class RoleBundleTest(Fixture, unittest.TestCase):
             for is_top in (False, True):
                 self.assertNotIn("reparent", self.b.seed_for(role, is_top))
 
-    def test_an_old_roles_toml_still_reads(self):
-        """BACK-COMPAT. A file in the wild still says `delegate = true/false`; it must load
-        without error and map onto the bundle it always meant, or retiring the field breaks
-        somebody's config on upgrade."""
+    def test_an_old_roles_toml_still_reads_and_no_longer_narrows(self):
+        """BACK-COMPAT, and since #326 that is the whole of it. A file in the wild still
+        says `delegate = true/false`; it must load without error — but the bool cannot take
+        `spawn` away any more, because no role definition can. What it meant is history;
+        that it still PARSES is the contract."""
         (self.repo / ".switchboard").mkdir(exist_ok=True)
         (self.repo / ".switchboard" / "roles.toml").write_text(
             "[foreman]\ndelegate = true\n[dogsbody]\ndelegate = false\n")
         b = Broker(self.db, self.h, repo=self.repo)     # reads the file just written
         self.assertIn(CAP_SPAWN, b.seed_for("foreman", is_top=False))
-        self.assertNotIn(CAP_SPAWN, b.seed_for("dogsbody", is_top=False))
+        self.assertIn(CAP_SPAWN, b.seed_for("dogsbody", is_top=False))
         self.assertIn("foreman", b._delegating_roles())
-        # And the gate itself still decides the way the bool did.
+        self.assertIn("dogsbody", b._delegating_roles())
+        # And the gate agrees with the template for both of them.
         store.create_agent(self.db, name="f", role="foreman", parent=self._top(),
                            workspace="api", branch="api")
         store.create_agent(self.db, name="d", role="dogsbody", parent="f",
                            workspace="api", branch="api")
-        b.require_capability("f", CAP_SPAWN)                    # does not raise
-        with self.assertRaises(ValueError):
-            b.require_capability("d", CAP_SPAWN)
+        b.require_capability("f", CAP_SPAWN)                    # neither raises
+        b.require_capability("d", CAP_SPAWN)
 
-    def test_an_old_bool_still_overrides_a_shipped_bundle_both_ways(self):
-        """The half of back-compat that is easy to lose. `delegate` is layered config: a
-        repo writing it over a SHIPPED role whose file now names `capabilities` must still
-        decide, and in both directions — the bool replaced what was underneath, it never
-        added to it, so a `false` must narrow rather than union."""
+    def test_a_declared_bundle_widens_and_never_narrows(self):
+        """The vocabulary stays open-ended (the boundary #326 was told not to cross): a
+        repo MINTS its own capability string on a role, and that string reaches the seed,
+        `sb grant` and the side-effect table through the role definition. What the same
+        list can no longer do is subtract."""
         (self.repo / ".switchboard").mkdir(exist_ok=True)
         (self.repo / ".switchboard" / "roles.toml").write_text(
-            "[qa]\ndelegate = true\n[lead]\ndelegate = false\n")
+            '[releaser]\ncapabilities = ["!reset", "release"]\n')
         b = Broker(self.db, self.h, repo=self.repo)
-        self.assertIn(CAP_SPAWN, b.seed_for("qa", is_top=False))          # kept
-        self.assertNotIn(CAP_SPAWN, b.seed_for("lead", is_top=False))     # and narrowed
-        # Every shipped role holds `spawn` since 2026-08-31, so `true` over `qa` is the
-        # no-op direction now and `false` over `lead` is the whole assertion: the bool
-        # REPLACES the bundle underneath it, so it must be able to take `spawn` away from
-        # a role whose own file names it. The listing is therefore everything but `lead`.
-        self.assertEqual(b._delegating_roles(),
-                         ["builder", "dispatcher", "planner", "qa", "researcher",
-                          "reviewer", "worker"])
+        self.assertEqual(b.seed_for("releaser", is_top=False),
+                         sorted(roles_mod.CAPABILITIES | {"release"}))
+        self.assertIn("release", b.known_capabilities())
 
-    def test_delegating_roles_is_capability_membership_and_names_the_same_roles(self):
+    def test_delegating_roles_is_capability_membership_and_names_every_role(self):
         """`_delegating_roles()` filtered `.delegate`; it filters `spawn` in the bundle.
-        Same answer — the two halves of the split, plus the planner the plans plugin
-        contributes, which holds `spawn` for the fresh plan review its specialty
-        commissions — and the refusal message that quotes it is unchanged in structure.
-
-        The list is a listing of the EFFECTIVE vocabulary, so a role arriving from an
-        enabled plugin belongs in it: an agent refused `spawn` is told which roles hold it,
-        and naming two when three do sends it to ask for the wrong one. Since 2026-08-31
-        that is every shipped role — the seed change that lets a leaf put up the review of
-        its own change — so the only agent this listing is ever shown to holds a role some
-        repo declared without `spawn` in its own `roles.toml`."""
-        self.assertEqual(self.b._delegating_roles(),
-                         ["builder", "dispatcher", "lead", "planner", "qa", "researcher",
-                          "reviewer", "worker"])
+        Since #326 that is every role there is — delegation is an ordinary agent
+        capability, not one role's privilege — so the listing the refusal quotes names
+        them all, and the only agent ever shown it holds a template something narrowed by
+        hand."""
+        self.assertEqual(self.b._delegating_roles(), sorted(self.b.roles))
         self.assertEqual(
             self.b._delegating_roles(),
             sorted(n for n, r in self.b.roles.items()

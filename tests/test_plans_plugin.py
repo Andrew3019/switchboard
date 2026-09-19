@@ -60,6 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from switchboard import cli  # noqa: E402
 from switchboard import plugins  # noqa: E402
+from switchboard import roles as roles_mod  # noqa: E402
 from switchboard import store  # noqa: E402
 
 from test_fork_lock import _held  # noqa: E402
@@ -4914,7 +4915,11 @@ class PlannerPackageTest(PlansSandbox):
         self.assertEqual(got["problems"], [])
         roles = {r["name"]: r for r in got["roles"]}
         self.assertEqual(roles["archivist"]["model"], "cheap")
-        self.assertEqual(roles["archivist"]["capabilities"], ["spawn"])
+        # The EFFECTIVE set, which since #326 is the whole vocabulary for every role: a
+        # definition's `capabilities` list widens and no longer narrows, so a catalogue
+        # echoing what the file declared would tell a planner the opposite of the truth.
+        self.assertEqual(roles["archivist"]["capabilities"],
+                         sorted(roles_mod.CAPABILITIES))
         self.assertIn("researcher", roles)
         self.assertIn("strong", [t["name"] for t in got["models"]["tiers"]])
         self.assertIn("design-gate", got["presets"]["available"])
@@ -4959,7 +4964,8 @@ class PlannerPackageTest(PlansSandbox):
         # And the role that minted it says the same thing in the other section, which is
         # what a planner reads before it recommends the grant.
         self.assertEqual([r["capabilities"] for r in self.catalog()["roles"]
-                          if r["name"] == "releaser"], [["release"]])
+                          if r["name"] == "releaser"],
+                         [sorted(roles_mod.CAPABILITIES | {"release"})])
 
     def test_one_broken_definition_costs_its_own_category_and_nothing_else(self):
         """A catalogue is the last thing that should stop being generated because one JSON

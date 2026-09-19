@@ -135,16 +135,16 @@ class InstructionRendererTest(ListingSandbox):
         used to carry no capability field at all. Asserted against the broker's own
         `seed_for` rather than a literal bundle: the vocabulary is open (C12), so a list
         written here would pin today's shipped roles and pass while the seed drifted."""
-        got = self.data("instructions", "--role", "lead")
+        got = self.data("instructions", "--role", "worker")
         b = broker_mod.Broker(store.connect(), None, repo=self.repo)
         self.addCleanup(b.db.close)
         self.assertEqual(got["capabilities"]["seed"],
-                         b.seed_for("lead", False))
+                         b.seed_for("worker", False))
         self.assertEqual(got["capabilities"]["template"],
                          sorted(roles_mod.template_capabilities(
-                             roles_mod.load(self.repo), "lead", False, self.repo)))
-        self.assertTrue(got["capabilities"]["template_source"].endswith("lead.md"))
-        code, out, _ = self.sb("instructions", "--role", "lead")
+                             roles_mod.load(self.repo), "worker", False, self.repo)))
+        self.assertTrue(got["capabilities"]["template_source"].endswith("worker.md"))
+        code, out, _ = self.sb("instructions", "--role", "worker")
         self.assertEqual(code, 0)
         self.assertIn("capabilities:", out)
         for cap in got["capabilities"]["seed"]:
@@ -153,10 +153,12 @@ class InstructionRendererTest(ListingSandbox):
         # role's capabilities in its own `roles.toml` must be credited for them, or the
         # manifest sends a maintainer to edit a shipped file that no longer decides it.
         (self.sw / "roles.toml").write_text(
-            '[lead]\ncapabilities = ["!reset", "write-tracked"]\n')
-        mine = self.data("instructions", "--role", "lead")["capabilities"]
-        self.assertEqual(mine["seed"], ["write-tracked"])
-        self.assertEqual(mine["template_source"], f"{self.sw / 'roles.toml'}:[lead]")
+            '[worker]\ncapabilities = ["!reset", "deploy"]\n')
+        mine = self.data("instructions", "--role", "worker")["capabilities"]
+        # The declared list WIDENS since #326 and no longer narrows, so what a repo's own
+        # file adds is what shows up — and the provenance is still that file's.
+        self.assertEqual(mine["seed"], sorted(roles_mod.CAPABILITIES | {"deploy"}))
+        self.assertEqual(mine["template_source"], f"{self.sw / 'roles.toml'}:[worker]")
         self.assertEqual(mine["template_ownership"], "external-to-switchboard")
 
     def test_the_render_lists_guidance_and_lifecycle_rows_outside_the_prompt(self):
@@ -186,21 +188,21 @@ class InstructionRendererTest(ListingSandbox):
         the renderer would silently leak one agent's authority into an unrelated preview."""
         db = store.connect()
         self.addCleanup(db.close)
-        store.create_agent(db, name="preview", role="lead", parent="human")
-        # `dispatch` and not `spawn`: the `worker` template has named `spawn` since
-        # 2026-08-31, so a planted `spawn` would show up in the preview honestly and the
+        store.create_agent(db, name="preview", role="worker", parent="human")
+        # A capability NO template carries: since #326 every role is seeded every shipped
+        # string, so a planted shipped one would show up in the preview honestly and the
         # leak this test is about would be invisible.
-        store.seed_capabilities(db, "preview", ["dispatch", "write-tracked"])
+        store.seed_capabilities(db, "preview", ["deploy", "write-tracked"])
         # Nameless preview: the DERIVED seed, not the planted agent's caps, and not "live".
         got = self.data("instructions", "--role", "worker")["capabilities"]
         self.assertFalse(got["live"])
         self.assertEqual(got["held"], got["seed"])
-        self.assertNotIn("dispatch", got["held"])    # the planted agent had it; the preview must not
+        self.assertNotIn("deploy", got["held"])      # the planted agent had it; the preview must not
         self.assertEqual(got["grants"], [])
         # The live-preview feature still works when the name is asked for explicitly.
         named = self.data("instructions", "--role", "worker", "--name", "preview")["capabilities"]
         self.assertTrue(named["live"])
-        self.assertEqual(named["held"], ["dispatch", "write-tracked"])
+        self.assertIn("deploy", named["held"])
 
     def test_a_repository_guidance_row_is_reported_against_the_file_that_added_it(self):
         """Provenance for a JOINED table. The ledger merges shipped rows with the repo's
