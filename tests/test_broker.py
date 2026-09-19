@@ -1369,6 +1369,26 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNone(a["pane_id"])
         self.assertIn("w1:p9", self.h.closed)
 
+    def test_self_close_clears_its_open_questions_both_ways(self):
+        """A self-close (`done --close`) removes the pane exactly as `cleanup` does, so it
+        clears the closing agent's questions the same way: one it asked ends `withdrawn`,
+        and one asked OF it ends `resolved` with the waiting asker woken — otherwise an
+        agent that self-closed left anyone waiting on it stranded."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p9")
+        store.create_agent(self.db, name="asker", role="worker", parent="lead",
+                           pane_id="w1:p8")
+        asked = self.b.ask(HUMAN, "which branch?", me="kid")["id"]     # kid -> human
+        of_kid = self.b.ask("kid", "which branch?", me="asker")["id"]  # asker -> kid
+        store.unread_for(self.db, "asker", mark=True)                  # drain spawn mail
+        r = self.b.self_close("shipped it", me="kid")
+        self.b.close_own_pane(r["target"], me="kid")
+        self.assertEqual(store.get_question(self.db, asked)["state"], store.Q_WITHDRAWN)
+        self.assertEqual(store.get_question(self.db, of_kid)["state"], store.Q_RESOLVED)
+        [m] = store.unread_for(self.db, "asker", mark=False)
+        self.assertIn("kid", m["body"])                               # asker learns it went
+
     def test_self_close_refused_while_a_descendant_is_live(self):
         """Closing this pane over a working child would leave a dead parent above live
         work — the `live_descendants` invariant. Refused, and nothing is closed."""
@@ -3012,6 +3032,48 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
         store.set_state(self.db, "kid", "blocked")
         self.assertEqual(self.b.cleanup(me="orch"), [])
+
+    def test_force_close_withdraws_a_question_it_asked(self):
+        """Andrew's case: closing an agent that holds an open `ask human` needs no
+        separate `sb withdraw` first. `--force` reaches the row the `asking` gate holds a
+        bare sweep off, and the question ends `withdrawn` — never dealt with, which a
+        close is not — with the pane."""
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", session_id="s-kid")
+        q = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
+        self.assertEqual(self.b.cleanup(["kid"], me="orch", force=True), ["kid"])
+        self.assertEqual(store.get_question(self.db, q)["state"], store.Q_WITHDRAWN)
+
+    def test_force_close_resolves_and_wakes_the_asker_of_a_question(self):
+        """The other direction: closing the agent another was WAITING ON must not simply
+        strand that asker on a gone target. The question ends `resolved` — the asker
+        reads its own row, and `withdrawn` there would read as it retracting something it
+        did not — and the asker is woken with a note that the agent it asked is gone."""
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="asker", role="worker", parent="orch",
+                           pane_id="w1:p1")
+        store.create_agent(self.db, name="target", role="worker", parent="orch",
+                           pane_id="w1:p2", session_id="s-target")
+        q = self.b.ask("target", "which branch?", me="asker")["id"]
+        store.unread_for(self.db, "asker", mark=True)     # drain the ordinary spawn mail
+        self.assertEqual(self.b.cleanup(["target"], me="orch", force=True), ["target"])
+        self.assertEqual(store.get_question(self.db, q)["state"], store.Q_RESOLVED)
+        [m] = store.unread_for(self.db, "asker", mark=False)
+        self.assertIn("target", m["body"])                # it learns which agent went
+
+    def test_a_finished_agent_swept_normally_still_clears_its_question(self):
+        """Not gated on `--force`. A finished agent that still holds an open question is
+        swept by a bare `sb cleanup`, and the question goes with the pane exactly as it
+        does under force — the trigger is the close, not the flag."""
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", session_id="s-kid")
+        q = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
+        store.set_state(self.db, "kid", "done")
+        self.h.states_by_name = {"kid": "idle"}
+        self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
+        self.assertEqual(store.get_question(self.db, q)["state"], store.Q_WITHDRAWN)
 
     def test_cleanup_never_closes_an_agent_with_unread_mail(self):
         store.create_agent(self.db, name="orch", role="lead")
