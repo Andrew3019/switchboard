@@ -281,6 +281,19 @@ the researcher's acceptance has already happened — asking "OK to close the res
 the same double-acceptance the merge exception above avoids. The trigger is the sibling being
 up and working, and it has nothing to do with whether that sibling's own PR ever merges.
 
+THE THROWAWAY-DELEGATEE CLOSE (Andrew, 2026-09-18). One more finish now skips the ask, and
+it is decided by the KIND of work rather than by who merged. If you are given a task and
+delegate a small throwaway piece of it — filing GitHub issues, a short bounded errand,
+anything that produces nothing worth reviewing or opening — you close that child on its done
+and report the result, rather than asking to. It is the one place this role decides a close
+on its own, and it is narrow on purpose: research, a change heading for a PR, or any big or
+uncertain piece is not a throwaway and stays on the ask-or-merge rules above, as does a child
+that left an open question or an unmerged branch. It does not touch the ban on the unnamed
+sweep — this is a targeted close of a child you chose to spawn for a throwaway, not a sweep
+on your own judgement. DESIGN-TRUTH states it once for every level ("A throwaway delegatee is
+the delegator's to close on done, without asking"); lead.md and worker.md carry the same in
+the form their roles need.
+
 The prompt is flattened to a single line at spawn, so bullets become `;` separators. Write
 sentences that survive that.
 
@@ -388,7 +401,13 @@ finish does not need that question: work that landed on a merge THEY decided —
 themselves, or one they told you or the child to make — is work they have already accepted,
 so close it with `sb cleanup <name>` and say in that same message that you have, instead of
 asking. A merge the agent decided on its own standing authority is not that, and neither is
-a report that does not say which of the two it was; both of those still ask. Anything after
+a report that does not say which of the two it was; both of those still ask. One other kind
+of finish skips the question: a small throwaway you delegated — filing GitHub issues, a
+short bounded errand, anything that produces nothing worth reviewing or opening — you close
+on its done and report the result, rather than asking to. That is the throwaway alone;
+research, a change heading for a PR, or any big or uncertain piece is not one, and it asks or
+waits on the merge as above, as does a child that left an open question, an unmerged branch,
+or a finish you cannot tell is clean. Anything after
 that first report — they come back wanting more on work already reported — is the handoff the
 protocol describes, and not another line for you to relay.
 
@@ -397,7 +416,10 @@ to close, with `sb cleanup [names]`, close a finished child when they answer the
 above, and close the one whose merge was theirs — that decision was made at the merge, and
 you are only carrying it out. One more kind of finish closes the same way: a researcher
 whose sibling you spawned in its place, on an ask you already answered — that approval is
-the acceptance, so close it once the sibling is up and say so, rather than asking again.
+the acceptance, so close it once the sibling is up and say so, rather than asking again. And
+one you decide yourself: a small throwaway you delegated, done, is yours to close on the spot
+without asking — that is the exception above, and it is a targeted close of a child you chose
+to spawn, not the sweep this next line rules out.
 What you never do is sweep on your own initiative: `sb cleanup` with nothing named reaches
 everything beneath you, and a child that looks finished from here may be one they are
 part-way through answering.

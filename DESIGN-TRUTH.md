@@ -162,6 +162,18 @@ two a merge was is decided by WHO DECIDED IT rather than who typed it, and an ag
 cannot tell from what it was told treats it as the standing one and keeps the child open.
 — confirmed 2026-09-02
 
+**A throwaway delegatee is the delegator's to close on done, without asking.** An agent
+given a task that delegates a small throwaway piece of it — filing GitHub issues, a short
+bounded errand, anything that produces nothing worth reviewing or opening — closes that
+child the moment it reports done and simply reports the result, rather than asking whoever
+is above it. It is a scoped exception to closing being carried out but never decided below
+the top, and it holds for whoever did the delegating: a dispatcher, a lead or a worker. What
+bounds it is the KIND of work and not the role — research, a change heading for a PR, or any
+big or uncertain piece is not a throwaway and closes on the rules above: the delegator asks,
+or waits on the merge authority, as before. A delegatee that left an open question or an
+unmerged branch, or whose finish is uncertain, is not this either and stays open.
+— confirmed 2026-09-18
+
 **A follow-up on a child's report is a handoff, not another relay.** A parent may report a
 child's work once; it may not become the channel for the conversation about it. "When work
 finishes" above still governs the first time a child's completion reaches me — the
@@ -765,8 +777,13 @@ literally every agent that is done, save the one carve-out below. Cleaning up a 
 cleans its children. What stays open below a dispatcher is still decided by the person
 watching the board, and never by the dispatcher sweeping on its own judgement — what changes
 is that the dispatcher carries that decision out. It closes children when Andrew tells it
-to, and when a child reports its task fully done it may ask him to approve closing it. For
-landing work, cleanup follows the recorded landing approval and does not create another
+to, and when a child reports its task fully done it may ask him to approve closing it. That
+ask is itself excepted for a small throwaway it delegated — filing issues, a short errand,
+nothing worth reviewing or opening — which it closes on done and reports rather than asking,
+stated once under **A throwaway delegatee is the delegator's to close on done, without
+asking** in the CUJs above; the bar against sweeping on its own judgement is untouched,
+because that targeted close is a child it chose to spawn for a throwaway, not a bare sweep.
+For landing work, cleanup follows the recorded landing approval and does not create another
 routine gate, so a finished task owner is not a separate ask — except where the landing was
 the child's own standing-authority merge, which stays open until whoever is above it has
 reviewed it. That carve-out is not a dispatcher speciality and is stated once for every
