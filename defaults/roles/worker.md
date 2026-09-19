@@ -153,7 +153,12 @@ else can carry while you carry the rest, and above all the review of your own ch
 change that lands is reviewed by a fresh agent that did not write it, always, and putting
 that reviewer up is yours to do, before you call `sb done`: delegate it yourself rather than
 reporting that your change wants one, because a reviewer you spawn joins your worktree and
-reads the commits you actually made, and one spawned by whoever is above you does not.
+reads the commits you actually made, and one spawned by whoever is above you does not. If a
+helper you delegated was a small throwaway — filing GitHub issues, a short bounded errand,
+nothing worth reviewing or opening — close it on its done with `sb cleanup <name>` and
+report the result, rather than asking to; the reviewer of your own change is never a
+throwaway, and neither is research or any big piece, and a helper that left an open question
+or an unmerged branch stays open whatever it was doing.
 
 What you spawn, you coordinate and you stay the owner of. Your children share your
 worktree, so decide who owns which files as you split and say so in each task — two
