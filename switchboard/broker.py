@@ -7434,6 +7434,46 @@ class Broker:
         store.put_message(self.db, from_agent=by, to_agent=asker, kind="tell", body=body)
         self._ring(asker, f"{tag(by)} {self._say('notify.mail')}", mode=NORMAL, answer=True)
 
+    def _drop_questions(self, who: str, *, by: str) -> None:
+        """A closing agent's open Questions end with it — no separate `sb withdraw` first.
+
+        Called from the one place a pane is actually removed (`cleanup`'s close block,
+        beside `_clear_unreadable_mail`), so it covers every path that closes an agent
+        holding a question: `--force`, the turn switchboard gave up on, and a finished
+        agent swept normally. It is NOT gated on `--force`: the trigger is the close, not
+        the flag, and a question left open on a row whose agent is gone is the dangling
+        row this removes — the `sb cleanup` → `sb withdraw` → clean pipeline the whole
+        change exists to collapse.
+
+        Two directions, two outcomes, because the fact each records is different:
+
+        - **Questions this agent ASKED** end `withdrawn`, and nobody is woken — the asker
+          is the agent going away. That is the state the manual `sb withdraw` wrote, and
+          `withdrawn` (never dealt with) is the honest one: a close is not an answer.
+        - **Questions asked OF this agent** end `resolved` with no answer, and the asker
+          IS woken — otherwise closing one agent silently strands another that was
+          waiting on it, the same dangling row from the other end. `resolved` and not
+          `withdrawn` because the asker reads its own row, and `withdrawn` there would
+          read as it having retracted a question it never did. The delivered note is the
+          mirror of `_deliver_answer`'s "asker is gone" drop, arriving from this side.
+
+        The human-cap / one-waiter invariant is untouched: this only ENDS open questions
+        and never opens one, so it cannot put a second waiter on any target — the human
+        included.
+        """
+        for q in store.open_questions(self.db, asker=who):
+            store.end_question(self.db, q["id"], state=store.Q_WITHDRAWN, by=by)
+            store.log_event(self.db, kind="question_dropped", agent=who,
+                            question=q["id"], direction="asked", by=by,
+                            target=q["target"])
+        for q in store.open_questions(self.db, target=who):
+            store.end_question(self.db, q["id"], state=store.Q_RESOLVED, by=by)
+            store.log_event(self.db, kind="question_dropped", agent=q["asker"],
+                            question=q["id"], direction="asked_of", by=by, closed=who)
+            self._deliver_answer(
+                q, f"the agent you asked ({who}) was closed before it answered "
+                   f"question {q['id']}: {q['body']}", by=by)
+
     # `sb status` is deliberately NOT here. It is a join of the store against herdr — what
     # an agent was told to be, against what its pane is doing — and belongs to neither, so
     # it lives in status.py and the CLI calls it directly. This module once carried a
@@ -7890,6 +7930,13 @@ class Broker:
             # command left that could clear it. Nothing is read, deleted or hidden — see
             # `_clear_unreadable_mail`.
             self._clear_unreadable_mail(a["name"])
+            # The pane is gone, so an open Question on this row is a question nobody can
+            # ask or answer any more: one it ASKED can never be delivered back to it, and
+            # one asked OF it can never be answered by it. Ended here, beside the mail and
+            # for the same reason — the close is what makes both unreadable — so closing an
+            # agent that holds a question no longer needs a separate `sb withdraw` first.
+            # See `_drop_questions`.
+            self._drop_questions(a["name"], by=me)
             store.log_event(self.db, kind="cleanup", agent=a["name"], forced=force)
             # This close just created the shape the board draws as a dead parent over
             # live children: the row's pane is gone and a descendant's is not, so the
