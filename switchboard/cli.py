@@ -39,9 +39,16 @@ from . import status as status_mod
 from . import store
 from . import usage as usage_mod
 from . import validate
+from . import assignment as assign_mod
 from . import broker as broker_mod
 from .broker import HUMAN, Broker
 from .herdr import Herdr, HerdrError
+
+# THE TWO PLACEMENT KEYWORDS `--worktree` takes (§8). Anything else it is given is a
+# workspace NAME to join, so these two are the whole reserved vocabulary — a workspace
+# called `new` would be unreachable through this flag, which is why they are spelled here
+# rather than guessed at the call site.
+WORKTREE_SAME, WORKTREE_NEW = "same", "new"
 
 
 def _emit(args, human: str, data: Any = None) -> None:
@@ -181,16 +188,35 @@ def build_parser() -> argparse.ArgumentParser:
                         "coming next as a message — the child spawns idle and waits "
                         "for it instead of guessing from its --name. With --task-file, "
                         "this is an optional one-line summary")
+    # THE SPEC'S NAME FOR THE POSITIONAL (§11), not a second thing to carry. One call sets
+    # the whole configuration, and a caller writing that call out flag by flag should not
+    # have to remember which single item is positional.
+    d.add_argument("--assignment", metavar="TASK",
+                   help="the task, named as §11 names it — the same thing as the "
+                        "positional TASK and refused beside it")
     d.add_argument("--task-file", metavar="PATH",
                    help="validate this file and give the child a pointer to read and "
                         "follow it; contents are not injected. TASK may be a one-line "
                         "summary")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE, help=_role_help())
     d.add_argument("--as", dest="as_prompt", help="ad-hoc role prompt instead of a named role")
-    d.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET",
+    # `--preset` is §11's spelling of `--with`, on the SAME dest and the same append: the
+    # spec names the flag, this repo shipped it, and two flags that both append presets
+    # would be two answers to one question.
+    d.add_argument("--with", "--preset", dest="with_", action="append", default=[],
+                   metavar="PRESET",
                    help=f"preset from {_preset_dir_help()}, or @<plugin> for that plugin's "
-                        f"fragment (repeatable); an unknown BARE value is used as a literal "
-                        f"instruction, but @ is reserved and an unknown @name is an error")
+                        f"fragment (repeatable, and `--preset` is the same flag); an "
+                        f"unknown BARE value is used as a literal instruction, but @ is "
+                        f"reserved and an unknown @name is an error")
+    # WHAT THE RECEIVING AGENT NEEDS TO KNOW, and it travels on the ASSIGNMENT channel —
+    # joined to the first user message, never into the standing prompt. That is #327's
+    # separation kept: the standing payload is what is true from turn one, and a handoff is
+    # about this job. One line, like the task, because herdr refuses a newline in what it
+    # sends.
+    d.add_argument("--handoff", metavar="TEXT",
+                   help="context the child needs that the task does not carry — delivered "
+                        "with the task as its first message, not as standing instructions")
     d.add_argument("--name", metavar="TOPIC",
                    help="two or three words for the subject, passed as ONE quoted argument "
                         '(e.g. --name "api client") — the agent is named '
@@ -202,12 +228,39 @@ def build_parser() -> argparse.ArgumentParser:
                         "child's --name is the workspace's name)")
     # WHERE the child works, when nothing else has already decided (`--workspace` and a
     # top's fork both outrank it — broker `isolates`). `own` needs the `fork` capability.
-    d.add_argument("--isolation", choices=broker_mod.ISOLATIONS,
-                   default=broker_mod.ISOLATION_SHARED,
-                   help="'shared' (default) works in YOUR checkout, alongside you and "
+    d.add_argument("--isolation", choices=broker_mod.ISOLATIONS, default=None,
+                   help="'shared' (the default) works in YOUR checkout, alongside you and "
                         "your other children; 'own' gives this child a worktree and "
-                        "branch of its own to be merged back later (needs `fork`)")
+                        "branch of its own to be merged back later (needs `fork`). "
+                        "`--worktree` says the same thing in one flag")
+    # PLACEMENT AS ONE CHOICE (§8: "the delegator chooses placement"). The three answers
+    # already existed across two flags — `--isolation shared`, `--isolation own`,
+    # `--workspace <name>` — which made "where does this child work" a question you had to
+    # know the shape of before you could ask it. This is the one flag that asks it, and it
+    # resolves to exactly those two, so there is no second placement path.
+    d.add_argument("--worktree", metavar="WHERE",
+                   help="where this child works: 'same' (your checkout — the default), "
+                        "'new' (a worktree and branch of its own, needs `fork`), or the "
+                        "NAME of an existing workspace to join. Refused beside "
+                        "--isolation/--workspace, which are the same choice spelled long")
     d.add_argument("--model", help=_tier_help())
+    # THE STEP THE SPAWNEE TAKES — about the child, not the caller (§11). An unowned step
+    # is assigned by any agent working in the Plan; an owned one needs `--steal`, which
+    # records the move and tells the previous owner. Checked BEFORE the spawn, so a typo
+    # costs a refusal rather than a live agent with nothing to do.
+    d.add_argument("--assign-step", dest="assign_step", metavar="STEP",
+                   help="the Plan Step this child takes — an id (step-2, p-1/step-2) or "
+                        "its board name. Unowned steps assign freely; an owned one needs "
+                        "--steal")
+    d.add_argument("--steal", action="store_true",
+                   help="assign --assign-step even though somebody owns it: recorded, and "
+                        "the previous owner is told unless it has already finished")
+    # END-TO-END PLAN OWNERSHIP (§11, §6). The `done` gate that consumes it is #329's and
+    # was cut from that issue's lean scope, so this records the accountable owner and
+    # nothing yet refuses a `done` on it.
+    d.add_argument("--own-plan", dest="own_plan", metavar="PLAN",
+                   help="make this child the Plan's end-to-end owner — accountable for it "
+                        "landing, not just for one step")
 
     # A capability, handed to an agent in your own subtree, for the rest of its life.
     # There is deliberately NO `sb revoke` and no `--ttl`: the agent's lifecycle is the
@@ -666,6 +719,49 @@ def _validate(args) -> None:
             args.model = validate.line(args.model, "--model", max_len=validate.MAX_TOKEN)
 
     elif cmd == "delegate":
+        # `--assignment` IS the positional, so exactly one of them may be there. Refused
+        # rather than resolved by precedence: two different tasks in one call is a caller
+        # who has said two things, and silently executing one of them is how a child ends
+        # up doing the job its parent did not send.
+        if args.assignment is not None:
+            if args.task is not None:
+                raise validate.Invalid(
+                    "--assignment and the positional TASK are the same thing — give one. "
+                    "§11 names the flag; this repo's spawn has always taken it positionally.")
+            args.task = args.assignment
+        # PLACEMENT, resolved into the two flags the broker already takes (§8). `same` and
+        # `new` are the two isolations; anything else names a workspace to JOIN, which is
+        # §8's "another isolated one" and is the one placement that must already exist.
+        if args.worktree is not None:
+            said = [f for f, v in (("--isolation", args.isolation),
+                                   ("--workspace", args.workspace)) if v is not None]
+            if said:
+                raise validate.Invalid(
+                    f"--worktree and {', '.join(said)} are the same choice — give one. "
+                    f"`--worktree same` is `--isolation shared`, `--worktree new` is "
+                    f"`--isolation own`, and `--worktree <name>` is `--workspace <name>`.")
+            where = validate.line(args.worktree, "--worktree", max_len=validate.MAX_TOKEN)
+            if where == WORKTREE_SAME:
+                args.isolation = broker_mod.ISOLATION_SHARED
+            elif where == WORKTREE_NEW:
+                args.isolation = broker_mod.ISOLATION_OWN
+            else:
+                args.workspace = where
+        # NULL MEANS "NOT SAID", which is what made the check above possible; the broker's
+        # own default is what it has always been, and is applied here so nothing downstream
+        # has to know the flag can be absent.
+        if args.isolation is None:
+            args.isolation = broker_mod.ISOLATION_SHARED
+        if args.steal and args.assign_step is None:
+            raise validate.Invalid(
+                "--steal says how to take a step and --assign-step says which — give both, "
+                "or neither.")
+        if args.assign_step is not None:
+            args.assign_step = validate.line(args.assign_step, "--assign-step",
+                                             max_len=validate.MAX_REF)
+        if args.own_plan is not None:
+            args.own_plan = validate.line(args.own_plan, "--own-plan",
+                                          max_len=validate.MAX_REF)
         # None is a taskless spawn and is legal (#145) — the broker substitutes the
         # placeholder that tells the child to wait. A file is deliberately a POINTER, not
         # an inline payload: herdr rejects newline-bearing agent arguments, and the child
@@ -719,6 +815,10 @@ def _validate(args) -> None:
         # prompt text, so both are checked again after resolution (see _dispatch).
         args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
                       for w in args.with_]
+        # ONE LINE, like the task it rides with: it is delivered inline as the child's
+        # first message, and herdr refuses a newline in anything it sends.
+        if args.handoff is not None:
+            args.handoff = validate.line(args.handoff, "--handoff")
 
     elif cmd == "instructions":
         args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
@@ -1792,10 +1892,22 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # placement keywords `delegate` already takes, so a join spawns through exactly
         # the same call an inheriting child does. Without it, `delegate` inherits the
         # caller's workspace or forks, as it always has.
+        # THE PREFLIGHT, before a pane, a worktree or a row exists. `--assign-step` names
+        # an object this process does not own, and the refusals it can earn — no such
+        # step, a step somebody else holds — are the ones a caller fixes by retyping. Paid
+        # for after the spawn they would leave a live agent with nothing to do.
+        if args.assign_step is not None or args.own_plan is not None:
+            try:
+                assign_mod.check(b.repo, db, agent=(None if me == HUMAN else me),
+                                 step=args.assign_step, plan=args.own_plan,
+                                 steal=args.steal)
+            except (assign_mod.NoAssigner, assign_mod.AssignmentRefused) as e:
+                print(f"sb: {e}", file=sys.stderr)
+                return 1
         join = b.join_workspace(args.workspace) if args.workspace else {}
         name = b.delegate(args.task, role=args.role, as_prompt=args.as_prompt,
                           topic=args.name, isolation=args.isolation,
-                          model=args.model, with_=args.with_, me=me,
+                          model=args.model, with_=args.with_, me=me, handoff=args.handoff,
                           emit_guidance=not getattr(args, "json", False), **join)
         where = f" (joined workspace '{args.workspace}')" if args.workspace else ""
         # A spawn can end in three places, not two: confirmed, confirmed-nowhere-but-the
@@ -1811,6 +1923,38 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         receipt = {"name": name, "workspace": join.get("workspace"),
                    "unconfirmed": note}
         human = f"delegated to {name}{where}" + (f" — {note}" if note else "")
+        # THE ASSIGNMENT, now the name is a row. It ran as a check above, so what can fail
+        # here is a race — somebody took the step in the gap — and it is reported LOUDLY
+        # against a child that is already up: exit non-zero with the name, because the
+        # caller has an agent it must now deal with and a Step it did not get.
+        if args.assign_step is not None or args.own_plan is not None:
+            try:
+                got = assign_mod.apply(b.repo, db, agent=(None if me == HUMAN else me),
+                                       to=name, step=args.assign_step, plan=args.own_plan,
+                                       steal=args.steal)
+            except (assign_mod.NoAssigner, assign_mod.AssignmentRefused) as e:
+                store.log_event(db, kind="assign_failed", agent=name, parent=me,
+                                step_id=args.assign_step, plan_id=args.own_plan,
+                                error=str(e))
+                receipt["assignment_failed"] = str(e)
+                _emit(args, f"{human}\n  BUT the assignment did not land: {e}\n"
+                            f"  {name} is running and owns nothing — assign it with "
+                            f"`sb plugin plans take <step> --for {name}` or close it",
+                      receipt)
+                return 1
+            assign_mod.record(db, agent=name, parent=(None if me == HUMAN else me),
+                              got=got, steal=args.steal)
+            receipt["assigned"] = got
+            step, plan = got.get("step"), got.get("plan")
+            if isinstance(step, dict):
+                human += f"\n  step      {step.get('plan')}/{step.get('step')} → {name}"
+                if step.get("notified"):
+                    human += f" (stolen from {step['notified']}, and it was told)"
+                elif step.get("notice_skipped"):
+                    human += f" (stolen — {step['notice_skipped']})"
+            if isinstance(plan, dict):
+                human += (f"\n  plan      {plan.get('plan')} is {name}'s end to end — it "
+                          f"is accountable for it landing")
         if getattr(args, "full", False):
             row = store.get_agent(db, name)
             if row is not None:

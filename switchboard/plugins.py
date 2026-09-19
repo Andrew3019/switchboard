@@ -462,6 +462,10 @@ class Loaded:
     commands: dict[str, Command] = field(default_factory=dict)
     error: str = ""
     traceback: str = ""
+    # The imported package, for the seams that ask a plugin to DO something rather than to
+    # declare a command — `switchboard/assignment.py` looks for a named function on it. Not
+    # in `as_dict`: a module object is not a row anybody renders.
+    module: Optional[Any] = None
 
     def as_dict(self) -> dict:
         return {"name": self.name, "version": self.version, "status": self.status,
@@ -527,6 +531,7 @@ def load(repo: Optional[Path], name: str, path: Optional[Path] = None,
     except BaseException as e:                  # noqa: BLE001 — see the docstring
         return broken(_first_line(_where(e, path)), traceback.format_exc())
 
+    p.module = mod
     p.version = str(getattr(mod, "VERSION", "—"))
     p.help = _first_line((mod.__doc__ or "").strip())
     api = getattr(mod, "API", None)
@@ -763,9 +768,11 @@ def locked(d: Path, want: bool = True) -> Iterator[None]:
     their code runs. Whole-file rewrite via tmp + `os.replace` under this is then correct,
     and is the simplest thing that works.
 
-    Per state directory, so plugins never contend with each other, and never held over the
-    spawn path, which runs no handlers. `LOCK = False` for an append-only plugin that
-    genuinely needs none.
+    Per state directory, so plugins never contend with each other. `LOCK = False` for an
+    append-only plugin that genuinely needs none — and for the shipped `plans`, which takes
+    its own finer locks inside. The spawn path holds it too now, around the one handler it
+    runs (`assignment._call`, for `sb delegate --assign-step`), and only around that: a
+    spawn does not hold a plugin's lock over `agent start`.
     """
     if not want:
         yield

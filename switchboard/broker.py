@@ -5495,6 +5495,7 @@ class Broker:
         cwd: Optional[str] = None,
         pane: Optional[str] = None,
         isolation: str = ISOLATION_SHARED,      # own|shared — see `isolates`
+        handoff: Optional[str] = None,  # what the receiver needs to know; rides the task
         emit_guidance: bool = True,             # prose output; false for JSON callers
         awaiting_task: bool = False,    # `task` is a placeholder; nobody has asked yet
         is_top: bool = False,           # `sb start` only — see `_top`
@@ -5515,6 +5516,13 @@ class Broker:
         # non-empty `task` — running `_first_task` over that would answer False and undo it.
         if not (task and task.strip()):
             task, awaiting_task = self._first_task("spawn.delegate_task", None)
+        # THE HANDOFF RIDES THE ASSIGNMENT, never the standing prompt (§11 layer 3, and
+        # #327's separation): what the receiving agent needs to know is about THIS job, and
+        # the standing payload is what is true from turn one. So it is joined to the first
+        # user message — including to the taskless spawn's placeholder, where a child
+        # waiting for its real instruction can still be told what it is walking into.
+        if handoff and handoff.strip():
+            task = f"{task} HANDOFF: {handoff.strip()}"
         if isolation not in ISOLATIONS:
             raise ValueError(
                 f"isolation is {' or '.join(ISOLATIONS)}, not {isolation!r}: `own` gives "
@@ -5787,6 +5795,7 @@ class Broker:
                         workspace=ws, tier=model, branch=branch, cwd=str(where),
                         isolation=isolation, with_=list(with_) or None,
                         custom_prompt=bool(as_prompt), task=task,
+                        handoff=handoff or None,
                         awaiting_task=bool(awaiting_task),
                         session_id=agent.session_id or None)
         # EVERY agent opens with the tree beside it, not just the top-level

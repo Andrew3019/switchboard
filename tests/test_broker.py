@@ -2077,6 +2077,7 @@ class BrokerTest(unittest.TestCase):
             args = argparse.Namespace(
                 cmd="delegate", task="do the thing", role="worker", as_prompt=None,
                 with_=[], name="levels", workspace=None, isolation="shared", model=None,
+                handoff=None, assign_step=None, own_plan=None, steal=False,
                 json=False, full=full)
             buf = io.StringIO()
             with mock.patch.object(self.b, "whoami", return_value="orch"), \
