@@ -1369,6 +1369,26 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNone(a["pane_id"])
         self.assertIn("w1:p9", self.h.closed)
 
+    def test_self_close_clears_its_open_questions_both_ways(self):
+        """A self-close (`done --close`) removes the pane exactly as `cleanup` does, so it
+        clears the closing agent's questions the same way: one it asked ends `withdrawn`,
+        and one asked OF it ends `resolved` with the waiting asker woken — otherwise an
+        agent that self-closed left anyone waiting on it stranded."""
+        store.create_agent(self.db, name="lead", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="lead",
+                           pane_id="w1:p9")
+        store.create_agent(self.db, name="asker", role="worker", parent="lead",
+                           pane_id="w1:p8")
+        asked = self.b.ask(HUMAN, "which branch?", me="kid")["id"]     # kid -> human
+        of_kid = self.b.ask("kid", "which branch?", me="asker")["id"]  # asker -> kid
+        store.unread_for(self.db, "asker", mark=True)                  # drain spawn mail
+        r = self.b.self_close("shipped it", me="kid")
+        self.b.close_own_pane(r["target"], me="kid")
+        self.assertEqual(store.get_question(self.db, asked)["state"], store.Q_WITHDRAWN)
+        self.assertEqual(store.get_question(self.db, of_kid)["state"], store.Q_RESOLVED)
+        [m] = store.unread_for(self.db, "asker", mark=False)
+        self.assertIn("kid", m["body"])                               # asker learns it went
+
     def test_self_close_refused_while_a_descendant_is_live(self):
         """Closing this pane over a working child would leave a dead parent above live
         work — the `live_descendants` invariant. Refused, and nothing is closed."""

@@ -7194,6 +7194,13 @@ class Broker:
         # The pane this inbox was reachable through is about to go, so clear what nobody
         # could open afterwards — the same call `cleanup` makes for the same reason.
         self._clear_unreadable_mail(me)
+        # And its open Questions, the same as any other close: a self-close removes the
+        # pane exactly as `cleanup` does, so a question it asked can no longer be delivered
+        # back to it and one asked OF it can no longer be answered by it. Without this, an
+        # agent that self-closed (`done --close`) with another still waiting on it left
+        # that asker stranded — the dangling row this whole change removes, reached by the
+        # one close path `cleanup` is not. See `_drop_questions`.
+        self._drop_questions(me, by=me)
         store.log_event(self.db, kind="self_closed", agent=me, reported=reported,
                         summary=(summary[:EVENT_CLIP] if summary else None))
         # NOT `_close_empty_spaces`: the caller is standing in its own workspace, which that
