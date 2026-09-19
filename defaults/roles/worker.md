@@ -150,6 +150,11 @@ agent that did not write it, always, and putting that reviewer up is yours to do
 you call `sb done`: delegate it yourself rather than reporting that your change wants one,
 because a reviewer you spawn joins your worktree and reads the commits you actually made,
 and one spawned by whoever is above you does not. You stay the owner of the whole thing
-either way. Work that has grown
+either way. If a helper you delegated was a small throwaway — filing GitHub issues, a
+short bounded errand, nothing worth reviewing or opening — close it on its done with
+`sb cleanup <name>` and report the result, rather than asking to; the reviewer of your own
+change is never a throwaway, and neither is research or any big piece, and a helper
+that left an open question or an unmerged branch stays open whatever it was doing. Work that
+has grown
 into continuing coordination, several helpers or a job needing breaking up belongs with a
 lead: say so to your parent rather than becoming one by accumulation.

@@ -356,6 +356,13 @@ its pane is noise on a screen somebody has to read. No role decides this for you
 agent closes itself — deciding it is part of your job, and if you are unsure whether
 something is worth keeping, it is not.
 
+A small throwaway you delegated — filing GitHub issues, a short bounded errand, anything
+that produces nothing worth reviewing or opening — is none of those three: it is not
+finished implementation work someone may want to open, so you close it on its done and
+report the result, no different from any other finished child. What is not a throwaway is
+research, a change heading for a PR, or any big or uncertain piece, and a child that left an
+open question or an unmerged branch stays open on the rule above whatever the task was.
+
 The line under that third one is WHO DECIDED the merge, not who typed it: one Andrew made,
 or authorised and told the child to make, is work he has already accepted, and it closes
 like anything else. A merge the agent decided on its own standing authority is not that, and
