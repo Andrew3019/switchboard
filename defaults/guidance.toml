@@ -177,13 +177,21 @@ text = "Several of your children are writing tracked files in YOUR checkout at t
 # it. The call site is `cli._state_output` (E2), which resolves the ledger with the verb
 # the caller just ran — so this fires under the output of `sb delegate` and nowhere else.
 # `holds = ["spawn"]` keeps it off every agent that could not act on it, and `once` keeps
-# it off every delegate after the first.
+# it off every delegate after the first. Since #326 every role holds `spawn`, so that clause
+# now excludes nobody — it is left in place because it is the right question to ask, and a
+# repo that narrows a role again gets the filter back with it.
+#
+# REWRITTEN AGAIN 2026-09-18 (#326), id KEPT for the reason it was kept the first time. The
+# choice it described — `worker` or `lead` — no longer exists: `lead` is not a shipped role,
+# and a worker owns the outcome and delegates whatever the job needs. What is still decided
+# at exactly this moment is which KIND of agent the piece wants, so the text now names the
+# three that ship and says what each is reached for.
 [[rule]]
 id = "delegate-to-a-lead"
 command = "delegate"
 holds = ["spawn"]
 repeat = "once"
-text = "Two things to get right at a spawn. WHO OWNS IT: a `worker` for a bounded outcome one agent can carry to done, a `lead` where the shape is uncertain or the part may need agents of its own — and a lead is not thereby obliged to hand anything out; it may do the whole thing itself, and often should. WHAT YOU TYPE: role and model names come from this repo as it stands (`sb roles`, `sb models`), a near miss resolves to the one tier it can only mean, and an unknown or ambiguous name is refused with the near ones listed — take that refusal rather than inventing a name that gets through."
+text = "Two things to get right at a spawn. WHO OWNS IT: a `worker` owns an outcome and carries it to done — it does the work itself, and delegates and coordinates whatever the job turns out to need, so one worker is the usual answer even where the shape is uncertain; a `researcher` when the question is what to do rather than how; a `reviewer` for a fresh judgment on work already written. A role is guidance about the job, not a permission class — none of them is short of anything it needs. WHAT YOU TYPE: role and model names come from this repo as it stands (`sb roles`, `sb models`), a near miss resolves to the one tier it can only mean, and an unknown or ambiguous name is refused with the near ones listed — take that refusal rather than inventing a name that gets through."
 
 
 # `--isolation own` IS NOT IN THE SPAWN PROMPT (checked 2026-08-23, and again 2026-08-28:
@@ -256,7 +264,7 @@ id = "spawn-idle-when-the-task-is-still-coming"
 command = "delegate"
 holds = ["spawn"]
 repeat = "once"
-text = "`sb delegate` takes the task as an argument, and that is right whenever you have the task. When you do NOT — somebody said they would give this agent its context themselves, or you are spawning ahead of a brief you are still waiting on — omit the argument entirely: `sb delegate --role lead --name <topic>` spawns the child holding an instruction to wait, and it stays out of STALLED until your first `sb tell` reaches it. Never pass a bare topic label as the task; a child reads whatever you pass as the whole of its instruction and starts on it."
+text = "`sb delegate` takes the task as an argument, and that is right whenever you have the task. When you do NOT — somebody said they would give this agent its context themselves, or you are spawning ahead of a brief you are still waiting on — omit the argument entirely: `sb delegate --role worker --name <topic>` spawns the child holding an instruction to wait, and it stays out of STALLED until your first `sb tell` reaches it. Never pass a bare topic label as the task; a child reads whatever you pass as the whole of its instruction and starts on it."
 
 
 # REMOVED: `direct-path-tier-at-the-spawn` (Andrew, 2026-09-10). A `command = "delegate"`,

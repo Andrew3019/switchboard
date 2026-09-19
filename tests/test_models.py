@@ -279,13 +279,14 @@ class ModelsTest(unittest.TestCase):
         """
         self.write_settings("[routing]\ngpt_luna_direct_enabled = true\n")
         spec = self.load().resolve("gpt-luna-max-effort")
-        self.assertEqual(spec.forbidden_roles, ("lead", "dispatcher", "reviewer"))
+        # `lead` was the third until #326 stopped shipping the role.
+        self.assertEqual(spec.forbidden_roles, ("dispatcher", "reviewer"))
         for role in spec.forbidden_roles:
             with self.subTest(role=role), \
                     self.assertRaises(models.ModelConfigError) as cm:
                 spec.gate(role)
             self.assertIn(role, str(cm.exception))
-        for role in ("worker", "builder"):
+        for role in ("worker", "researcher"):
             with self.subTest(role=role):
                 self.assertIsNone(spec.gate(role))
 

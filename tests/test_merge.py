@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from switchboard import roles as roles_mod  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard.broker import Broker  # noqa: E402
 
@@ -106,6 +107,18 @@ class Fixture:
         """The caller: a lead in a worktree of its own, on its own branch."""
         self.lead_path = self._worktree(name)
         return self._agent(name, role="lead", branch=name, path=self.lead_path)
+
+    def _narrow_role(self, name: str, *caps: str) -> str:
+        """A role template narrower than the vocabulary, handed to the broker directly.
+
+        SINCE #326 NO DEFINITION DECLARES ONE — roles are soft guidance and every role
+        resolves to everything — so the tests that cover a boundary's refusal build the
+        agent that gets refused. `researcher` used to supply the read-only half here; it no
+        longer does, and what is under test (the boundary, not the role) is unchanged.
+
+        Call it AFTER anything that rebuilds the broker, since it lives on that instance."""
+        self.b.roles[name] = roles_mod.Role(name=name, capabilities=frozenset(caps))
+        return name
 
     def _child(self, name: str, *, file: str, text: str, role: str = "worker",
                parent: str = "lead-a") -> str:
@@ -275,11 +288,8 @@ class ConflictTest(Fixture, unittest.TestCase):
         put back the way it was found rather than left half-merged for the next command to
         trip over."""
         path = self._worktree("worker-solo")
-        me = self._agent("worker-solo", role="worker", branch="worker-solo", path=path)
-        # Seeded explicitly, because the `worker` TEMPLATE has named `spawn` since
-        # 2026-08-31: this is the ∩-narrowed row that template produces under a spawner
-        # which could not pass `spawn` down, and it is the row this refusal is about.
-        store.seed_capabilities(self.db, me, ["write-tracked"])
+        me = self._agent("worker-solo", role=self._narrow_role("solo", "write-tracked"),
+                         branch="worker-solo", path=path)
         self.lead_path = path
         self._child("worker-one", file="shared.txt", text="one's answer\n",
                     parent=me)
@@ -299,7 +309,7 @@ class RefusalTest(Fixture, unittest.TestCase):
     def test_write_tracked_is_checked_on_the_child_not_the_caller(self):
         lead = self._lead()
         self._child("researcher-notes", file="notes.md", text="read only\n",
-                    role="researcher")
+                    role=self._narrow_role("reader", "spawn"))
         self.assertFalse(self.b.holds_capability("researcher-notes", "write-tracked"))
         self.assertTrue(self.b.holds_capability(lead, "write-tracked"))
         with self.assertRaises(ValueError) as cm:
@@ -312,7 +322,7 @@ class RefusalTest(Fixture, unittest.TestCase):
         """Per-child, not per-batch."""
         lead = self._lead()
         self._child("researcher-notes", file="notes.md", text="read only\n",
-                    role="researcher")
+                    role=self._narrow_role("reader", "spawn"))
         self._child("worker-one", file="one.txt", text="one\n")
         with self.assertRaises(ValueError):
             self.b.merge("researcher-notes", me=lead)

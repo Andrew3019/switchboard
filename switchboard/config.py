@@ -618,3 +618,377 @@ def shipped_models() -> dict:
     """The shipped tier table, raw. models.py owns the layering above it — it has a global
     per-user layer this module knows nothing about."""
     return read_toml(defaults_dir() / "models.toml")
+
+
+# -- the two levels, surfaced (spec §10) ---------------------------------------
+#
+#     Switchboard defaults -> repo-specific override -> effective value
+#
+# Everything above this line RESOLVES that chain and returns the answer. What it could not
+# do is say where the answer came from, and that is the whole of what §10 asks for: "the UI
+# distinguishes Switchboard default, repo override and effective value, and offers an easy
+# reset to default". A browser cannot present a distinction the library will not tell it.
+#
+# So this section is the SUBSTRATE and not a second resolver: `Layered.effective` is read
+# back out of `setting()` and the vocabulary rows out of the same layered readers the spawn
+# path uses, so a readout that disagreed with a spawn would be a bug here rather than a
+# second opinion. `sb configure --layers` renders it; the browser (wave 12) will edit it.
+#
+# THREE things are deliberately not here. Writing an override is not — resetting a key means
+# editing the repo's TOML, comments and all, and the file is the editing surface today.
+# Per-agent `sb configure` state is not — that is an agent tuning ITSELF inside its role's
+# ceiling (`roles.effective_config`), a different subject with a different store. And no
+# value is REFUSED here: see `_family` for how far validation goes and why.
+
+
+class _Unset:
+    """`override` when the repo's file says nothing about a key. Not `None`: `None` is a
+    value a TOML file can hold, and conflating "unset" with it would make a repo that
+    genuinely wrote one look like a repo that wrote nothing."""
+
+    def __repr__(self) -> str:                                    # pragma: no cover
+        return "UNSET"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+UNSET = _Unset()
+
+
+@dataclass(frozen=True)
+class Layered:
+    """One configuration key across the two levels.
+
+    `override` is the repo's RAW value and `effective` the merged one, and for an array
+    those are different on purpose: arrays JOIN (merge rule 3), so a repo that wrote one
+    entry has an effective value holding the shipped ones too. Reporting the raw value as
+    the effective one would tell a reader their list was shorter than it is; reporting only
+    the effective one would hide which entry is theirs to delete.
+    """
+
+    key: str
+    default: Any
+    override: Any
+    effective: Any
+    note: str = ""
+
+    @property
+    def overridden(self) -> bool:
+        return not isinstance(self.override, _Unset)
+
+    @property
+    def ships_default(self) -> bool:
+        """False for a key only the repo defines — its own `[config.settings.<name>]`, or a
+        table switchboard does not ship. There is nothing to reset such a key TO."""
+        return not isinstance(self.default, _Unset)
+
+    @property
+    def joined(self) -> bool:
+        """The effective value is the two layers concatenated rather than one of them."""
+        return self.overridden and isinstance(self.effective, list) \
+            and self.effective != self.override
+
+    def reset(self) -> str:
+        """How to put this key back to switchboard's default, in words that are the edit.
+
+        There is no `--reset` flag and this is why: the repo's settings file is TOML with
+        comments in it, the comments are most of its value, and a writer that preserved
+        them is a TOML round-tripper this project does not have. Deleting a line is the
+        whole operation, so the honest surface is to name the line.
+        """
+        if not self.overridden:
+            return ""
+        if not self.ships_default:
+            return f"delete `{self.key.rsplit('.', 1)[-1]}` (switchboard ships no default)"
+        if self.joined:
+            return (f"drop your entry, or write `[\"{RESET}\", ...]` to replace the "
+                    f"shipped list instead of adding to it")
+        return f"delete `{self.key.rsplit('.', 1)[-1]}` from your settings file"
+
+    def as_dict(self) -> dict:
+        """The row as JSON — what `--json` emits and what the browser will read.
+
+        `UNSET` is not JSON, so an absent layer is reported by the booleans rather than by a
+        null that would be indistinguishable from a null somebody wrote.
+        """
+        out = {"key": self.key, "effective": self.effective,
+               "overridden": self.overridden, "ships_default": self.ships_default,
+               "joined": self.joined, "reset": self.reset(), "note": self.note}
+        if self.ships_default:
+            # `shipped` and not `default`: `test_config` forbids these modules a literal
+            # that collides with a TIER name, and `default` is one. Same reason
+            # `[config.settings]` spells its own starting value `initial` (`roles.INITIAL`).
+            out["shipped"] = self.default
+        if self.overridden:
+            out["override"] = self.override
+        return out
+
+
+def override_path(repo: Optional[Path] = None) -> Optional[Path]:
+    """The one file a repo's setting overrides live in — whether or not it exists yet.
+
+    Named even when absent, because "where would I write one" is the question a readout of
+    defaults raises, and answering it with nothing sends the reader to search the tree.
+    """
+    d = repo_dir(repo)
+    return None if d is None else d / _shipped_settings()["paths"]["settings_file"]
+
+
+def _repo_settings(repo: Optional[Path] = None) -> dict:
+    """The repo's settings file, raw and unmerged. `{}` when there is none."""
+    p = override_path(repo)
+    return read_toml(p) if p is not None else {}
+
+
+def _leaves(node: dict, path: tuple = ()) -> Iterable[tuple[str, Any]]:
+    """Every `dotted.key -> value` in a settings tree.
+
+    An EMPTY table is a leaf (`[codex.deepseek.options]`), because descending into it
+    yields nothing and a repo filling it in is overriding that table. A non-empty one is
+    descended, including an inline table like `role_aliases` — `vocabulary.role_aliases.qa`
+    is exactly the granularity at which a repo overrides one alias and keeps the rest.
+    """
+    for key, value in node.items():
+        if isinstance(value, dict) and value:
+            yield from _leaves(value, (*path, key))
+        else:
+            yield ".".join((*path, key)), value
+
+
+def _at(node: Any, dotted: str) -> Any:
+    """One dotted key out of a tree, or `UNSET` if that tree does not reach it."""
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return UNSET
+        node = node[part]
+    return node
+
+
+# The value families validation knows about, and the whole of how far it goes.
+#
+# Spec §10: "Validation catches obviously invalid values. Beyond that, configuration stays
+# permissive: do not hard-code restrictions on combinations of roles, presets, models or
+# Task structures." A number where a list belongs is obviously invalid and there is no repo
+# for which it works. Which roles may run on which model is not: that is a combination, and
+# a rule about it here would be exactly the hard-coded restriction §10 forbids.
+#
+# A NOTE AND NOT A REFUSAL, even so. The value that raises is the one that gets USED —
+# `flag()` refuses a quoted "no", `setting()` names a key that is missing entirely — and
+# that stays the enforcement point, because it fires for the caller who cares and knows
+# which key it was reading. This is a readout; its job is to say the override looks wrong
+# while still reporting what it is.
+def _family(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true/false"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "text"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, dict):
+        return "table"
+    return type(value).__name__
+
+
+def _note(default: Any, override: Any) -> str:
+    if isinstance(default, _Unset) or isinstance(override, _Unset):
+        return ""
+    want, got = _family(default), _family(override)
+    return "" if want == got else \
+        f"a {got} where switchboard's default is a {want} — probably a mistake"
+
+
+def setting_layers(repo: Optional[Path] = None, prefix: str = "") -> list[Layered]:
+    """Every setting as `default -> override -> effective`, in shipped file order.
+
+    `prefix` is a dotted path and matches a key or a whole table under it, so `timeouts`
+    answers "what can I tune about timing" and `timeouts.stall_threshold` answers about
+    one. Keys the repo added that switchboard does not ship come last, because they have no
+    place in the shipped order to sit in.
+    """
+    shipped, over, live = _shipped_settings(), _repo_settings(repo), settings(repo)
+    keys = dict.fromkeys(k for k, _ in _leaves(shipped))
+    keys.update(dict.fromkeys(k for k, _ in _leaves(over)))
+    rows = []
+    for key in keys:
+        if prefix and key != prefix and not key.startswith(f"{prefix}."):
+            continue
+        default, override = _at(shipped, key), _at(over, key)
+        rows.append(Layered(key=key, default=default, override=override,
+                            effective=_at(live, key), note=_note(default, override)))
+    return rows
+
+
+# -- the vocabularies, surfaced ------------------------------------------------
+#
+# "Repo-defined roles, presets and step kinds are repo configuration in the same two-level
+# scheme" (§10). They already resolved that way; what follows says so out loud, one row per
+# NAME rather than per key, because a name is what a repo adds and what a browser lists.
+#
+# Read off the same layered readers the spawn path uses wherever there is one, and off the
+# DIRECTORIES where the layering is a file lookup. No plugin is imported: `plugins.available`
+# globs, exactly as `roles()` above relies on.
+
+
+# The plugin whose catalogue mints step kinds. Named here rather than discovered, because
+# "step kinds" is a spec-level vocabulary (§4) and `plans` is the plugin that implements it —
+# a repo that deletes that plugin has no step kinds, which is the honest answer and the one
+# a listing should give. The catalogue's own layering is in the plugin; `step_library_dirs`
+# below is the shared definition of WHERE, so the two cannot drift.
+STEP_LIBRARY_PLUGIN = "plans"
+
+
+# The two catalogues the step-library plugin keeps, and the `[paths]` entry each is layered
+# under. A map rather than `f"step_{which}_dir"`, so the TOML key and the directory name stay
+# independently editable and a typo in one is a KeyError here rather than a silent miss.
+STEP_CATALOGUES = {"library": "step_library_dir", "templates": "step_templates_dir"}
+
+
+def step_library_layers(which: str = "library",
+                        repo: Optional[Path] = None) -> list[tuple[str, Path]]:
+    """One step catalogue's layers as `(origin, dir)`, most general first.
+
+    The same three-layer shape as presets, and the same rule on top of it — keyed by
+    filename, a later layer replacing the earlier one of that name. Shipped lives inside the
+    plugin because the definitions are the plugin's own; the two repo layers are ordinary
+    `[paths]` entries, so a repo mints a step kind by adding a JSON file and nothing else.
+
+    ORIGINS ARE PAIRED WITH THEIR DIRECTORY here rather than zipped onto the list
+    afterwards, which is what a review caught: with no repo in play the list holds the
+    plugin's directory alone, and zipping the tail of the origins onto it labelled
+    switchboard's own definitions `repo`.
+
+    Gated on ENABLEMENT and not merely availability, exactly as `roles()` is: `cli` refuses
+    a disabled plugin's verbs outright, so a disabled `plans` contributes no step kinds and
+    a readout saying otherwise would advertise a vocabulary nothing accepts. A plugin that is
+    RUNNING is by definition enabled, so this costs the plugin's own read nothing.
+    """
+    from . import plugins                          # see `roles()` — globs, imports nothing
+    key = STEP_CATALOGUES[which]
+    out: list[tuple[str, Path]] = []
+    if STEP_LIBRARY_PLUGIN in set(plugin_enablement(repo)):
+        plugin = plugins.available(repo).get(STEP_LIBRARY_PLUGIN)
+        if plugin is not None:
+            # "switchboard" only for a SHIPPED plugin: a repo that replaces the whole
+            # `plans` directory owns those definitions, and `_owner` says which it is.
+            out.append((_shipped_plugin_origin(plugin), plugin / which))
+    for origin, d in (("repo (committed)", shared_path_for(key, repo)),
+                      ("repo", path_for(key, repo))):
+        if d is not None:
+            out.append((origin, d))
+    return out
+
+
+def _shipped_plugin_origin(plugin: Path) -> str:
+    """`switchboard` for a plugin under `defaults/`, `repo` for one a repo replaced."""
+    try:
+        plugin.resolve().relative_to(defaults_dir().resolve())
+    except (ValueError, OSError):
+        return "repo"
+    return "switchboard"
+
+
+def step_library_dirs(which: str = "library", repo: Optional[Path] = None) -> list[Path]:
+    """`step_library_layers` without the origins — what a reader of the files wants."""
+    return [d for _, d in step_library_layers(which, repo)]
+
+
+@dataclass(frozen=True)
+class Defined:
+    """One name in a repo-extensible vocabulary, and which layer put it there."""
+
+    name: str
+    origin: str                 # "switchboard", "plugin:<name>", "repo", "repo (committed)"
+    source: Optional[str]       # the file it came from, where it is a file
+    overrides_default: bool     # a repo layer speaks about a name switchboard also ships
+
+    def as_dict(self) -> dict:
+        return {"name": self.name, "origin": self.origin, "source": self.source,
+                "overrides_default": self.overrides_default}
+
+
+def _stems(d: Optional[Path], pattern: str) -> dict[str, Path]:
+    return {} if d is None or not d.is_dir() else \
+        {f.stem: f for f in sorted(d.glob(pattern))}
+
+
+def _defined(layers: Iterable[tuple[str, dict[str, Any]]]) -> list[Defined]:
+    """Collapse `(origin, {name: source})` layers, most general first, into one row per name.
+
+    The LAST layer to speak about a name owns the row, which is the resolution rule every
+    one of these vocabularies already uses. `overrides_default` is true when an earlier
+    layer also had the name — that is what a browser marks and what a reset would restore.
+    """
+    seen: dict[str, Defined] = {}
+    for origin, found in layers:
+        for name, source in found.items():
+            seen[name] = Defined(name=name, origin=origin,
+                                 source=None if source is None else str(source),
+                                 overrides_default=name in seen)
+    return [seen[n] for n in sorted(seen)]
+
+
+def role_layers(repo: Optional[Path] = None) -> list[Defined]:
+    """Which layer defines each role — `roles()`' four sources, one row per name."""
+    from . import plugins
+    layers = [("switchboard", _stems(defaults_dir() / "roles", "*.md"))]
+    visible = plugins.available(repo)
+    for name in sorted(set(plugin_enablement(repo)) & set(visible)):
+        layers.append((f"plugin:{name}", _stems(visible[name] / "roles", "*.md")))
+    d = repo_dir(repo)
+    if d is not None:
+        s = settings(repo)["paths"]
+        f = d / s["roles_file"]
+        layers.append(("repo", {k: f for k in read_toml(f)}))
+        layers.append(("repo", _stems(d / s["roles_dir"], "*.md")))
+    return _defined(layers)
+
+
+def preset_layers(repo: Optional[Path] = None) -> list[Defined]:
+    """Which layer defines each preset — the three directories `presets.available` reads."""
+    from . import presets
+    return _defined([
+        ("switchboard", _stems(defaults_dir() / "presets", "*.md")),
+        ("repo (committed)", _stems(presets.shared_preset_dir(repo), "*.md")),
+        ("repo", _stems(presets.preset_dir(repo), "*.md")),
+    ])
+
+
+def model_layers(repo: Optional[Path] = None) -> list[Defined]:
+    """Which layer defines each model tier.
+
+    THREE layers here and two everywhere else, and the third is real: a per-user
+    `~/.config/switchboard/models.toml` sits between shipped and repo (`models.load`). It is
+    not a repo override — it is the same user's answer for every repo — so it is reported
+    under its own origin rather than folded into one of the two.
+    """
+    d = repo_dir(repo)
+    user = Path(setting("paths.global_models", repo=repo)).expanduser()
+    layers = [("switchboard", {k: defaults_dir() / "models.toml"
+                               for k in (shipped_models().get("tiers") or {})}),
+              ("user", {k: user for k in (read_toml(user).get("tiers") or {})})]
+    if d is not None:
+        f = d / settings(repo)["paths"]["models_file"]
+        layers.append(("repo", {k: f for k in (read_toml(f).get("tiers") or {})}))
+    return _defined(layers)
+
+
+def step_kind_layers(repo: Optional[Path] = None) -> list[Defined]:
+    """Which layer defines each step-library definition — `step_library_dirs`, in order.
+
+    A definition's FILENAME is the step kind it mints, which is why this listing answers
+    the vocabulary question at all: `library/deploy.json` is how a repo gets a `deploy`
+    kind. Four shipped filenames are spellings of a built-in kind rather than new ones
+    (`create-pr` is `open_pr`); that mapping belongs to the plugin, so what is reported here
+    is the definition, and the plugin's own refusal is what knows the difference.
+    """
+    return _defined([(origin, _stems(d, "*.json"))
+                     for origin, d in step_library_layers("library", repo)])
+
+
+def vocabulary_layers(repo: Optional[Path] = None) -> dict[str, list[Defined]]:
+    """Every repo-extensible vocabulary §10 names, keyed by what `sb` calls it."""
+    return {"roles": role_layers(repo), "presets": preset_layers(repo),
+            "models": model_layers(repo), "step-kinds": step_kind_layers(repo)}

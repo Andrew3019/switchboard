@@ -39,9 +39,16 @@ from . import status as status_mod
 from . import store
 from . import usage as usage_mod
 from . import validate
+from . import assignment as assign_mod
 from . import broker as broker_mod
 from .broker import HUMAN, Broker
 from .herdr import Herdr, HerdrError
+
+# THE TWO PLACEMENT KEYWORDS `--worktree` takes (§8). Anything else it is given is a
+# workspace NAME to join, so these two are the whole reserved vocabulary — a workspace
+# called `new` would be unreachable through this flag, which is why they are spelled here
+# rather than guessed at the call site.
+WORKTREE_SAME, WORKTREE_NEW = "same", "new"
 
 
 def _emit(args, human: str, data: Any = None) -> None:
@@ -181,16 +188,35 @@ def build_parser() -> argparse.ArgumentParser:
                         "coming next as a message — the child spawns idle and waits "
                         "for it instead of guessing from its --name. With --task-file, "
                         "this is an optional one-line summary")
+    # THE SPEC'S NAME FOR THE POSITIONAL (§11), not a second thing to carry. One call sets
+    # the whole configuration, and a caller writing that call out flag by flag should not
+    # have to remember which single item is positional.
+    d.add_argument("--assignment", metavar="TASK",
+                   help="the task, named as §11 names it — the same thing as the "
+                        "positional TASK and refused beside it")
     d.add_argument("--task-file", metavar="PATH",
                    help="validate this file and give the child a pointer to read and "
                         "follow it; contents are not injected. TASK may be a one-line "
                         "summary")
     d.add_argument("--role", default=broker_mod.DEFAULT_ROLE, help=_role_help())
     d.add_argument("--as", dest="as_prompt", help="ad-hoc role prompt instead of a named role")
-    d.add_argument("--with", dest="with_", action="append", default=[], metavar="PRESET",
+    # `--preset` is §11's spelling of `--with`, on the SAME dest and the same append: the
+    # spec names the flag, this repo shipped it, and two flags that both append presets
+    # would be two answers to one question.
+    d.add_argument("--with", "--preset", dest="with_", action="append", default=[],
+                   metavar="PRESET",
                    help=f"preset from {_preset_dir_help()}, or @<plugin> for that plugin's "
-                        f"fragment (repeatable); an unknown BARE value is used as a literal "
-                        f"instruction, but @ is reserved and an unknown @name is an error")
+                        f"fragment (repeatable, and `--preset` is the same flag); an "
+                        f"unknown BARE value is used as a literal instruction, but @ is "
+                        f"reserved and an unknown @name is an error")
+    # WHAT THE RECEIVING AGENT NEEDS TO KNOW, and it travels on the ASSIGNMENT channel —
+    # joined to the first user message, never into the standing prompt. That is #327's
+    # separation kept: the standing payload is what is true from turn one, and a handoff is
+    # about this job. One line, like the task, because herdr refuses a newline in what it
+    # sends.
+    d.add_argument("--handoff", metavar="TEXT",
+                   help="context the child needs that the task does not carry — delivered "
+                        "with the task as its first message, not as standing instructions")
     d.add_argument("--name", metavar="TOPIC",
                    help="two or three words for the subject, passed as ONE quoted argument "
                         '(e.g. --name "api client") — the agent is named '
@@ -202,12 +228,41 @@ def build_parser() -> argparse.ArgumentParser:
                         "child's --name is the workspace's name)")
     # WHERE the child works, when nothing else has already decided (`--workspace` and a
     # top's fork both outrank it — broker `isolates`). `own` needs the `fork` capability.
-    d.add_argument("--isolation", choices=broker_mod.ISOLATIONS,
-                   default=broker_mod.ISOLATION_SHARED,
-                   help="'shared' (default) works in YOUR checkout, alongside you and "
+    d.add_argument("--isolation", choices=broker_mod.ISOLATIONS, default=None,
+                   help="'shared' (the default) works in YOUR checkout, alongside you and "
                         "your other children; 'own' gives this child a worktree and "
-                        "branch of its own to be merged back later (needs `fork`)")
+                        "branch of its own to be merged back later (needs `fork`). "
+                        "`--worktree` says the same thing in one flag")
+    # PLACEMENT AS ONE CHOICE (§8: "the delegator chooses placement"). The three answers
+    # already existed across two flags — `--isolation shared`, `--isolation own`,
+    # `--workspace <name>` — which made "where does this child work" a question you had to
+    # know the shape of before you could ask it. This is the one flag that asks it, and it
+    # resolves to exactly those two, so there is no second placement path.
+    d.add_argument("--worktree", metavar="WHERE",
+                   help="where this child works: 'same' (your checkout — the default), "
+                        "'new' (a worktree and branch of its own, needs `fork`), or the "
+                        "NAME of an existing workspace to join. Refused beside "
+                        "--isolation/--workspace, which are the same choice spelled long")
     d.add_argument("--model", help=_tier_help())
+    # THE STEP THE SPAWNEE TAKES — about the child, not the caller (§11). An unowned step
+    # is assigned by any agent working in the Plan; an owned one needs `--steal`, which
+    # records the move and tells the previous owner. Checked BEFORE the spawn, so a typo
+    # costs a refusal rather than a live agent with nothing to do.
+    d.add_argument("--assign-step", dest="assign_step", metavar="STEP",
+                   help="the Plan Step this child takes — an id (step-2, p-1/step-2) or "
+                        "its board name. An unowned step assigns freely and so does one "
+                        "of YOUR OWN, which is a handoff; somebody else's needs --steal")
+    d.add_argument("--steal", action="store_true",
+                   help="assign --assign-step or --own-plan although ANOTHER agent owns "
+                        "it: recorded, and that agent is told unless it has finished. Not "
+                        "needed to hand over something you own yourself")
+    # END-TO-END PLAN OWNERSHIP (§11, §6). The `done` gate that consumes it is #329's and
+    # was cut from that issue's lean scope, so this records the accountable owner and
+    # nothing yet refuses a `done` on it.
+    d.add_argument("--own-plan", dest="own_plan", metavar="PLAN",
+                   help="make this child the Plan's end-to-end owner — accountable for it "
+                        "landing, not just for one step. Taking it from another owner "
+                        "needs --steal, as a step does")
 
     # A capability, handed to an agent in your own subtree, for the rest of its life.
     # There is deliberately NO `sb revoke` and no `--ttl`: the agent's lifecycle is the
@@ -271,15 +326,26 @@ def build_parser() -> argparse.ArgumentParser:
     # your own role template — which nothing above you can lift, and which a promote
     # cannot move. Safety-critical reminder categories are not tunable at any ceiling.
     cf = cmd("configure",
-             help="tune your own reminder settings, within your role's ceiling",
+             help="tune your own reminder settings, or read the repo's config layers",
              description="Self-directed and self-directed only: there is no target agent, "
                          "and no agent configures another. With no arguments it prints "
                          "what you are tuned to and how far your role may go. It changes "
                          "how loudly switchboard talks to you and never what you may do — "
-                         "capabilities are granted from above with `sb grant`.")
+                         "capabilities are granted from above with `sb grant`. "
+                         "`--layers` is the other subject: the REPO's configuration, read "
+                         "only, as switchboard's default against this repo's override.")
     cf.add_argument("setting", nargs="?",
-                    help="e.g. reminders, reminders.<category>, debounce")
+                    help="e.g. reminders, reminders.<category>, debounce; with --layers, a "
+                         "dotted prefix such as `timeouts`")
     cf.add_argument("value", nargs="?", help="the value to set it to")
+    # The two-level model, surfaced (spec §10). READ ONLY and a different subject from the
+    # rest of this verb — that one is an agent tuning itself inside its role's ceiling, this
+    # is where every default in the repo comes from and what overrode it. Under `configure`
+    # rather than a verb of its own because they are the same question asked at two scopes,
+    # and an agent that has just been refused a value is the reader most likely to want the
+    # layer behind it. The browser (wave 12) edits what this reports; `--json` is its shape.
+    cf.add_argument("--layers", action="store_true",
+                    help="read the repo's config as default -> repo override -> effective")
 
     t = cmd("tell", help="send a message, do not wait")
     t.add_argument("who", nargs="+")
@@ -655,6 +721,50 @@ def _validate(args) -> None:
             args.model = validate.line(args.model, "--model", max_len=validate.MAX_TOKEN)
 
     elif cmd == "delegate":
+        # `--assignment` IS the positional, so exactly one of them may be there. Refused
+        # rather than resolved by precedence: two different tasks in one call is a caller
+        # who has said two things, and silently executing one of them is how a child ends
+        # up doing the job its parent did not send.
+        if args.assignment is not None:
+            if args.task is not None:
+                raise validate.Invalid(
+                    "--assignment and the positional TASK are the same thing — give one. "
+                    "§11 names the flag; this repo's spawn has always taken it positionally.")
+            args.task = args.assignment
+        # PLACEMENT, resolved into the two flags the broker already takes (§8). `same` and
+        # `new` are the two isolations; anything else names a workspace to JOIN, which is
+        # §8's "another isolated one" and is the one placement that must already exist.
+        if args.worktree is not None:
+            said = [f for f, v in (("--isolation", args.isolation),
+                                   ("--workspace", args.workspace)) if v is not None]
+            if said:
+                raise validate.Invalid(
+                    f"--worktree and {', '.join(said)} are the same choice — give one. "
+                    f"`--worktree same` is `--isolation shared`, `--worktree new` is "
+                    f"`--isolation own`, and `--worktree <name>` is `--workspace <name>`.")
+            where = validate.line(args.worktree, "--worktree", max_len=validate.MAX_TOKEN)
+            if where == WORKTREE_SAME:
+                args.isolation = broker_mod.ISOLATION_SHARED
+            elif where == WORKTREE_NEW:
+                args.isolation = broker_mod.ISOLATION_OWN
+            else:
+                args.workspace = where
+        # NULL MEANS "NOT SAID", which is what made the check above possible; the broker's
+        # own default is what it has always been, and is applied here so nothing downstream
+        # has to know the flag can be absent.
+        if args.isolation is None:
+            args.isolation = broker_mod.ISOLATION_SHARED
+        if args.steal and args.assign_step is None and args.own_plan is None:
+            raise validate.Invalid(
+                "--steal says HOW to take an ownership that is somebody else's; "
+                "--assign-step and --own-plan say WHICH. Give it with one of them, or "
+                "not at all.")
+        if args.assign_step is not None:
+            args.assign_step = validate.line(args.assign_step, "--assign-step",
+                                             max_len=validate.MAX_REF)
+        if args.own_plan is not None:
+            args.own_plan = validate.line(args.own_plan, "--own-plan",
+                                          max_len=validate.MAX_REF)
         # None is a taskless spawn and is legal (#145) — the broker substitutes the
         # placeholder that tells the child to wait. A file is deliberately a POINTER, not
         # an inline payload: herdr rejects newline-bearing agent arguments, and the child
@@ -708,6 +818,16 @@ def _validate(args) -> None:
         # prompt text, so both are checked again after resolution (see _dispatch).
         args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
                       for w in args.with_]
+        # ONE LINE, like the task it rides with: it is delivered inline as the child's
+        # first message, and herdr refuses a newline in anything it sends. Checked AS
+        # JOINED as well, through the broker's own formatter: two values each inside the
+        # limit compose to one that is not, and the refusal has to name the flag while
+        # there is still a flag to name.
+        if args.handoff is not None:
+            args.handoff = validate.line(args.handoff, "--handoff")
+            if args.task is not None:
+                validate.line(broker_mod.with_handoff(args.task, args.handoff),
+                              "the task and --handoff together")
 
     elif cmd == "instructions":
         args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
@@ -743,6 +863,13 @@ def _validate(args) -> None:
             args.setting = validate.token(args.setting, "setting")
         if args.value is not None:
             args.value = validate.token(args.value, "value")
+        # `--layers` READS; a value beside it would look like a write this verb will not do,
+        # and failing silently on the extra word is how somebody comes to believe it did.
+        if args.layers and args.value is not None:
+            raise validate.Invalid(
+                "`sb configure --layers` reads the repo's configuration and writes nothing "
+                "— drop the value. An override is a line in the repo's settings file, and "
+                "the readout names the file and the line for every key.")
 
     elif cmd == "merge":
         args.child = validate.agent_name(args.child)
@@ -1028,6 +1155,63 @@ def _configure_text(r: dict) -> str:
     top = f"; your role's ceiling is {r['ceiling']}" if r["ceiling"] is not None else ""
     return (f"{r['setting']} = {r['value']}{was}{top}. Safety-critical reminders are "
             f"never affected by this.")
+
+
+def _config_layers(repo, prefix: str) -> dict:
+    """The whole two-level readout as data — `--json`, and what `_layers_text` renders.
+
+    EVERY row whatever the prefix, because this is the browser's shape (spec §10) and a
+    listing that dropped the un-overridden keys would leave it unable to offer a default to
+    reset to. `prefix` narrows the settings only, and the text renderer does the eliding.
+    """
+    return {
+        "override_file": str(config.override_path(repo) or ""),
+        "prefix": prefix,
+        "settings": [r.as_dict() for r in config.setting_layers(repo, prefix)],
+        "vocabularies": {kind: [d.as_dict() for d in rows]
+                         for kind, rows in config.vocabulary_layers(repo).items()},
+    }
+
+
+def _layers_text(data: dict, repo, prefix: str) -> str:
+    """The two-level readout, for a reader rather than for the browser.
+
+    ELIDED WITHOUT A PREFIX, and that is the whole of the display decision here. This repo
+    resolves about 130 settings and overrides two of them; printing all 130 to say so buries
+    the answer, and `sb configure --layers` with no argument is asked by somebody who wants
+    to know what this repo has CHANGED. Name a prefix — `timeouts`, `limits.text` — and
+    every row under it prints, defaults included, because then the question is the other one:
+    what is there to tune and what is it set to now.
+
+    The vocabularies are never elided. There are a dozen names in all of them together, and
+    which layer defines a role is the part of §10 nobody can guess from a file listing.
+    """
+    file = data["override_file"] or "(no repo config directory)"
+    rows = data["settings"]
+    shown = rows if prefix else [r for r in rows if r["overridden"]]
+    head = f"switchboard default -> repo override -> effective; overrides live in {file}"
+    lines = [head, f"settings ({len(shown)} of {len(rows)} shown):" if not prefix
+             else f"settings under `{prefix}`:"]
+    if not shown:
+        lines.append("  (this repo overrides nothing; name a prefix to see the defaults)")
+    for r in shown:
+        if r["overridden"]:
+            arrow = f"{r.get('shipped', '(not shipped)')!r} -> {r['override']!r}"
+            tail = f"   (joined -> {r['effective']!r})" if r["joined"] else ""
+            lines.append(f"  {r['key']:44}{arrow}{tail}")
+            lines.append(f"  {'':44}reset: {r['reset']}")
+        else:
+            lines.append(f"  {r['key']:44}{r['effective']!r}   (switchboard default)")
+        if r["note"]:
+            lines.append(f"  {'':44}!! {r['note']}")
+    for kind, defined in data["vocabularies"].items():
+        # Shipped names are listed too: "which roles does this repo add" is unanswerable
+        # without the set it is adding to, and there are few enough of either to print.
+        lines.append(f"{kind}:")
+        for d in defined:
+            mark = " (overrides the shipped one)" if d["overrides_default"] else ""
+            lines.append(f"  {d['name']:28}{d['origin']}{mark}")
+    return "\n".join(lines)
 
 
 # THE COMMANDS WHOSE OUTPUT CARRIES THE CALLER'S STATE (E2, spec §2.4), and the key a
@@ -1717,10 +1901,30 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # placement keywords `delegate` already takes, so a join spawns through exactly
         # the same call an inheriting child does. Without it, `delegate` inherits the
         # caller's workspace or forks, as it always has.
+        # THE PREFLIGHT, before a pane, a worktree or a row exists. `--assign-step` names
+        # an object this process does not own, and the refusals it can earn — no such
+        # step, a step somebody else holds — are the ones a caller fixes by retyping. Paid
+        # for after the spawn they would leave a live agent with nothing to do.
+        if args.assign_step is not None or args.own_plan is not None:
+            try:
+                # THE NAME THIS SPAWN WILL USE, worked out before it exists. A step
+                # pre-staged onto that name (`take <step> --for <name>`) is owned by the
+                # agent we are about to create, and a check that did not know the name
+                # told the caller to `--steal` it from its own child.
+                assign_mod.check(b.repo, db, agent=(None if me == HUMAN else me),
+                                 to=b.prospective_name(role=args.role, topic=args.name),
+                                 step=args.assign_step, plan=args.own_plan,
+                                 steal=args.steal)
+            except (assign_mod.NoAssigner, assign_mod.AssignmentRefused) as e:
+                print(f"sb: {e}", file=sys.stderr)
+                return 1
+            except ValueError as e:         # a topicless spawn: `delegate` refuses it too
+                print(f"sb: {e}", file=sys.stderr)
+                return 1
         join = b.join_workspace(args.workspace) if args.workspace else {}
         name = b.delegate(args.task, role=args.role, as_prompt=args.as_prompt,
                           topic=args.name, isolation=args.isolation,
-                          model=args.model, with_=args.with_, me=me,
+                          model=args.model, with_=args.with_, me=me, handoff=args.handoff,
                           emit_guidance=not getattr(args, "json", False), **join)
         where = f" (joined workspace '{args.workspace}')" if args.workspace else ""
         # A spawn can end in three places, not two: confirmed, confirmed-nowhere-but-the
@@ -1736,6 +1940,42 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         receipt = {"name": name, "workspace": join.get("workspace"),
                    "unconfirmed": note}
         human = f"delegated to {name}{where}" + (f" — {note}" if note else "")
+        # THE ASSIGNMENT, now the name is a row. It ran as a check above, so what can fail
+        # here is a race — somebody took the step in the gap — and it is reported LOUDLY
+        # against a child that is already up: exit non-zero with the name, because the
+        # caller has an agent it must now deal with and a Step it did not get.
+        if args.assign_step is not None or args.own_plan is not None:
+            try:
+                got = assign_mod.apply(b.repo, db, agent=(None if me == HUMAN else me),
+                                       to=name, step=args.assign_step, plan=args.own_plan,
+                                       steal=args.steal)
+            except (assign_mod.NoAssigner, assign_mod.AssignmentRefused) as e:
+                store.log_event(db, kind="assign_failed", agent=name, parent=me,
+                                step_id=args.assign_step, plan_id=args.own_plan,
+                                error=str(e))
+                receipt["assignment_failed"] = str(e)
+                _emit(args, f"{human}\n  BUT the assignment did not land: {e}\n"
+                            f"  {name} is running and owns nothing — assign it with "
+                            f"`sb plugin plans take <step> --for {name}` or close it",
+                      receipt)
+                return 1
+            assign_mod.record(db, agent=name, parent=(None if me == HUMAN else me),
+                              got=got, steal=args.steal)
+            receipt["assigned"] = got
+            step, plan = got.get("step"), got.get("plan")
+            if isinstance(step, dict):
+                human += f"\n  step      {step.get('plan')}/{step.get('step')} → {name}"
+                if step.get("already_owned"):
+                    # Nothing moved: the step was pre-staged onto this name before the
+                    # spawn. Said out loud, because "→ name" alone reads as a move.
+                    human += " (already theirs — it was pre-staged; nothing moved)"
+                elif step.get("notified"):
+                    human += f" (stolen from {step['notified']}, and it was told)"
+                elif step.get("notice_skipped"):
+                    human += f" (stolen — {step['notice_skipped']})"
+            if isinstance(plan, dict):
+                human += (f"\n  plan      {plan.get('plan')} is {name}'s end to end — it "
+                          f"is accountable for it landing")
         if getattr(args, "full", False):
             row = store.get_agent(db, name)
             if row is not None:
@@ -1784,6 +2024,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "configure":
+        if args.layers:
+            data = _config_layers(b.repo, args.setting or "")
+            _emit(args, _layers_text(data, b.repo, args.setting or ""), data)
+            return 0
         r = b.configure(args.setting, args.value, me=me)
         _emit(args, _configure_text(r), r)
         return 0
@@ -2112,8 +2356,12 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         ]
         for segment in manifest["segments"]:
             marker = "+" if segment["included"] else "-"
+            # The LABEL, not only the kind: it is the heading the segment is actually
+            # delivered under (INV-62), so a readout that showed the kind alone would be
+            # describing a prompt shape rather than the one the agent gets.
             lines.append(
                 f"  {segment['order']:02d} {marker} {segment['kind']} "
+                f"-> ## {segment['label']} "
                 f"[{segment['source']}; {segment['condition']}; "
                 f"{segment['ownership']}; {segment['characters']} chars]")
             if segment["included"]:
@@ -2228,9 +2476,21 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             # override alone would show a ceiling nobody is actually held to.
             ceiling = roles_mod.template_ceiling(defined, role.name, repo=b.repo)
             pad = "\n" + " " * 18
+            # THE CAPABILITY LINE IS A DEFAULT, not a fact about this role, and since #326
+            # it is the same four strings under every name — so printing it bare read as
+            # nine roles that happen to agree, which is the opposite of what it means.
+            # Roles are not permission classes: the shipped set is what every role holds,
+            # and the only per-role fact is what a definition ADDS to it (a repo-minted
+            # `deploy`, which `sb grant` then has a vocabulary for).
+            shipped = sorted(roles_mod.ROLE_CAPABILITIES)
+            extra = [c for c in caps if c not in roles_mod.ROLE_CAPABILITIES]
+            provenance = (f"the default every role holds; this one adds "
+                          f"{', '.join(extra)}" if extra else
+                          "switchboard's default, held by every role")
             lines = [role.name,
                      f"  {'tier':16}{role.model}",
                      f"  {'capabilities':16}{', '.join(caps) or '(none)'}",
+                     f"  {'':16}({provenance})",
                      f"  {'config ceiling':16}" + (
                          pad.join(f"{k} = {v}" for k, v in sorted(ceiling.items()))
                          or "(none)"),
@@ -2238,6 +2498,10 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
                      role.prompt.rstrip("\n") or "  (none)"]
             _emit(args, "\n".join(lines),
                   {"name": role.name, "model": role.model, "capabilities": caps,
+                   # Apart in the JSON for the same reason, and because a reader of the
+                   # data has no line of prose to read it off: `capabilities` stays the
+                   # whole effective set, and these two say which half is which.
+                   "capabilities_default": shipped, "capabilities_added": extra,
                    "config_ceiling": ceiling, "prompt": role.prompt})
             return 0
         _emit(args, "\n".join(f"  {n:16}{defined[n].model}" for n in sorted(defined))

@@ -181,6 +181,11 @@ class SpawnTest(unittest.TestCase):
 
         One file cannot repeat the bug the way repeated flags could, but the fragments can
         still be dropped or reordered on the way into it, so the join is asserted whole.
+
+        A BLANK LINE between them since INV-62 (spec §5): each fragment arrives as its own
+        labelled section, and joining on a space ran them into one paragraph. That the
+        SEPARATOR is a blank line is the assertion; what the labels say is `prompts.toml`'s
+        and `broker.segment_label`'s.
         """
         fake = FakeHerdr(ok({"agent": AGENT_JSON}))
         try:
@@ -189,9 +194,34 @@ class SpawnTest(unittest.TestCase):
                 prompts=["PROTOCOL here", "you are w1", "role text", "a preset"])
             self.assertEqual(fake.argv().count("--append-system-prompt-file"), 1)
             self.assertEqual(herdr_mod.prompt_file_path("w1").read_text(),
-                             "PROTOCOL here you are w1 role text a preset")
+                             "PROTOCOL here\n\nyou are w1\n\nrole text\n\na preset")
         finally:
             herdr_mod.forget_prompt_file("w1")
+
+    def test_a_labelled_section_is_accepted_and_a_wrapped_body_is_still_refused(self):
+        """The single-line rule's one exemption, against the REAL guard.
+
+        `FakeHerdr` in the broker tests does not run this check, so nothing else exercises
+        it: before the exemption every labelled section carried a newline and every Claude
+        spawn would have raised here. Both halves matter — the heading passes, and a body
+        that wraps under it still takes the spawn down, which is the failure
+        `test_a_wrapped_description_does_not_kill_every_dispatcher_spawn` is about.
+        """
+        fake = FakeHerdr(ok({"agent": AGENT_JSON}))
+        try:
+            Herdr("herdr", runner=fake).start_agent(
+                "w1", "w1:p9", prompts=["## SWITCHBOARD PROTOCOL\nOne line of protocol.",
+                                        "## PRESET house-rules\nOne line of rules."])
+            self.assertEqual(
+                herdr_mod.prompt_file_path("w1").read_text(),
+                "## SWITCHBOARD PROTOCOL\nOne line of protocol.\n\n"
+                "## PRESET house-rules\nOne line of rules.")
+        finally:
+            herdr_mod.forget_prompt_file("w1")
+        with self.assertRaises(ValueError) as e:
+            Herdr("herdr", runner=FakeHerdr(ok({"agent": AGENT_JSON}))).start_agent(
+                "w2", "w2:p9", prompts=["## PRESET wrapped\nfirst line\nsecond line"])
+        self.assertIn("single-line", str(e.exception))
 
     def test_a_prompt_file_that_cannot_be_written_fails_the_spawn_loudly(self):
         """No file, no spawn — and herdr is never called.

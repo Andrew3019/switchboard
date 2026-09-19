@@ -64,6 +64,14 @@ guidance_file = "guidance.toml"
 # pointed at that.
 plugins_file  = "plugins.toml"
 plugins_dir   = "plugins"
+# The step library and the plan templates, as a repo layers them (spec §10: "repo-defined
+# roles, presets and step kinds are repo configuration in the same two-level scheme"). Read
+# under BOTH `shared_dir` and `repo_dir`, after the `plans` plugin's own directory, keyed by
+# filename with a later layer replacing the earlier one of that name — the same rule presets
+# use. A definition's filename is the step kind it mints, so this is how a repo gets a
+# `deploy` kind without editing switchboard. See `config.step_library_dirs`.
+step_library_dir   = "plans/library"
+step_templates_dir = "plans/templates"
 
 # Plugin state for `SCOPE = "user"` — per machine rather than per repo, for a plugin whose
 # data is a fact about the tool and not about whichever repo you were standing in. Repo
@@ -98,27 +106,40 @@ human  = "human"
 parent = "parent"
 
 # The role `sb start` spawns — the top, and the only agent that is one. It holds no task
-# and no context: its job is to hand what it is given to a lead, so that every follow-up
-# continues with the agent that has the context. Everything nested is a `lead` instead,
-# at any depth, and that role holds everything about its task. The two used to be one
-# role at every scope; the split exists because "hold everything" and "hold nothing" do
-# not fit in one prompt without a conditional, and a conditional gets read selectively.
+# and no context: its job is to hand what it is given to an agent that owns the work, so
+# that every follow-up continues with the agent that has the context. Everything nested is
+# a `worker` instead, at any depth, and that role holds everything about its task. The two
+# used to be one role at every scope; the split exists because "hold everything" and "hold
+# nothing" do not fit in one prompt without a conditional, and a conditional gets read
+# selectively.
+#
+# THE DISPATCHER SURVIVED #326 while `lead` did not, and the reason is this split: it is a
+# PLACEMENT — the top of a fleet, stamped `is_top`, with a fixed capability set (§2.0) —
+# rather than a permission class among peers. `lead` was the latter, and `worker` now does
+# what it did.
 main_role = "dispatcher"
 
 # Old role names that still work. A name here resolves to the role it points at — fields,
-# prompt and display name — instead of being refused as unknown. `orchestrator` maps to
-# `lead` rather than `dispatcher` because that is what anyone typing it at `sb delegate`
-# meant: an agent that owns this piece of work and splits it. Empty it once nothing types
-# the old name.
+# prompt and display name — instead of being refused as unknown. `orchestrator`, and since
+# #326 `lead`, `builder`, `qa` and `py-qa`, all map to `worker`, because that is what anyone
+# typing one of them at `sb delegate` meant: an agent that owns this piece of work, does it,
+# and splits it if it needs to. Empty it once nothing types the old names.
 #
-# What the rename does NOT reach, which matters on the day it lands. A running agent keeps
+# THIS IS THE MIGRATION for the four roles #326 stopped shipping. A repo that wants them
+# back as its own keeps the files (this one does — see `.switchboard/roles/`), and a role
+# DEFINED here wins over an alias (`roles.get` checks the table first), so the alias is what
+# every other repo, and every stale `--role` a running agent still types, lands on instead
+# of a refusal.
+#
+# What an alias does NOT reach, which matters on the day it lands. A running agent keeps
 # the prompt it was spawned with, so no top already up becomes a dispatcher — it goes on
 # being an orchestrator, holding context and doing its own planning, until it is restarted,
 # and every row already in the store goes on saying `orchestrator` forever. Both are
 # harmless because nothing decides anything from that string: `roles.get` resolves it here,
-# and everything structural reads the `is_top` stamp instead (`store.live_tops`, which
-# filtered on the role name until this rename made the running tops invisible).
-role_aliases = { orchestrator = "lead" }
+# `roles.get_or_fallback` keeps an old row readable either way, and everything structural
+# reads the `is_top` stamp instead (`store.live_tops`, which filtered on the role name until
+# that rename made the running tops invisible).
+role_aliases = { orchestrator = "worker", lead = "worker", builder = "worker", qa = "worker", "py-qa" = "worker" }
 
 # The default NAME of the agent `sb start` spawns — separate from its role, so that
 # `sb start` with no arguments lands you somewhere obvious.

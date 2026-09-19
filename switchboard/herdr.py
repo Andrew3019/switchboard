@@ -161,9 +161,46 @@ class PromptFileError(RuntimeError):
 PROMPT_DIRNAME = "prompts"
 
 
+# What a section's LABEL looks like on the wire — the one newline a prompt fragment is
+# allowed, and the whole of INV-62's mechanism (`broker.labelled_segments` writes them).
+# A markdown heading, because the codex path delivers this payload as `AGENTS.md` and the
+# Claude path as a system-prompt file, and a heading reads as one in both.
+#
+# Here rather than in `broker`, where the sections are assembled, because the SINGLE-LINE
+# RULE is here: `start_agent` refuses a newline in a fragment, and a rule and its one
+# exemption belong in the same file or they drift apart.
+SECTION_PREFIX = "## "
+
+
+def section_body(prompt: str) -> str:
+    """One delivered section without its label — what the single-line rule applies to.
+
+    The rule below was herdr's (a newline in an agent ARGUMENT is `invalid_agent_argument`)
+    and has been ours alone since the prompt became a file. It stays, because every prompt
+    in `defaults/` is written single-line to satisfy it and `sb presets` reads them back the
+    same way. What changed is that ONE newline is now put there on purpose, by the labelling
+    that makes the assembly legible, so the rule is checked against the body it still
+    governs rather than against the label that was added after it.
+    """
+    head, sep, rest = prompt.partition("\n")
+    return rest if sep and head.startswith(SECTION_PREFIX) else prompt
+
+
 def render_instructions(prompts: Sequence[str]) -> str:
-    """The exact standing-instruction body handed to Claude."""
-    return " ".join(prompts)
+    """The exact standing-instruction body handed to Claude.
+
+    A BLANK LINE between sections, not a space, and that is INV-62 arriving (spec §5):
+    each entry is already one labelled section (`broker.labelled_segments`), and joining
+    them with a space ran the protocol, the role guidance and every preset together into
+    one paragraph with nothing in it to say which was which.
+
+    Newlines are safe HERE and were never the constraint. The per-fragment flattening
+    exists because herdr refuses a newline in an agent ARGUMENT; this is written to a file
+    and passed by path (`--append-system-prompt-file`, see `_claude_args`), so what the
+    file contains is bounded by nothing. The codex path has joined on a blank line for the
+    same reason since it was written.
+    """
+    return "\n\n".join(p for p in prompts if p)
 
 
 def prompt_file_path(name: str, cwd: Optional[Path] = None) -> Path:
@@ -715,7 +752,7 @@ class Herdr:
                                self._codex_args(name, prompts, spec, resume, cwd),
                                timeout_ms, attempts)
         for p in prompts:
-            if "\n" in p:
+            if "\n" in section_body(p):
                 # This was herdr's rule, not ours: a newline in an agent ARGUMENT is
                 # invalid_agent_argument, "cannot be encoded safely for the target shell".
                 # The prompt is no longer an argument — it is a file, and a file may hold
@@ -724,6 +761,11 @@ class Herdr:
                 # single-line to satisfy it, `sb presets` reads them back the same way,
                 # and quietly allowing newlines here would let one arrive with no test and
                 # no reader expecting it. Multi-line guidance still belongs in CLAUDE.md.
+                #
+                # `section_body` is the one exemption: the `## <label>` line each fragment
+                # is delivered under (INV-62). Exempting the label rather than dropping the
+                # rule is the point — a wrapped `operator_skills.toml` description still
+                # has to be flattened on the way in, and that is what it used to break.
                 raise ValueError(
                     "agent prompts must be single-line; put multi-line guidance in CLAUDE.md"
                 )

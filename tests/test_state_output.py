@@ -30,7 +30,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from switchboard import cli, guidance, status as status_mod, store  # noqa: E402
+from switchboard import cli, guidance, roles as roles_mod  # noqa: E402
+from switchboard import status as status_mod, store  # noqa: E402
 from switchboard.broker import Broker  # noqa: E402
 
 from test_workspace import FakeHerdr  # noqa: E402
@@ -59,7 +60,12 @@ class NoteTest(unittest.TestCase):
         said APART from the held set: a researcher that reads its own `write-tracked` as
         something it may do is exactly the confusion `--delegable` exists to prevent.
         """
-        store.create_agent(self.db, name="r1", role="researcher", workspace="scope",
+        # A narrowed template, built rather than named: since #326 roles are soft guidance
+        # and no shipped role is short of `write-tracked`, so the "may do" half and the
+        # "may pass down only" half would otherwise be the same set.
+        self.b.roles["reader"] = roles_mod.Role(name="reader",
+                                                capabilities=frozenset({"spawn"}))
+        store.create_agent(self.db, name="r1", role="reader", workspace="scope",
                            branch="scope")
         store.seed_capabilities(self.db, "r1", ["spawn"])
         store.grant_capability(self.db, "r1", "write-tracked", delegable=True,

@@ -107,6 +107,19 @@ SIDE_EFFECT_BOUNDARIES = (BOUNDARY_MERGE, BOUNDARY_DONE)
 # (spec §2.2). It is NOT derived from the capability set in either direction — holding
 # `write-tracked` does not imply isolation, and an isolated agent is not thereby allowed
 # anything. The only capability in it is the gate: `own` requires `fork` ON THE CALLER.
+def with_handoff(task: Optional[str], handoff: Optional[str]) -> str:
+    """The first message a spawn delivers: the assignment, then what the receiver needs.
+
+    ONE FORMATTER, because `cli._validate` length-checks the composition it cannot make —
+    the taskless spawn's placeholder is the broker's and does not exist yet at validation —
+    and a second spelling of the join would make that check measure a different string from
+    the one that is sent.
+    """
+    text = (task or "").strip()
+    extra = (handoff or "").strip()
+    return f"{text} HANDOFF: {extra}" if extra else text
+
+
 ISOLATION_OWN = "own"
 ISOLATION_SHARED = "shared"
 ISOLATIONS = (ISOLATION_OWN, ISOLATION_SHARED)
@@ -190,6 +203,66 @@ LIFECYCLE_PROMPTS = (
      "a child of this agent finished with `--preserve-children`, handing its own "
      "children up to report here"),
 )
+
+# PROMPT SEPARATION (INV-62, spec §5). Starting configuration stays conceptually separate
+# rather than mashed into one opaque generated prompt:
+#
+#     Role guidance | Custom agent prompt | Preset A | Preset B | Task/Plan assignment
+#
+# The assembly has always BEEN a list of segments — `effective_instructions` below builds
+# one, each row knowing its kind, its source file and who owns it — and the structure was
+# then thrown away at the last step, where the texts were concatenated with a single space.
+# What the agent received was one unbroken paragraph running from the protocol through its
+# role prompt into three presets, with nothing in it to say where one ended. So the
+# separation existed for `sb instructions` and for nobody who had to act on it.
+#
+# These labels are that last step, and they are deliberately the ONLY change to prompt
+# content: the segment texts are untouched, the order is untouched, and what is added is one
+# markdown heading per segment naming where it came from. `##` rather than bare capitals
+# because the codex path delivers this as a markdown file (`AGENTS.md`) and the Claude path
+# as a system-prompt file, and a heading reads as one in both.
+#
+# The fifth column of the spec's diagram is NOT here, and that is the separation working:
+# the Task/Plan assignment is delivered as a separate first user message and never joins
+# the standing prompt at all (see `delivery.initial_task` and the external boundaries).
+#
+# The table in `prompts.toml` holding one heading per segment KIND. The words are not here
+# for the reason no prompt text is (`test_config` pins it): every sentence an agent is sent
+# lives in `defaults/`, and a repo overrides an entry without touching Python. What IS here
+# is the key, because a segment's kind is a fact about the assembly code.
+SEGMENT_LABELS = "section"
+
+
+def segment_label(segment: dict, labels: dict) -> str:
+    """The heading one assembled segment is delivered under.
+
+    A role prompt and a preset are the two that carry a NAME, and the name is the whole
+    value of the label for them: `PRESET house-rules` says which file to go and read when
+    an instruction in it turns out to be wrong, and `ROLE GUIDANCE (worker)` says the same
+    for a role. Everything else is one-of-a-kind and its label is the bare heading.
+
+    A kind with no entry in the table falls back to its own name in capitals, so adding a
+    segment and forgetting the heading costs legibility rather than an unlabelled fragment
+    or a crash at spawn.
+    """
+    base = labels.get(segment["kind"]) or segment["kind"].upper()
+    if segment.get("binding"):
+        return f"{base} {segment['binding']}"
+    if segment.get("role"):
+        return f"{base} ({segment['role']})"
+    return base
+
+
+def labelled_segments(segments: Sequence[dict]) -> list[str]:
+    """The included segments as the separate sections a provider is handed.
+
+    ONE function, consumed by the live spawn and by the renderer that previews it, for the
+    same reason they share `effective_instructions`: a preview of a shape the real spawn
+    does not have is worse than no preview.
+    """
+    return [f"{herdr_mod.SECTION_PREFIX}{segment['label']}\n{segment['text']}"
+            for segment in segments if segment["included"]]
+
 
 # HOW FAR BACK THE AUTOMATIC SWEEP CALLS A DEATH RECENT, in seconds — and the automatic
 # half only. Both halves used to share one `SWEEP_RECENT`, which is why the paragraphs
@@ -1326,8 +1399,10 @@ class Broker:
         return store.get_agent(self.db, agent)
 
     def _held_of(self, row: sqlite3.Row) -> set:
-        """What this row may DO. From the table when it has been seeded, DERIVED when it
-        has not.
+        """What this row may DO: the stored set UNIONED with its role's live template.
+
+        The union is #326's migration for a running fleet — see `_template_of`. The rest
+        of this is the older story, and still true:
 
         A NULL `seed_capabilities` is a row written before the substrate existed — an older
         store, or a row inserted straight into `agents` by something that never read a role
@@ -1345,8 +1420,8 @@ class Broker:
         except (IndexError, KeyError, TypeError):
             seed = None                 # a store or a stub row older than the column
         if seed is None:
-            return set(self.seed_for(row["role"], bool(_column(row, "is_top"))))
-        return store.held_capabilities(self.db, row["name"])
+            return self._template_of(row)
+        return self._template_of(row) | store.held_capabilities(self.db, row["name"])
 
     def _passable_of(self, row: sqlite3.Row) -> set:
         """What this row may PASS DOWN — held ∪ delegable-only. Same derived fallback.
@@ -1360,8 +1435,25 @@ class Broker:
         except (IndexError, KeyError, TypeError):
             seed = None
         if seed is None:
-            return set(self.seed_for(row["role"], bool(_column(row, "is_top"))))
-        return store.passable_capabilities(self.db, row["name"])
+            return self._template_of(row)
+        return self._template_of(row) | store.passable_capabilities(self.db, row["name"])
+
+    def _template_of(self, row: sqlite3.Row) -> set:
+        """What this row's ROLE is seeded with TODAY — the live template, re-read per gate.
+
+        THE UNION WITH IT IS #326's MIGRATION, and it is what keeps a running fleet whole.
+        Roles are soft guidance now: every role resolves to the whole vocabulary. But an
+        agent spawned BEFORE that change carries the narrow set its role's template had at
+        the time, written into `agent_capabilities` at spawn — a live `qa` holding `spawn`
+        alone, a `py-qa` holding `write-tracked` alone. Reading only those rows would leave
+        exactly the agents that exist today refused for a role reason nothing else believes
+        in any more, which is the orphan this change is not allowed to create.
+
+        So the held set is the stored rows UNIONED with what the role resolves to now. It
+        only ever widens: a grant is still additive and still recorded, and no agent loses
+        something it was seeded with because a template moved under it.
+        """
+        return set(self.seed_for(row["role"], bool(_column(row, "is_top"))))
 
     def passable_for(self, agent: str) -> Optional[set]:
         """What this agent may hand DOWN with `sb grant`. `None` means "no ceiling".
@@ -5153,6 +5245,11 @@ class Broker:
         prompt = as_prompt if as_prompt is not None else resolved_role.prompt
         segments.append({
             "kind": "ad-hoc-prompt" if as_prompt is not None else "role-prompt",
+            # Named in the label, so an agent reading an instruction it wants to argue with
+            # can say which role's file it came out of. `--as` carries no role: the prompt
+            # is the caller's own text and naming a role beside it would credit a file that
+            # contributed nothing.
+            **({} if as_prompt is not None else {"role": role}),
             "source": "literal --as" if as_prompt is not None else role_source,
             "condition": "non-empty prompt",
             "ownership": ("external-to-switchboard" if as_prompt is not None else role_owner),
@@ -5171,23 +5268,30 @@ class Broker:
         direct_source, direct_owner = self._configured_prompt_source("spawn.researcher_direct")
         direct = role == RESEARCHER_ROLE and self.is_top(parent)
         segments.append({
-            "kind": "researcher-direct", "source": direct_source,
+            "kind": "researcher-direct", "role": role, "source": direct_source,
             "condition": "researcher role spawned by the top dispatcher",
             "ownership": direct_owner, "included": direct,
             "text": self._say("spawn.researcher_direct") if direct else "",
         })
         segments.extend(self._binding_segments(role, with_, report=_report_bindings))
 
-        active = [s["text"] for s in segments if s["included"]]
+        # The labels come FIRST because the concatenation is built out of them (INV-62,
+        # `labelled_segments`). Numbering the rows after joining them was fine while the
+        # join threw the structure away; it is not while the join is what carries it.
+        labels = config.prompts(self.repo).get(SEGMENT_LABELS) or {}
         for order, segment in enumerate(segments, 1):
             segment["order"] = order
             segment["characters"] = len(segment["text"])
-            segment["flattening"] = "single-line fragment before provider assembly"
+            segment["label"] = segment_label(segment, labels)
+            segment["flattening"] = "single-line fragment, delivered under its own heading"
+        active = labelled_segments(segments)
         if spec.provider == codex_mod.PROVIDER:
-            delivery = "private CODEX_HOME/AGENTS.md; blank line between fragments"
+            delivery = ("private CODEX_HOME/AGENTS.md; one `## ` heading per segment, "
+                        "blank line between them")
             rendered = codex_mod.render_instructions(active)
         else:
-            delivery = "--append-system-prompt-file; one space between flat fragments"
+            delivery = ("--append-system-prompt-file; one `## ` heading per segment, "
+                        "blank line between them")
             rendered = herdr_mod.render_instructions(active)
         capabilities = self._preview_capabilities(role, parent=parent, name=name)
         just_in_time = (self._guidance_segments(role, capabilities["held"])
@@ -5404,6 +5508,7 @@ class Broker:
         cwd: Optional[str] = None,
         pane: Optional[str] = None,
         isolation: str = ISOLATION_SHARED,      # own|shared — see `isolates`
+        handoff: Optional[str] = None,  # what the receiver needs to know; rides the task
         emit_guidance: bool = True,             # prose output; false for JSON callers
         awaiting_task: bool = False,    # `task` is a placeholder; nobody has asked yet
         is_top: bool = False,           # `sb start` only — see `_top`
@@ -5424,6 +5529,13 @@ class Broker:
         # non-empty `task` — running `_first_task` over that would answer False and undo it.
         if not (task and task.strip()):
             task, awaiting_task = self._first_task("spawn.delegate_task", None)
+        # THE HANDOFF RIDES THE ASSIGNMENT, never the standing prompt (§11 layer 3, and
+        # #327's separation): what the receiving agent needs to know is about THIS job, and
+        # the standing payload is what is true from turn one. So it is joined to the first
+        # user message — including to the taskless spawn's placeholder, where a child
+        # waiting for its real instruction can still be told what it is walking into.
+        if handoff and handoff.strip():
+            task = with_handoff(task, handoff)
         if isolation not in ISOLATIONS:
             raise ValueError(
                 f"isolation is {' or '.join(ISOLATIONS)}, not {isolation!r}: `own` gives "
@@ -5568,7 +5680,7 @@ class Broker:
             role=role, name=name, parent=me, model=model, as_prompt=as_prompt,
             with_=with_, workspace=ws, path=where, task=task,
             _report_bindings=True)
-        prompts = [s["text"] for s in manifest["segments"] if s["included"]]
+        prompts = labelled_segments(manifest["segments"])
 
         self.link_config(where)     # a worktree must see repo-local config (roles.toml)
         # `confirmed` is what decides whether this id gets WRITTEN DOWN below. A caller
@@ -5696,6 +5808,7 @@ class Broker:
                         workspace=ws, tier=model, branch=branch, cwd=str(where),
                         isolation=isolation, with_=list(with_) or None,
                         custom_prompt=bool(as_prompt), task=task,
+                        handoff=handoff or None,
                         awaiting_task=bool(awaiting_task),
                         session_id=agent.session_id or None)
         # EVERY agent opens with the tree beside it, not just the top-level
@@ -6196,6 +6309,26 @@ class Broker:
         while taken(f"{stem}-{n}"):
             n += 1
         return f"{stem}-{n}"
+
+    def prospective_name(self, *, role: str, topic: Optional[str]) -> str:
+        """What `delegate` WOULD name this spawn, without spawning it.
+
+        For the one caller that has to know a name before there is an agent to hold it:
+        `sb delegate --assign-step` checks the assignment before it spawns, and a step
+        PRE-STAGED onto that name (`take <step> --for <name>`) reads as owned by somebody
+        else unless the check is told which name is about to exist.
+
+        The alias resolution is here and not left to the caller, because the name is built
+        from the role a spawn RESOLVES to and not from what was typed — a `--role lead` in
+        a repo that retired it composes `worker-…`, and a check that guessed `lead-…`
+        would be asking about an agent that will never exist.
+
+        NOT A RESERVATION. `_compose_name` picks the first free suffix against the store
+        and herdr as they stand, and both can move between here and the spawn. The
+        assignment itself is the authority; this only lets the early check ask the right
+        question.
+        """
+        return self._compose_name(roles_mod.get(self.roles, role, self.repo).name, topic)
 
     def _herdr_names(self) -> set[str]:
         """The names herdr enforces machine-wide right now — the OTHER namespace this

@@ -32,7 +32,18 @@ from switchboard.broker import (  # noqa: E402
     HUMAN, INTERRUPT, MAIN, MAIN_NAME, NEXT_TURN, WHEN_IDLE, Broker, PaneNotReady,
     SbUnpinned, TaskUndelivered, Undeliverable,
 )
-from switchboard.herdr import Agent, HerdrError  # noqa: E402
+from switchboard.herdr import Agent, HerdrError, section_body  # noqa: E402
+
+
+def bodies(prompts) -> list[str]:
+    """The spawned fragments without their `## <label>` headings (INV-62).
+
+    Every assertion below that names a sentence in the prompt goes through this. The label
+    is the one thing the assembly adds to a fragment, so stripping it is what keeps these
+    tests about the TEXT the config layer produced rather than about the heading the
+    delivery layer puts over it — `broker.segment_label` and its own tests own that.
+    """
+    return [section_body(p) for p in prompts]
 
 
 class FakeHerdrAPI:
@@ -842,9 +853,14 @@ class BrokerTest(unittest.TestCase):
             role="worker", name="worker-t", parent="orch", workspace="ws",
             path=self.repo, task="t")
         self.assertEqual(self.h.started, [])
-        expected = [s["text"] for s in manifest["segments"] if s["included"]]
+        # The LABELLED sections, because that is what the spawn is handed: the two paths
+        # share `broker.labelled_segments`, and comparing bare texts here would pass while
+        # the live spawn delivered a shape the preview never showed (INV-62).
+        expected = broker_mod.labelled_segments(manifest["segments"])
         self.b.delegate("t", topic="t", role="worker", me="orch")
         self.assertEqual(self.h.started[-1]["prompts"], expected)
+        self.assertEqual(bodies(expected),
+                         [s["text"] for s in manifest["segments"] if s["included"]])
         self.assertEqual(manifest["delivery"]["initial_task"],
                          "separate first user message")
         self.assertTrue(manifest["external_boundaries"])
@@ -913,18 +929,24 @@ class BrokerTest(unittest.TestCase):
         agent that has it. `--name` naming a live agent is what makes that reachable."""
         store.create_agent(self.db, name="orch", role="lead", workspace="ws",
                            branch="ws", cwd=str(self.repo))
-        self.b.delegate("t", topic="t", role="worker", me="orch")
-        # `dispatch` and not `spawn`: `spawn` is in the worker SEED since 2026-08-31, and
-        # a grant of it would be indistinguishable from the seed in this manifest.
-        self.b.grant("worker-t", "dispatch", me="orch", reason="needs one helper")
+        # A capability this REPO mints: since #326 every shipped one is in every role's
+        # seed, so a grant of one would be indistinguishable from the seed in this manifest.
+        (self.repo / ".switchboard").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".switchboard" / "roles.toml").write_text(
+            '[deployer]\ncapabilities = ["deploy"]\n')
+        self.restart_sb()
+        store.create_agent(self.db, name="orch2", role="deployer", workspace="ws",
+                           branch="ws", cwd=str(self.repo), parent="orch")
+        self.b.delegate("t", topic="t", role="worker", me="orch2")
+        self.b.grant("worker-t", "deploy", me="orch2", reason="needs one helper")
         caps = self.b.effective_instructions(
-            role="worker", name="worker-t", parent="orch")["capabilities"]
+            role="worker", name="worker-t", parent="orch2")["capabilities"]
         self.assertTrue(caps["live"])
-        self.assertIn("dispatch", caps["held"])
-        self.assertNotIn("dispatch", caps["seed"])
+        self.assertIn("deploy", caps["held"])
+        self.assertNotIn("deploy", caps["seed"])
         self.assertEqual(
             [(g["capability"], g["granted_by"], g["reason"]) for g in caps["grants"]],
-            [("dispatch", "orch", "needs one helper")])
+            [("deploy", "orch2", "needs one helper")])
 
     def test_the_manifest_lists_guidance_and_says_which_rows_can_reach_this_agent(self):
         """The ledger is deliberately NOT in the spawn prompt (`guidance.py`), which is
@@ -940,20 +962,22 @@ class BrokerTest(unittest.TestCase):
             '[[rule]]\nid = "on-children"\n'
             'when = [{fact = "live_children", op = ">=", value = 1}]\n'
             'text = "Cohort rule."\n\n'
-            '[[rule]]\nid = "lead-only"\nrole = "lead"\ntext = "Lead rule."\n')
-        rows = self.rules(role="lead")
+            '[[rule]]\nid = "reviewer-only"\nrole = "reviewer"\ntext = "Reviewer rule."\n')
+        rows = self.rules(role="reviewer")
         self.assertTrue(rows["always"]["included"])
         self.assertEqual(rows["always"]["source"], str(sw / "guidance.toml"))
         self.assertEqual(rows["always"]["ownership"], "external-to-switchboard")
-        self.assertTrue(rows["needs-fork"]["included"])        # a lead is seeded `fork`
+        self.assertTrue(rows["needs-fork"]["included"])        # every role is seeded `fork`
         self.assertFalse(rows["on-children"]["included"])
         self.assertIn("turn-conditional", rows["on-children"]["resolution"])
         self.assertIn("live_children >= 1", rows["on-children"]["condition"])
-        self.assertIn("lead-only", rows)
+        self.assertIn("reviewer-only", rows)
+        # Another role's row is not this agent's business. The capability-keyed row is
+        # included for everybody since #326 — every role is seeded every shipped string —
+        # so the row that resolves to "not yours" is the role-keyed one.
         worker = self.rules(role="worker")
-        self.assertFalse(worker["needs-fork"]["included"])
-        self.assertIn("does not hold fork", worker["needs-fork"]["resolution"])
-        self.assertNotIn("lead-only", worker)
+        self.assertTrue(worker["needs-fork"]["included"])
+        self.assertNotIn("reviewer-only", worker)
 
     def test_just_in_time_rows_never_enter_the_standing_prompt(self):
         """The one property the whole addition rests on. Guidance and doorbells are bought
@@ -997,7 +1021,7 @@ class BrokerTest(unittest.TestCase):
         there are roles, and which."""
         self.b.delegate("t", topic="t", role="worker", me="orch")
         joined = " ".join(self.h.started[0]["prompts"])
-        for role in ("dispatcher", "lead", "worker", "qa", "researcher", "reviewer"):
+        for role in ("dispatcher", "worker", "researcher", "reviewer"):
             with self.subTest(role=role):
                 self.assertIn(role, joined)
 
@@ -1126,7 +1150,9 @@ class BrokerTest(unittest.TestCase):
         self._start_top()
         prompts = self.h.started[-1]["prompts"]
         for p in prompts:                      # the rule Herdr.start_agent enforces
-            self.assertNotIn("\n", p)
+            # The BODY: one newline per fragment is now put there on purpose, by the
+            # section label, and `section_body` is the exemption the rule itself names.
+            self.assertNotIn("\n", section_body(p))
         joined = " ".join(prompts)
         self.assertIn("ship it", joined)
         self.assertIn("when the tests are green", joined)
@@ -2051,6 +2077,7 @@ class BrokerTest(unittest.TestCase):
             args = argparse.Namespace(
                 cmd="delegate", task="do the thing", role="worker", as_prompt=None,
                 with_=[], name="levels", workspace=None, isolation="shared", model=None,
+                handoff=None, assign_step=None, own_plan=None, steal=False,
                 json=False, full=full)
             buf = io.StringIO()
             with mock.patch.object(self.b, "whoami", return_value="orch"), \
@@ -4532,7 +4559,7 @@ class BrokerTest(unittest.TestCase):
     def test_every_agent_gets_the_protocol_at_spawn(self):
         from switchboard.broker import PROTOCOL_LINE
         self.b.delegate("t", topic="t", role="worker", me="orch")
-        self.assertIn(PROTOCOL_LINE, self.h.started[0]["prompts"])
+        self.assertIn(PROTOCOL_LINE, bodies(self.h.started[0]["prompts"]))
 
     def test_protocol_is_single_line(self):
         """herdr rejects newlines in agent args outright — length is fine."""
@@ -4547,7 +4574,7 @@ class BrokerTest(unittest.TestCase):
         from switchboard import broker as bmod
         with mock.patch.object(bmod, "PROTOCOL_LINE", "NEW PROTOCOL v2"):
             self.b.delegate("t", topic="t", role="worker", me="orch")
-        self.assertIn("NEW PROTOCOL v2", self.h.started[-1]["prompts"])
+        self.assertIn("NEW PROTOCOL v2", bodies(self.h.started[-1]["prompts"]))
 
     def test_a_repo_can_replace_the_protocol_and_it_reaches_the_spawn(self):
         """The config layer, end to end: a file in this repo, a flag on this spawn.
@@ -4560,7 +4587,7 @@ class BrokerTest(unittest.TestCase):
         (self.repo / ".switchboard" / "protocol.md").write_text("# ours\n\nSAY LESS.\n")
         Broker(self.db, self.h, repo=self.repo).delegate(
             "t", topic="t", role="worker", me="orch")
-        prompts = self.h.started[-1]["prompts"]
+        prompts = bodies(self.h.started[-1]["prompts"])
         self.assertIn("SAY LESS.", prompts)
         self.assertNotIn(PROTOCOL_LINE, prompts)
 
@@ -4570,7 +4597,8 @@ class BrokerTest(unittest.TestCase):
             '[spawn]\nidentity = "You are {name}. {parent} sent you."\n')
         Broker(self.db, self.h, repo=self.repo).delegate(
             "t", role="worker", name="w9", me="orch")
-        self.assertIn("You are w9. orch sent you.", self.h.started[-1]["prompts"])
+        self.assertIn("You are w9. orch sent you.",
+                      bodies(self.h.started[-1]["prompts"]))
 
     def test_a_repo_role_prompt_reaches_the_spawn(self):
         """A markdown file in `.switchboard/roles/`, straight onto the agent's system
@@ -4580,7 +4608,7 @@ class BrokerTest(unittest.TestCase):
         (d / "worker.md").write_text("+++\n+++\n\nMeasure twice.\n")
         Broker(self.db, self.h, repo=self.repo).delegate(
             "t", topic="t", role="worker", me="orch")
-        self.assertIn("Measure twice.", self.h.started[-1]["prompts"])
+        self.assertIn("Measure twice.", bodies(self.h.started[-1]["prompts"]))
 
     # -- worktree config links -------------------------------------------
 

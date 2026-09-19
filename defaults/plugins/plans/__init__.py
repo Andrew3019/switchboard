@@ -467,6 +467,7 @@ from switchboard import models as models_mod
 from switchboard import plugins as plugins_mod
 from switchboard import presets as presets_mod
 from switchboard import roles as roles_mod
+from switchboard import store as store_mod
 from switchboard.plugins import Result
 
 # THE VOCABULARY IS READ FROM THE MODULES THAT OWN IT, never re-listed here and never
@@ -947,9 +948,13 @@ def register(reg):
                                        "`--why` and is what shows on the step")])
     reg.command(
         "take", take, audience="both",
-        help="become the owner of an unowned step — a not-yet-eligible one too; --steal "
-             "takes an owned one and tells its previous owner",
+        help="become the owner of an unowned step — a not-yet-eligible one too; --for "
+             "assigns it to another agent; --steal takes an owned one and tells its "
+             "previous owner",
         args=[reg.arg("step", help="a step id (step-1, p-2/step-1) or its board name"),
+              reg.arg("--for", help="assign it to THIS agent instead of to yourself — "
+                                    "the same transaction with a different assignee, and "
+                                    "what `sb delegate --assign-step` runs"),
               reg.arg("--steal", flag=True,
                       help="take it even though somebody owns it; recorded, and the "
                            "previous owner is told unless it has already finished"),
@@ -4008,6 +4013,13 @@ def take(ctx, args) -> Result:
     A PENDING STEP MAY BE TAKEN. Ownership is orthogonal to eligibility, so an agent can be
     pre-staged on the step it will pick up once its predecessors close (#314/INV-123).
 
+    `--FOR <agent>` ASSIGNS IT TO SOMEBODY ELSE, which is the same transaction with a
+    different assignee and not a second verb (v2 §11, #328): "any agent working in a Plan
+    may assign an unowned Step". The changelog records the CALLER as `by` and the assignee
+    in the owner move, so the record says who assigned as well as who now owns. It is also
+    what `sb delegate --assign-step` runs, through `assign_on_spawn` below — one path, so a
+    spawn-time assignment and a typed one cannot diverge.
+
     `--STEAL IS NEVER SILENT`, and that — not a rule about when it may be used — is the
     safeguard: the steal is its own changelog action, and the previous owner gets a NORMAL
     `sb tell` naming the step and the new owner. Except when that owner has already called
@@ -4020,31 +4032,68 @@ def take(ctx, args) -> Result:
         return bad
     steal = bool(getattr(args, "steal", False))
     self_review = bool(getattr(args, "self_review", False))
+    # `getattr` by the raw dest: `--for` is a Python keyword, so there is no attribute
+    # spelling of it and `args.for` will not parse.
+    to = str(getattr(args, "for", None) or "").strip() or None
     was: dict = {}
 
     def _take(step, who, plan, lib):
-        prev = _owner(step)
-        if prev == who:
-            return Result(human=f"{step['id']} is already yours — nothing to take",
-                          data={"plan": None, "step": step.get("id"), "already_owned": True})
-        if prev and not steal:
-            return _denied(step, f"{step['id']} is owned by {prev} — it is theirs to "
-                                 f"release, or take it anyway with `take {step['id']} "
-                                 f"--steal`, which tells them", owner=prev)
-        marked = _independence(step, who, plan, self_review, "take")
+        owner = to or who
+        marked = _assignable(step, owner, plan, by=who, steal=steal,
+                             self_review=self_review, verb="take")
         if isinstance(marked, Result):
             return marked
-        step["owner"] = who
-        was["prev"] = prev
-        return (("steal" if prev else "take"),
-                f"{step['id']} owner {prev or 'unowned'} → {who}{marked}")
+        prev = _owner(step)
+        step["owner"] = owner
+        # GIVING AWAY YOUR OWN STEP IS A HANDOFF, not a steal: nothing was taken from
+        # anybody, and the only agent that could be told is the one that typed the
+        # command. So the steal machinery is not armed for it.
+        was["prev"] = None if prev == who else prev
+        was["now"] = owner
+        return (("steal" if was["prev"] else "take"),
+                f"{step['id']} owner {prev or 'unowned'} → {owner}{marked}")
 
     with _owning(ctx.state_dir):
         done = _on_step(ctx, args.step, "take", args.reason, _take, whole=True)
     prev = was.get("prev")
     if not done.ok or not prev:
         return done
-    return _told(ctx, done, prev)
+    return _told(ctx, done, prev, was.get("now") or ctx.agent or "human")
+
+
+def _assignable(step: dict, to: Optional[str], plan: dict, *, by: str, steal: bool,
+                self_review: bool, verb: str) -> Any:
+    """May `to` own this step? An independence suffix for the changelog, or a refusal.
+
+    The one predicate behind three callers — `take`, `take --for`, and the PREFLIGHT a
+    spawn runs before it makes an agent (`assign_on_spawn(check=True)`). One function
+    because the preflight's whole job is to answer, before a pane exists, the question the
+    real assignment will be asked afterwards; two copies of that rule would differ exactly
+    when it mattered.
+
+    `to` is None on that preflight: there is no assignee yet, so only the OWNERSHIP half is
+    asked. Independence is not skipped so much as trivially satisfied — a fresh agent has
+    contributed to nothing — and the assignment itself asks it again for real.
+
+    **A CALLER HANDING OVER ITS OWN STEP NEEDS NO `--steal`.** `--steal` is a safeguard for
+    an owner that did not consent, and the owner here is the agent typing the command: a
+    lead that owns `Implement` and spawns a worker to do it is the COMMONEST delegation
+    there is, and making it type `--steal` to give away its own work — and then mailing
+    itself "taken from you" — would be the wrong word for the wrong event. So `by` is asked
+    for, and `prev == by` passes.
+    """
+    prev = _owner(step)
+    if to is not None and prev == to:
+        whose = "yours" if to == by else f"{to}'s"
+        return Result(human=f"{step['id']} is already {whose} — nothing to take",
+                      data={"plan": None, "step": step.get("id"), "already_owned": True})
+    if prev and prev != by and not steal:
+        return _denied(step, f"{step['id']} is owned by {prev} — it is theirs to "
+                             f"release, or take it anyway with `take {step['id']} "
+                             f"--steal`, which tells them", owner=prev)
+    if to is None:
+        return ""
+    return _independence(step, to, plan, self_review, verb)
 
 
 # REVIEW INDEPENDENCE, ENFORCED BY DEFAULT (#321, Andrew's A1). An agent that owns, owned or is
@@ -4057,11 +4106,19 @@ def take(ctx, args) -> Result:
 # A change record's review is normally closed by neither verb but DERIVED off `change.review`
 # when its PR opens (`_derived_review`), so the same guard and override run there too.
 SELF_REVIEWED = "self-reviewed"
-# The changelog actions that name a contributor to the step they are about: a take or steal
-# names the new owner as `by`, a release or complete the owner doing it, and a tick whoever
-# closed it — an implement step can be ticked without ever being taken. A move's detail is
-# written `<step> owner <was> → <now>`, which also names an owner a hand-edit had pre-staged.
+# The changelog actions that name a contributor to the step they are about: a release or
+# complete names the owner doing it, and a tick whoever closed it — an implement step can be
+# ticked without ever being taken. A move's detail is written `<step> owner <was> → <now>`,
+# which also names an owner a hand-edit had pre-staged.
 _OWNING_ACTIONS = ("take", "steal", "release", "complete", "tick")
+# THE TWO WHOSE `by` IS NOT A CONTRIBUTOR, since `take --for` (#328). A take or a steal
+# NAMES its new owner in the owner move, so `by` adds nothing except the agent that TYPED
+# it — which need not be the owner at all now that a spawn can assign a step to its child.
+# Counting it made every delegator a recorded contributor to the step it handed out, which
+# fails safe and is still wrong: a reviewer that spawns a fixer would lose independence on
+# the plan it was spawned to review. For an ordinary `take` the two are the same agent and
+# nothing changes.
+_TYPED_NOT_OWNED = ("take", "steal")
 _OWNER_MOVE = re.compile(r"^\S+ owner (?P<was>\S+) → (?P<now>\S+)")
 
 
@@ -4069,8 +4126,9 @@ def _contributed(plan: dict, who: str) -> list[str]:
     """The ids of this plan's `implement`-kind steps that `who` owns, owned or contributed to.
 
     A RECORDED CONTRIBUTOR IS AN OWNER ON THE RECORD (#321 A3): the step's current `owner`,
-    and every agent the step's ownership events name — the `by` of a take, steal, release,
-    complete or tick, and both sides of an owner move. Read from switchboard's own record and never
+    and every agent the step's ownership events name — the `by` of a release, complete or
+    tick (see `_TYPED_NOT_OWNED` for why a take's is not one), and both sides of an owner
+    move. Read from switchboard's own record and never
     from git, because agents on one plan share a worktree and one git identity. What this
     cannot see is an owner a hand-edit set and a later hand-edit replaced with no verb between:
     no event was ever written for it.
@@ -4087,7 +4145,8 @@ def _contributed(plan: dict, who: str) -> list[str]:
         if n is None or n not in ids:
             continue
         moved = _OWNER_MOVE.match(detail)
-        if who == e.get("by") or (moved and who in (moved["was"], moved["now"])):
+        acted = who == e.get("by") and e.get("action") not in _TYPED_NOT_OWNED
+        if acted or (moved and who in (moved["was"], moved["now"])):
             hit.add(n)
     return [sid for n, sid in ids.items() if n in hit]
 
@@ -4157,10 +4216,15 @@ def _derived_review(plan: dict, override: bool, verb: str) -> Any:
     return f"; {SELF_REVIEWED} — {reviewer} contributed to {', '.join(mine)}"
 
 
-def _told(ctx, done: Result, prev: str) -> Result:
-    """Tell a step's previous owner it was stolen, unless it has finished. Onto the result."""
+def _told(ctx, done: Result, prev: str, new: str) -> Result:
+    """Tell a step's previous owner it was stolen, unless it has finished. Onto the result.
+
+    `new` is the agent that now OWNS it, which is the caller only when the caller took it
+    for itself: a `take --for <agent>` — and so a `sb delegate --assign-step … --steal` —
+    names the assignee, because the previous owner's question is who has its step now, not
+    who typed the command.
+    """
     sid = f"{done.data.get('plan')}/{(done.data.get('step') or {}).get('id')}"
-    new = ctx.agent or "human"
     status = _Live(ctx).owner(prev)
     if status == "done":                # it called `sb done`; nobody is there to tell
         done.data["notified"] = None
@@ -4174,6 +4238,194 @@ def _told(ctx, done: Result, prev: str) -> Result:
                    f"\n\n{prev} could NOT be told — `sb tell {prev}` it yourself.")
     return done
 
+
+# -- the spawn seam: a child's Step and Plan, set in the call that makes it ----
+#
+# THE NAME sb LOOKS FOR on a plugin package (`switchboard/assignment.py`), and the third
+# seam of the family DESIGN-TRUTH blessed for the board: sb hands over the context it made
+# and gets back plain data, and this file stays the only thing that opens a plan.
+#
+# WHY IT IS A SEAM AND NOT A READ-AND-WRITE in sb. "Exactly one accountable owner" is this
+# plugin's invariant, enforced by this plugin's lock, its changelog and its independence
+# guard. A spawn that wrote `owner` into a plan file itself would be a second writer with
+# none of those, and the first time the two rules differed the plan would be the thing that
+# lost. So `sb delegate --assign-step` runs the same `take` an agent types.
+ASSIGN_HOOK = "assign_on_spawn"
+
+
+def assign_on_spawn(ctx, *, to: Optional[str] = None, step: Optional[str] = None,
+                    plan: Optional[str] = None, steal: bool = False,
+                    check: bool = False) -> dict:
+    """Give a freshly spawned agent its Step, its end-to-end Plan ownership, or both.
+
+    What `sb delegate --assign-step <step> [--steal] --own-plan <plan>` calls, twice: once
+    with `check=True` BEFORE anything spawns, and once for real after the child's row is
+    claimed. The check is why a step id typed wrong costs a refusal rather than a running
+    agent with no step — and it is the same predicate the real assignment runs
+    (`_assignable`), not a second reading of the rule.
+
+    `to` on the CHECK is the name the spawn is ABOUT to use, not a row that exists — sb
+    composes it before it spawns anything and passes it here. That is what makes the check
+    agree with the assignment in the one case where they otherwise could not: a step
+    PRE-STAGED onto that name (`take <step> --for <name>`, which #314 blesses for an agent
+    that does not exist yet). Without the name the check sees a step "owned by somebody
+    else" and tells the caller to steal it from the agent it is about to create. `None` is
+    still accepted — a caller that cannot know the name gets the ownership half only.
+
+    A STEP THE SPAWNEE ALREADY OWNS IS A NO-OP, at both ends. The caller asked for that
+    agent to own it and it does; nothing moves, nothing is logged, and nobody is told.
+
+    Plain data out, never a `Result`: this crosses back into `switchboard/`, which must not
+    grow a dependency on this plugin's types.
+
+        {"ok": bool, "error": str|None, "step": {...}|None, "plan": {...}|None}
+    """
+    out: dict = {"ok": True, "error": None, "step": None, "plan": None}
+    who = ctx.agent or "human"
+
+    def no(why: str, **data) -> dict:
+        # WHAT ALREADY LANDED IS PART OF THE REFUSAL. The two halves are two writes, so a
+        # plan that refuses after the step was assigned leaves a fact behind — and a
+        # failure that does not name it reads as "nothing happened", which is how the step
+        # comes to be owned by an agent nobody believes owns it.
+        done = out.get("step") if not check else None
+        if isinstance(done, dict) and done.get("owner") and not done.get("already_owned"):
+            why += (f" — NOTE: {done.get('plan')}/{done.get('step')} WAS already assigned "
+                    f"to {done['owner']}; that stands")
+        out.update(ok=False, error=why)
+        out.update(data)
+        return out
+
+    if step is not None:
+        if check:
+            noop = False
+            doc, _ = _read(ctx.state_dir)
+            got, bad = _resolved_step(doc, step)
+            if bad is not None:
+                return no(bad)
+            found, one = got
+            marked = _assignable(one, to, found, by=who, steal=steal, self_review=False,
+                                 verb="take")
+            if isinstance(marked, Result):
+                # `already_owned` is the one Result that is not a refusal: the spawnee
+                # holds the step already, which is the end state that was asked for. The
+                # assignment will be a no-op and the check has to say so, or the two
+                # disagree about the same file.
+                if not marked.data.get("already_owned"):
+                    return no(str(marked.data.get("error") or marked.human))
+                noop = True
+            out["step"] = {"plan": found.get("id"), "step": one.get("id"),
+                           "owner": _owner(one), "already_owned": noop}
+        else:
+            args = SimpleNamespace(step=step, steal=steal, self_review=False,
+                                   reason=f"assigned at spawn to {to}")
+            setattr(args, "for", to)
+            r = take(ctx, args)
+            if not r.ok:
+                return no(str(r.data.get("error") or r.human))
+            if r.data.get("already_owned"):
+                # NOTHING MOVED, so nothing may be reported as having moved. `take`'s
+                # early result carries no plan — it never read one — and passing that
+                # straight out is what wrote a `step_stolen` event with a NULL plan id
+                # against a plan whose changelog said nothing had happened. The ids are
+                # resolved here instead, and the no-op is marked so sb logs no event.
+                doc, _ = _read(ctx.state_dir)
+                got, bad = _resolved_step(doc, step)
+                if bad is not None:
+                    return no(bad)
+                found, one = got
+                out["step"] = {"plan": found.get("id"), "step": one.get("id"),
+                               "owner": to, "already_owned": True,
+                               "notified": None, "notice_skipped": None}
+            else:
+                one = r.data.get("step")
+                out["step"] = {"plan": r.data.get("plan"), "owner": to,
+                               "step": one.get("id") if isinstance(one, dict) else one,
+                               "already_owned": False,
+                               # Whether the steal's notice LANDED, verbatim from `_told`:
+                               # `notified` is the agent that got it, and `notice_skipped`
+                               # says why nobody did. A spawn that stole a step and could
+                               # not say so has to report that, not just report the steal.
+                               "notified": r.data.get("notified"),
+                               "notice_skipped": r.data.get("notice_skipped")}
+
+    if plan is not None:
+        got = _own_plan(ctx, plan, to, by=who, steal=steal, check=check)
+        if isinstance(got, str):
+            return no(got)
+        out["plan"] = got
+        # OUTSIDE THE LOCK, exactly as a step steal's notice is, and for the same reason: a
+        # slow `sb tell` must not hold every ownership verb in the repo. A notice that
+        # cannot be sent leaves the handover standing and says so.
+        prev = got.get("previous_owner")
+        if not check and prev and prev != who:
+            sent = _ask(ctx, "tell", prev,
+                        f"plan {got.get('plan')} is now {to}'s end to end (--steal) — you "
+                        f"are no longer accountable for it landing", clock=_Budget())
+            got["notified"] = prev if sent is not None else None
+    return out
+
+
+def _resolved_step(doc: dict, given: str) -> tuple[Any, Optional[str]]:
+    """`(plan, step-id)` for what a caller typed, or `(None, why)`. Reads, writes nothing.
+
+    `_as_step_id` is what every step verb resolves a display name through, so the preflight
+    accepts exactly the spellings the assignment will — a check that took ids only would
+    refuse `--assign-step Review` and then the assignment would have taken it.
+    """
+    lib_all, bad = _lib(doc.get("plans") or [])
+    if bad is not None:
+        return None, str(bad.data.get("error") or bad.human)
+    sid = given
+    if not _looks_step_id(given):
+        sid, bad = _as_step_id(doc, given, lib_all)
+        if bad is not None:
+            return None, str(bad.data.get("error") or bad.human)
+    plan, step = _locate(doc, sid)
+    if step is None:
+        bad = _no_step(doc, sid)
+        return None, str(bad.data.get("error") or bad.human)
+    return (plan, step), None
+
+
+def _own_plan(ctx, given: str, to: Optional[str], *, by: str, steal: bool,
+              check: bool) -> Any:
+    """Record `to` as this plan's END-TO-END owner. The facts, or a string saying why not.
+
+    END-TO-END OWNERSHIP IS NOT THE `planner` FIELD and not a step's `owner`. `planner`
+    says whose the plan's SHAPE is while it is set; a step's owner is accountable for one
+    outcome; this says who is accountable for the plan LANDING, which is what v2 §6's done
+    gate holds an agent to. One field, `owner`, system-held (`_HELD_PLAN`) exactly as a
+    step's is — an agent's `edit` hands it back unchanged rather than setting it, because
+    ownership changes hands through a verb that records the move.
+
+    TAKING IT FROM SOMEBODY ELSE IS A STEAL, on the same terms a step's ownership is: it
+    needs `--steal`, it is recorded, and the previous owner is told (by the caller, outside
+    the lock). Handing over your OWN plan needs neither — nothing was taken and the only
+    agent to tell is the one typing the command.
+
+    WHAT CONSUMES IT DOES NOT EXIST YET, stated because the gap is the point: the `done`
+    gate is #329's and was explicitly cut from it in the de-hardening pass. So this records
+    the fact and the board and `show` draw it; nothing refuses a `done` on it today.
+    """
+    with _owning(ctx.state_dir):
+        doc, seal = _read_logged(ctx)
+        plan = _find(doc, given)
+        if plan is None:
+            bad = _missing(doc, given)
+            return str(bad.data.get("error") or bad.human)
+        prev = str(plan.get("owner") or "").strip() or None
+        if prev and prev != by and prev != to and not steal:
+            return (f"{plan['id']} is already {prev}'s end to end — it is theirs to hand "
+                    f"over, or take it anyway with `--steal`, which tells them")
+        if check:
+            return {"plan": plan.get("id"), "owner": prev}
+        plan["owner"] = to
+        _log(ctx, plan, by, "own", "end-to-end ownership assigned at spawn",
+             f"{plan['id']} owner {prev or 'unowned'} → {to}")
+        _write(ctx.state_dir, doc, seal)
+        return {"plan": plan.get("id"), "owner": to,
+                "previous_owner": None if prev == by else prev}
 
 def release(ctx, args) -> Result:
     """Stop owning a step. It becomes explicitly unowned, which is what surfaces it.
@@ -4526,9 +4778,14 @@ _VIEW_STEP = frozenset({"owner_status", "state"})
 # so an edit read before a tick cannot un-tick the step by handing the old progress back.
 # `kind` and `def` on a step are not in here because a CHANGE to either is refused rather than
 # ignored (`_FIXED_STEP`): kind is immutable, and `def` is the declared type it came from.
+# `owner` is END-TO-END PLAN OWNERSHIP (#328) and is held for a step `owner`'s reason: it
+# changes hands through a verb that records the move, so a document handing back a
+# different one would be ownership changing with nothing in the changelog saying it did.
+# `planner` is NOT held — it is the plan's SHAPE, handed over and back by field edits on
+# purpose (`create --planner`'s docstring).
 _HELD_PLAN = frozenset({"id", "kind", "steps", "workspace", "workspace_from", "checkout",
                         "branch", "branch_from", "next_step", "changelog", "created_by",
-                        "created_at", "pr_comment_nonce"})
+                        "created_at", "pr_comment_nonce", "owner"})
 # The change record merges KEY BY KEY, and its evidence and identity keys are fixed: the
 # approval, verification, review, PR head and landing are what `comment` and `merge` trust as
 # the record of what happened, so a sanctioned edit that could set them would be a way to
@@ -5928,21 +6185,50 @@ def _catalogue(which: str) -> dict:
     A file that IS there and is not readable is refused, with its path, exactly as a
     plan's own file is. Silently skipping it would leave a plan resolving a link to nothing
     with no sign that the answer came from a typo in a JSON file.
+
+    LAYERED, most general first: this plugin's own directory, then the repo's committed one,
+    then its machine-local one (`config.step_library_dirs`). That is what makes "repo-defined
+    step kinds are repo configuration in the same two-level scheme" (spec §10) true rather
+    than aspirational — before it, a repo wanting a `deploy` kind had to add a JSON file
+    inside switchboard's own plugin directory, which is not an override of anything. Same
+    rule as presets: keyed by filename, and a later layer's `<name>.json` REPLACES the
+    earlier one of that name, so a repo can both add definitions and reshape a shipped one.
+
+    THE REPO IS THE WORKTREE ROOT, resolved here rather than threaded from `ctx.worktree`.
+    `_catalogue` is reached only through `_lib`/`_kept`, and those are called from twenty
+    places that would each have to grow an argument; `store.worktree_root()` is the exact
+    call `cli` makes to build `b.repo`, so resolving it again costs one `git rev-parse` and
+    lands in the same place.
+
+    It is NOT `Path.cwd()`, which this used until a review caught it: `b.repo` is the git
+    toplevel, so from any subdirectory of the worktree `Path.cwd()` finds no `.switchboard/`
+    and the repo's layers silently vanished — a repo-defined kind rendering "no such
+    definition", and `_kind_completion` losing a repo kind's `"completion": "system"`.
+    Agents stand in subdirectories routinely, and the failure was silent both ways.
+
+    A cwd outside a git repo falls back to the shipped catalogue alone rather than raising.
+    Unreachable through `sb`, which makes the same call first and refuses the command — so
+    this is for a direct import, and the shape of the fallback is the one that is right for
+    one: there is nothing to layer, and the shipped definitions are the whole answer.
     """
-    d = Path(__file__).resolve().parent / which
-    out: dict[str, dict] = {}
     try:
-        files = sorted(d.glob("*.json"))
-    except OSError:
-        return out
-    for f in files:
+        repo = store_mod.worktree_root()
+    except (RuntimeError, OSError):
+        repo = None
+    out: dict[str, dict] = {}
+    for d in config_mod.step_library_dirs(which, repo):
         try:
-            spec = json.loads(f.read_text(encoding="utf-8"))
-        except (ValueError, UnicodeDecodeError, OSError) as e:
-            raise _BadDef(f"{f} is not readable JSON ({e}); fix it or move it aside") from e
-        if not isinstance(spec, dict):
-            raise _BadDef(f"{f} holds a {type(spec).__name__} where a definition should be")
-        out[f.stem] = spec
+            files = sorted(d.glob("*.json"))
+        except OSError:
+            continue
+        for f in files:
+            try:
+                spec = json.loads(f.read_text(encoding="utf-8"))
+            except (ValueError, UnicodeDecodeError, OSError) as e:
+                raise _BadDef(f"{f} is not readable JSON ({e}); fix it or move it aside") from e
+            if not isinstance(spec, dict):
+                raise _BadDef(f"{f} holds a {type(spec).__name__} where a definition should be")
+            out[f.stem] = spec
     return out
 
 
@@ -8534,6 +8820,11 @@ def _full(p: dict) -> str:
         # there, like the condition above — a plan with no planner is the ordinary case and
         # has nothing to say about one.
         lines.append(f"  planner     {_flat(p['planner'])} — the plan's shape is theirs")
+    if p.get("owner"):
+        # WHO IS ACCOUNTABLE FOR THIS PLAN LANDING (§6, #328) — set by `sb delegate
+        # --own-plan` and distinct from `planner` above, which is only the shape. Drawn on
+        # the same terms: absent on the ordinary plan, which has no end-to-end owner.
+        lines.append(f"  owner       {_flat(p['owner'])} — accountable for it landing")
     if p.get("condition"):
         lines.append(f"  condition   {_condition(p)}")
     lines.append(f"  created     {_when(p.get('created_at'))} "

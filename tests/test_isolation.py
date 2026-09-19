@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from switchboard import roles as roles_mod  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard.broker import (  # noqa: E402
     CAP_FORK, CAP_SPAWN, CAP_WRITE_TRACKED, HUMAN, Broker,
@@ -37,21 +38,27 @@ class _Isolation(Fixture):
     """Helpers shared by the classes below — the fixture is `test_workspace`'s."""
 
     def _lead_with_fork(self, me: str) -> str:
-        """A non-top lead that holds `fork` — which is now just a lead, seeded from its own
-        template (D2). Nothing is granted here: needing `sb grant fork` before every
-        fan-out is exactly what the seed change removed, and a test that granted it anyway
-        would stop noticing if the seed regressed."""
-        lead = self.b.delegate("t", topic="a", role="lead", me=me)
+        """A non-top agent that holds `fork` — which since #326 is any agent at all, seeded
+        from its role's template. Nothing is granted here: needing `sb grant fork` before
+        every fan-out is exactly what the seed change removed, and a test that granted it
+        anyway would stop noticing if the seed regressed."""
+        lead = self.b.delegate("t", topic="a", role="worker", me=me)
         self.assertTrue(self.b.holds_capability(lead, CAP_FORK))
         return lead
 
     def _spawner_without_fork(self, me: str) -> str:
-        """A caller that may spawn and may NOT isolate: a worker, which since 2026-08-31
-        arrives holding `spawn` and has never held `fork`. It is not a lead, because a
-        lead arrives holding both; what is under test is the gate, not which role trips
-        it."""
-        w = self.b.delegate("t", topic="fan", role="worker", me=me)
+        """A caller that may spawn and may NOT isolate.
+
+        NARROWED BY HAND SINCE #326: roles are soft guidance, every role resolves to the
+        whole vocabulary, and no shipped one is short of `fork` any more. The GATE is
+        unchanged and dormant rather than removed, so the tests that cover it build the
+        caller the gate is written for — which is also the shape a repo re-arming role
+        restrictions would put back."""
+        self.b.roles["fanner"] = roles_mod.Role(name="fanner",
+                                                capabilities=frozenset({CAP_SPAWN}))
+        w = self.b.delegate("t", topic="fan", role="fanner", me=me)
         self.assertTrue(self.b.holds_capability(w, CAP_SPAWN))     # seeded, not granted
+        self.assertFalse(self.b.holds_capability(w, CAP_FORK))
         return w
 
     def _forked(self, agent: str) -> bool:
@@ -228,22 +235,23 @@ class TheForkGateTest(_Isolation, unittest.TestCase):
         self.assertIsNone(store.get_agent(self.db, "worker-w"))     # nothing spawned
 
     def test_the_gate_reads_the_caller_not_the_child(self):
-        """A `fork`-less caller spawning a LEAD — a role that does hold `fork` — is still
-        refused: the question is who is doing the asking, not what is being spawned."""
+        """A `fork`-less caller spawning a role that DOES hold `fork` is still refused: the
+        question is who is doing the asking, not what is being spawned."""
         fanner = self._spawner_without_fork(self._lead_with_fork(self._root()))
         with self.assertRaises(ValueError):
-            self.b.delegate("t", topic="b", role="lead", me=fanner, isolation="own")
+            self.b.delegate("t", topic="b", role="worker", me=fanner, isolation="own")
 
     def test_isolation_is_not_derived_from_the_capability_set_either_way(self):
-        """Holding `write-tracked` does not isolate you, and being isolated grants
-        nothing: the isolated child below holds exactly a worker's seeded set."""
+        """Holding `write-tracked` does not isolate you, and being isolated grants nothing:
+        the isolated child below holds exactly its role's template and no more."""
         lead = self._lead_with_fork(self._root())
         writer = self.b.delegate("t", topic="w", role="worker", me=lead)   # write-tracked
         self.assertFalse(self._forked(writer))                             # still shared
         iso = self.b.delegate("t", topic="r", role="researcher", me=lead,
-                              isolation="own")                             # read-only
+                              isolation="own")
         self.assertTrue(self._forked(iso))
-        self.assertFalse(self.b.holds_capability(iso, CAP_FORK))
+        self.assertEqual(store.held_capabilities(self.db, iso),
+                         set(self.b.seed_for("researcher", is_top=False)))
 
 
 class TheLeadSeedTest(_Isolation, unittest.TestCase):
@@ -276,12 +284,17 @@ class TheLeadSeedTest(_Isolation, unittest.TestCase):
                          (lrow["workspace"], lrow["branch"], lrow["cwd"]))
         self.assertEqual(self.h.calls_of("create_worktree"), [lead])   # one fork, the lead's
 
-    def test_only_a_role_whose_template_names_fork_gains_anything(self):
-        """Every other shipped bundle is untouched — none of them named `fork`."""
-        for role in ("dispatcher", "worker", "researcher", "reviewer", "qa"):
+    def test_every_role_now_carries_fork_and_the_default_is_still_shared(self):
+        """#326 finished what D2 started: `fork` is in every template, so any agent may ASK
+        for an isolated child. The half that keeps that safe is unchanged and is the second
+        assertion — asking is not the default, the stamp still decides an ordinary spawn,
+        and a spawn nobody asked to isolate still shares."""
+        for role in self.b.roles:
             with self.subTest(role=role):
-                self.assertNotIn(CAP_FORK, self.b.seed_for(role, is_top=False))
-        self.assertIn(CAP_FORK, self.b.seed_for("lead", is_top=False))
+                self.assertIn(CAP_FORK, self.b.seed_for(role, is_top=False))
+        lead = self.b.delegate("t", topic="a", role="worker", me=self._root())
+        kid = self.b.delegate("t", topic="w", role="researcher", me=lead)
+        self.assertFalse(self._forked(kid))
 
 
 class ZeroRegressionTest(_Isolation, unittest.TestCase):

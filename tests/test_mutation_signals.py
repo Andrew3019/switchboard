@@ -81,12 +81,14 @@ class RecipientIsToldTest(SignalFixture, unittest.TestCase):
         """The distinction #163 was filed over: a `--delegable` grant widens only what the
         recipient's CHILDREN are seeded with. Said plainly, or the recipient tries the
         action itself and reads the refusal as a bug."""
-        # `dispatch` and not `spawn`: a worker is seeded `spawn` since 2026-08-31, so a
-        # pass-through grant of it would leave nothing for the last line to assert.
-        self.b.grant(self.w1, CAP_DISPATCH, me=self.lead, delegable=True)
-        [m] = self.mail(self.w1)
+        # A narrowed template: since #326 every role is seeded every shipped capability,
+        # so a pass-through grant to an ordinary agent would leave nothing for the last
+        # line to assert.
+        hand = self.spawn(self.lead, self.narrow("hand", CAP_SPAWN), "hand")
+        self.b.grant(hand, CAP_DISPATCH, me=self.lead, delegable=True)
+        [m] = self.mail(hand)
         self.assertIn("PASS-THROUGH ONLY", m["body"])
-        self.assertNotIn(CAP_DISPATCH, store.held_capabilities(self.db, self.w1))
+        self.assertNotIn(CAP_DISPATCH, store.held_capabilities(self.db, hand))
 
     def test_the_signal_does_not_count_as_being_given_a_task(self):
         """`put_message` clears `awaiting_task` — "somebody gave this agent something".
@@ -105,13 +107,14 @@ class AtomicWithTheMutationTest(SignalFixture, unittest.TestCase):
         """The injected-failure test. A capability row committed without the message
         telling its holder is precisely the silent divergence the signal exists to
         prevent."""
+        hand = self.spawn(self.lead, self.narrow("hand", CAP_SPAWN), "hand")
         with mock.patch.object(store, "put_message", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
-                self.b.grant(self.w1, CAP_DISPATCH, me=self.lead)
-        self.assertEqual(store.held_capabilities(self.db, self.w1),
-                         {CAP_WRITE_TRACKED, CAP_SPAWN})     # the seed, and nothing added
-        self.assertEqual(self.mail(self.w1), [])
-        self.assertEqual([e["kind"] for e in store.recent_events(self.db, agent=self.w1)
+                self.b.grant(hand, CAP_DISPATCH, me=self.lead)
+        self.assertEqual(store.held_capabilities(self.db, hand),
+                         {CAP_SPAWN})                        # the seed, and nothing added
+        self.assertEqual(self.mail(hand), [])
+        self.assertEqual([e["kind"] for e in store.recent_events(self.db, agent=hand)
                           if e["kind"] == "grant"], [])
         self.assertFalse(self.db.in_transaction)          # and the store is not left open
 

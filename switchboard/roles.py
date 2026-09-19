@@ -110,11 +110,36 @@ def side_effect_capabilities(repo: Optional[Path] = None) -> dict[str, tuple[str
     return out
 
 
-# What a role gets when its own definition names no bundle. A role nobody thought about is
-# a LEAF that may write — the same answer the retired `delegate = false` default gave, for
-# the same reason: being wrong this way costs a refusal a person can lift, and being wrong
-# the other way costs a tree of agents nobody meant to exist.
-DEFAULT_CAPABILITIES = frozenset({CAP_WRITE_TRACKED})
+# ROLES ARE SOFT GUIDANCE, NOT PERMISSION CLASSES (#326, spec §5). This is the one line
+# that makes that true, and everything below reads it: EVERY role resolves to the whole
+# vocabulary, so no role-based gate ever refuses. "A role describes the job the agent was
+# launched to do; it is not a permission class... Roles affect prompt guidance, what
+# Switchboard-specific context is included at spawn, and expected focus. They do not impose
+# hard capability restrictions: a researcher can still edit code, run commands, delegate and
+# spawn." Delegation is an ordinary agent capability now, not one role's privilege.
+#
+# NEUTRALIZED RATHER THAN RIPPED OUT, deliberately. The broker's gate, `sb grant`, the
+# seed/held/passable columns and the side-effect table all stay exactly where they are and
+# keep working; what changed is the set they are handed for a role, and that is one
+# constant. A repo that needs a real restriction back gets it by narrowing this — one edit,
+# one place — rather than by rebuilding a substrate somebody deleted. Removing the substrate
+# itself is a later cleanup and was explicitly out of scope here.
+#
+# IT IS A FLOOR AND NOT A CEILING. A role file's `capabilities` list still widens — the
+# vocabulary is open-ended and a repo mints its own strings on a role (`_bundle`) — it just
+# cannot take anything away any more.
+#
+# WHAT STILL REFUSES, and why neither is a role permission class: `sb start` is a hardcoded
+# human-only gate with no capability string at all, and a STAMPED TOP takes `TOP_CAPABILITIES`
+# below — a fact about a placement (§2.0), not about the `dispatcher` role, which as an
+# ordinary agent resolves to everything like every other role.
+ROLE_CAPABILITIES = CAPABILITIES
+
+# What a role gets when its own definition names no bundle — the same as what a role that
+# names one gets, since #326. Kept as its own name because the readers below say two
+# different things with it ("nobody wrote a bundle" and "this bundle"), and a repo
+# re-arming role restrictions wants those two decisions separable again.
+DEFAULT_CAPABILITIES = ROLE_CAPABILITIES
 
 # The top dispatcher's bundle, and the one bundle that is NOT data (§2.0). A top is a
 # placement plus a stamp plus a FIXED set: it is not editable, not layerable by a repo's
@@ -141,25 +166,40 @@ def bundle_for_delegate(delegate: bool) -> frozenset:
 
     Applied per config LAYER, in `config._bundled`, so a repo's `delegate` line and a
     shipped `capabilities` line are two spellings of one field and the later one wins.
+
+    INERT SINCE #326, and still called: roles are soft guidance, so both answers are the
+    whole vocabulary. The function stays because `config._bundled` runs it per layer to keep
+    a `delegate` line and a `capabilities` line one field — dropping it would change how
+    files MERGE, which is a different question from what the merged bundle resolves to.
     """
-    if delegate:
-        return frozenset({CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED})
-    return DEFAULT_CAPABILITIES
+    return ROLE_CAPABILITIES
 
 
 def _bundle(fields: dict) -> frozenset:
     """A merged role definition's bundle, or a leaf's if it names none.
 
+    SINCE #326 IT IS NEVER NARROWER THAN `ROLE_CAPABILITIES`, whatever the definition says:
+    every role resolves to the whole shipped vocabulary, so no role-based gate refuses. A
+    file's `capabilities` list is still read, and it can only ADD — which is not a leftover
+    but the one thing that list still does. The vocabulary is open-ended and a repo MINTS
+    its own strings on a role (`[release] capabilities = ["release"]`), and those strings
+    reach `Broker.known_capabilities`, `sb grant` and the side-effect table through here. A
+    repo's own extension of the substrate is not a switchboard role permission class, and
+    #326 was not asked to take it away.
+
+    So a declared list widens and never narrows. `["!reset", "write-tracked"]` — the
+    spelling `config._bundled` gives a retired `delegate` bool, and the spelling a repo used
+    to narrow a shipped role with — resolves to everything, which is exactly the
+    neutralization: the file still loads, and it no longer takes anything away.
+
     `delegate` is already gone by here — `config._bundled` rewrites it a layer at a time —
     except on a dict handed straight to `load()` by a test or a caller, which is why the
     bool is still understood and still cannot reach the `Role` model.
     """
-    if "capabilities" in fields:
-        caps = fields["capabilities"]
-        return frozenset(c for c in caps if c != config.RESET)
-    if "delegate" in fields:
-        return bundle_for_delegate(fields["delegate"])
-    return DEFAULT_CAPABILITIES
+    declared = fields.get("capabilities")
+    if not declared:
+        return ROLE_CAPABILITIES
+    return ROLE_CAPABILITIES | frozenset(c for c in declared if c != config.RESET)
 
 
 @dataclass

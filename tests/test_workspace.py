@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from switchboard import config, store  # noqa: E402
 from switchboard.broker import HUMAN, Broker, ForkFailed  # noqa: E402
-from switchboard.herdr import Agent, HerdrError  # noqa: E402
+from switchboard.herdr import Agent, HerdrError, section_body  # noqa: E402
 
 
 
@@ -1421,8 +1421,14 @@ class PluginsOnEverySpawnPathTest(unittest.TestCase):
         self.db.close(); self.tmp.cleanup()
 
     def _prompts_for(self, name: str) -> list[str]:
+        """One agent's spawned sections WITHOUT their `## <label>` headings (INV-62).
+
+        The label is the one thing the assembly adds to a fragment, so stripping it keeps
+        these assertions about the text the config layer produced. `broker.segment_label`
+        and `tests/test_config_model.py` own the headings themselves.
+        """
         (started,) = [s for s in self.h.started if s["name"] == name]
-        return started["prompts"]
+        return [section_body(p) for p in started["prompts"]]
 
     def test_delegate_resolves_the_repos_bindings(self):
         kid = self.b.delegate("t", topic="t", role="worker", me=HUMAN)

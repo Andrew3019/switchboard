@@ -14,20 +14,24 @@ files are the opposite of internal.
 For any repo, three layers, most general first:
 
     defaults/                    (this directory — shipped, never edited per repo)
-    <repo>/.switchboard-shared/  (that repo's own, committed — presets only)
+    <repo>/.switchboard-shared/  (that repo's own, committed — presets and step definitions)
     <repo>/.switchboard/         (that checkout's own, never committed)
 
 `defaults/` alone is a complete, working configuration: switchboard runs in a repo with
 neither of the other two. A repo's own layers only say what differs.
 
-The middle layer covers **presets only** — `presets.toml` and `presets/<name>.md`, under
+The middle layer covers **presets and step definitions** — `presets.toml`,
+`presets/<name>.md`, `plans/library/<name>.json` and `plans/templates/<name>.json`, under
 the same key names as the local layer. It exists because `.switchboard/` cannot travel: it
 is gitignored in switchboard's own repo, and in a fleet worktree it is a symlink git refuses
 to track through, so a repo's house rules for its own agents reached nobody who cloned it.
 Since cloning is how a verification run is isolated, the clones doing the riskiest work were
-precisely the ones with no rules in them. Nothing else is layered there because nothing else
-needed to travel; a small layer that is complete for what it covers beats a wide one that is
-half wired up.
+precisely the ones with no rules in them. Step definitions joined it for the same reason
+under a different heading: a repo-defined step kind is repo configuration, and before it had
+a layer the only way to mint one was to add a JSON file inside switchboard's own plugin
+directory, which is not an override of anything. Nothing else is layered there because
+nothing else needed to travel; a small layer that is complete for what it covers beats a
+wide one that is half wired up.
 
 Which of the two a file goes in is one question: is this true of the REPO, or of this
 checkout on this machine? House rules, committed. Your own scratch preset, local.
@@ -38,6 +42,8 @@ checkout on this machine? House rules, committed. Your own scratch preset, local
 | `defaults/models.toml`      | `~/.config/switchboard/models.toml`, then `.switchboard/models.toml` |
 | `defaults/presets.toml`     | `.switchboard-shared/presets.toml`, then `.switchboard/presets.toml` |
 | `defaults/presets/<name>.md`| `.switchboard-shared/presets/<name>.md`, then `.switchboard/presets/<name>.md` |
+| `defaults/plugins/plans/library/<name>.json` | `.switchboard-shared/plans/library/<name>.json`, then `.switchboard/plans/library/<name>.json` |
+| `defaults/plugins/plans/templates/<name>.json` | `.switchboard-shared/plans/templates/<name>.json`, then `.switchboard/plans/templates/<name>.json` |
 | `defaults/plugins.toml`     | `.switchboard/plugins.toml`            |
 | `defaults/plugins/<name>/`  | `.switchboard/plugins/<name>/`         |
 | `defaults/protocol.md`      | `.switchboard/protocol.md`             |
@@ -89,6 +95,25 @@ To *replace* an array instead of joining it, make `"!reset"` its first element:
 
 Everything about this is tested in `tests/test_config.py`.
 
+## Reading which layer answered
+
+    sb configure --layers              what this repo has CHANGED, and what to delete to undo it
+    sb configure --layers timeouts     every setting under a prefix, defaults included
+    sb configure --layers --json       the same as data
+
+Every row is `switchboard default -> repo override -> effective`, with the exact line to
+delete to reset it and the file it is in; the vocabularies below the settings say which layer
+defines each role, preset, model tier and step kind. Read-only — an override is a line in
+`.switchboard/settings.toml`, and this tells you which line. It is the substrate the browser
+(wave 12) will present and edit.
+
+For an ARRAY the override and the effective value differ on purpose: arrays join, so a repo
+that wrote one entry has an effective value holding the shipped ones too, and the readout
+shows both rather than making you guess which entry is yours.
+
+`sb configure` with no `--layers` is a different subject: an agent tuning its own reminders
+inside its role's ceiling. Nothing there touches repo configuration.
+
 ## Pointing switchboard somewhere else
 
 `SWITCHBOARD_DEFAULTS=/path/to/dir` replaces this directory wholesale. Used by the test
@@ -107,3 +132,5 @@ suite; also the escape hatch for shipping a different baseline to a team.
 | `protocol.md`       | the agent protocol, injected as a system prompt at every spawn      |
 | `prompts.toml`      | the other spawn-time prompt fragments and the doorbell texts        |
 | `settings.toml`     | paths, vocabulary, limits, timeouts, retries, display               |
+| `plugins/plans/library/*.json`   | one step definition each — the filename is the step kind it mints |
+| `plugins/plans/templates/*.json` | one plan template each                                |

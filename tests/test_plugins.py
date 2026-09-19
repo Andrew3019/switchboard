@@ -37,6 +37,7 @@ from switchboard import plugins  # noqa: E402
 from switchboard import presets  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard import validate  # noqa: E402
+from switchboard.herdr import section_body  # noqa: E402
 
 from test_workspace import FakeHerdr  # noqa: E402
 
@@ -904,7 +905,13 @@ class FragmentInjectionTest(Sandbox):
         return code, out.getvalue(), err.getvalue()
 
     def prompts(self) -> list[str]:
-        return self.h.started[-1]["prompts"]
+        """The spawned sections WITHOUT their `## <label>` headings (INV-62).
+
+        The label is the one thing the assembly adds to a fragment, so stripping it keeps
+        these assertions about the text the config layer produced. `broker.segment_label`
+        and `tests/test_config_model.py` own the headings themselves.
+        """
+        return [section_body(p) for p in self.h.started[-1]["prompts"]]
 
     FRAGMENT = "run `sb plugin todo list` first"
 
@@ -1106,7 +1113,8 @@ class IsolationTest(Sandbox):
         run the code, so a `SystemExit` at module scope has no bearing on a markdown file
         sitting next to it. §11 item 4 records the same thing for an incompatible API."""
         self.run_sb("delegate", "do a thing", "--name", "a thing")
-        self.assertIn("something an agent is told", self.h.started[0]["prompts"])
+        self.assertIn("something an agent is told",
+                      [section_body(p) for p in self.h.started[0]["prompts"]])
         self.assertNeverImported()
 
     def test_2_start_spawns_normally(self):

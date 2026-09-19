@@ -237,11 +237,11 @@ class RolesTest(unittest.TestCase):
         self.assertIn("may not become the channel for the conversation about it", p)
         self.assertIn("has this child's finished work already reached the person once?", p)
         roles_by_name = roles.load(self.repo)
-        for name in ("dispatcher", "lead"):
-            with self.subTest(role=name):
-                prompt = roles_by_name[name].prompt
-                self.assertIn("handoff the protocol describes", prompt)
-                self.assertNotIn("Restore the child if it is closed", prompt)
+        # `lead` named it too until #326 stopped shipping that role; `dispatcher` is the
+        # shipped role file that still points at it, and the definition is the protocol's.
+        prompt = roles_by_name["dispatcher"].prompt
+        self.assertIn("handoff the protocol describes", prompt)
+        self.assertNotIn("Restore the child if it is closed", prompt)
 
     def test_every_session_is_told_presets_exist_and_can_be_applied(self):
         """DESIGN-TRUTH: "This must be known to all sessions." It used to be known to
@@ -340,22 +340,22 @@ class RolesTest(unittest.TestCase):
         # The report is still owed; only the question goes.
         self.assertIn("The first time a child reports done", prompt)
 
-    def test_a_dispatcher_may_hand_out_a_worker_and_defaults_to_a_lead(self):
+    def test_a_dispatcher_hands_out_a_worker_and_defaults_to_one(self):
         """Andrew, 2026-08-15, replacing lead-every-time: it hands out workers too, on the
-        same setup and environment. The guardrail is the half worth pinning — the choice is
-        asymmetric (an extra agent against half a job that looks finished), so an unsure
-        dispatcher spawns a lead, and nothing here licenses it to size the work by going
-        and reading.
+        same setup and environment. The default it falls back to when unsure is what is
+        worth pinning, and nothing here licenses it to size the work by going and reading.
 
-        Two more since 2026-08-27. `researcher` joined the routing options for the ask that
-        is explicitly to look and report; and choosing a lead is pinned as committing nobody
-        to delegating anything, because that is the sentence a lead prompt no longer
-        promising a fan-out needs the dispatcher to agree with."""
+        #326 SETTLED THE CHOICE IT WAS ASYMMETRIC ABOUT. It used to be worker-or-lead, with
+        "unsure is a lead" because a worker handed something that needed splitting came back
+        with half a job. A worker splits what it is given now — delegation is every agent's
+        — so the asymmetry is gone and unsure is a worker. `researcher` stays a routing
+        option, for the ask that is explicitly to look and report."""
         prompt = roles.load(self.repo)["dispatcher"].prompt
         self.assertIn("--role worker", prompt)
         self.assertIn("--role researcher", prompt)
-        self.assertIn("Unsure is a lead", prompt)
-        self.assertIn("Choosing a lead commits nobody to delegating anything", prompt)
+        self.assertIn("Unsure between them is a worker", prompt)
+        self.assertIn("a worker handed something larger than one agent splits it itself",
+                      prompt)
         self.assertIn("picking who owns the work, never what the work is", prompt)
 
     def test_a_dispatcher_puts_a_multi_line_ask_in_a_file_rather_than_flattening_it(self):
@@ -380,18 +380,16 @@ class RolesTest(unittest.TestCase):
         self.assertIn(".switchboard/briefs/", prompt)
         self.assertNotIn("notes/", prompt)
 
-    def test_a_lead_is_given_the_same_place_to_put_a_brief_as_a_dispatcher(self):
-        """The location was pinned for `dispatcher` and nowhere else, but a lead spawns
-        children too and hits the same newline refusal — so for a lead the path was pure
-        habit, and the habit was the tracked `notes/` that put ~48 briefs on main. Same
-        rule, stated for the other role that delegates; the prompt is again the whole
-        mechanism, so the prompt is what gets asserted.
+    def test_a_worker_is_given_the_same_place_to_put_a_brief_as_a_dispatcher(self):
+        """The location was pinned for `dispatcher` and nowhere else, but the other role
+        that delegates hits the same newline refusal — so the path was pure habit, and the
+        habit was the tracked `notes/` that put ~48 briefs on main. Same rule, stated for
+        the other role that delegates; the prompt is again the whole mechanism, so the
+        prompt is what gets asserted.
 
-        The "not notes/" half is scoped to the sentence that says where a brief goes,
-        rather than to the whole prompt: since 2026-08-19 the lead is also told what may be
-        committed to the tracked `notes/` tree, which is a different rule about the same
-        directory and would otherwise have to be worded around this assertion."""
-        prompt = roles.load(self.repo)["lead"].prompt
+        Asked of `worker` since #326: `lead` is no longer shipped and the worker is the
+        general-purpose role that delegates."""
+        prompt = roles.load(self.repo)["worker"].prompt
         self.assertIn(".switchboard/briefs/", prompt)
         self.assertIn("brief.md", prompt)
         brief = next(s for s in prompt.split(". ") if "brief.md" in s)
@@ -408,7 +406,7 @@ class RolesTest(unittest.TestCase):
         shared = ("`.switchboard/notes/<your agent name>-<topic>.md` under\n"
                   "the root of the checkout you are working in, creating "
                   "`.switchboard/notes/` if it is not\nthere")
-        for name in ("researcher", "qa", "reviewer"):
+        for name in ("researcher", "reviewer"):    # `qa` folded into `worker` (#326)
             with self.subTest(role=name):
                 self.assertIn(" ".join(shared.split()), " ".join(r[name].prompt.split()))
 
@@ -418,60 +416,71 @@ class RolesTest(unittest.TestCase):
         both are told the tracked tree is entered deliberately — folded into a doc that is
         already maintained, or cited by code or a test — and never as the default outcome
         of a research, qa or review task."""
-        r = roles.load(self.repo)
-        for name in ("lead", "reviewer"):
-            with self.subTest(role=name):
-                prompt = " ".join(r[name].prompt.split())
-                self.assertIn("is a promotion", prompt)
-                self.assertIn("tracked `notes/` tree", prompt)
+        # `lead` carried the same clause until #326 stopped shipping that role; the
+        # reviewer is the shipped committer of findings.
+        prompt = " ".join(roles.load(self.repo)["reviewer"].prompt.split())
+        self.assertIn("is a promotion", prompt)
+        self.assertIn("tracked `notes/` tree", prompt)
 
-    def test_a_lead_is_told_the_dispatcher_role_is_not_one_of_its_options(self):
-        """The roles fragment every agent gets is generated from the role table, so it
-        advertises `dispatcher` as a name `--role` takes — and it is one: nothing refuses
-        it, by the same decision that refuses no other dispatcher behaviour. A nested agent
-        given the top's prompt would be told to hold nothing while its children landed as
-        tabs, so the role that does the spawning is told not to."""
-        prompt = roles.load(self.repo)["lead"].prompt
-        self.assertIn("`dispatcher`", prompt)
-        self.assertIn("only a human starting one creates it", prompt)
+    # REMOVED BY #326, with the prompt they pinned. `lead` is no longer a shipped role —
+    # `worker` is the general-purpose default that delegates — so there is no shipped file
+    # left to assert these against:
+    #
+    #   test_a_lead_is_told_the_dispatcher_role_is_not_one_of_its_options
+    #   test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise (see the worker
+    #       test below: the file-ownership rule moved into `worker.md` with the fold)
+    #   test_a_lead_keeps_routine_upward_messages_in_its_subtree
+    #   test_qa_reads_the_evidence_that_exists_instead_of_rerunning_it
+    #
+    # This repo keeps the three prompts as its own custom roles under `.switchboard/roles/`
+    # for a fleet already running on them; that directory is per-machine and gitignored, so
+    # nothing in the suite can read it.
 
-    def test_a_lead_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
-        """DESIGN-TRUTH: "Shared placement does not determine decomposition".
-        Serialising overlap was already taught; assigning ownership up front — the half
-        that prevents the overlap — was not."""
-        prompt = roles.load(self.repo)["lead"].prompt
+    def test_a_worker_is_told_to_assign_disjoint_files_not_just_to_serialise(self):
+        """DESIGN-TRUTH: "Shared placement does not determine decomposition". Serialising
+        overlap was already taught; assigning ownership up front — the half that prevents
+        the overlap — was not. It was `lead.md`'s until #326 folded the delegating default
+        into `worker`."""
+        prompt = roles.load(self.repo)["worker"].prompt
         self.assertIn("disjoint", prompt)
         self.assertIn("share your worktree", prompt)
-        self.assertIn("Serialise", prompt)      # and the half that was already right
+        self.assertIn("Serialise", prompt)
 
-    # -- the dispatcher / lead split --------------------------------------
+    # -- the dispatcher / worker split ------------------------------------
 
     def test_both_halves_of_the_split_ship_and_may_delegate(self):
-        """One role became two: `dispatcher` at the top, `lead` everywhere nested. Both
-        spawn agents, which is what matters — a half of the split that cannot delegate is a
-        half that cannot do its job.
+        """One role became two: `dispatcher` at the top, and the agent that owns a task
+        everywhere nested — `lead` until #326, `worker` since. Both spawn agents, which is
+        what matters — a half of the split that cannot delegate is a half that cannot do
+        its job. Since #326 EVERY role spawns, which makes this the weaker claim it should
+        always have been.
 
         Asked of the capability bundle since C1 retired `delegate: bool`. Same question,
         same answer: "may this role spawn" is `spawn` in its default set."""
         r = roles.load(self.repo)
-        for name in ("dispatcher", "lead"):
+        for name in ("dispatcher", "worker"):
             with self.subTest(role=name):
                 self.assertIn(name, r)
                 self.assertIn(roles.CAP_SPAWN, r[name].capabilities)
                 self.assertTrue(r[name].prompt)
 
-    def test_the_retired_name_resolves_to_the_lead_and_not_to_the_fallback(self):
-        """`--role orchestrator` gets typed out of muscle memory long after the rename.
-        Unaliased it would inherit `fallback_role` (`worker`), which holds no `spawn` —
-        so the one name that used to mean "an agent that splits work" would silently spawn
-        an agent that cannot spawn anything. The alias resolves it all the way: the Role
-        that comes back IS the lead, name included, so the board, the prompt and the
-        stored row agree."""
+    def test_every_retired_role_name_resolves_to_the_worker(self):
+        """`--role lead` gets typed out of muscle memory long after a rename, and #326
+        retired four names at once (`lead`, `builder`, `qa`, `py-qa`) beside the older
+        `orchestrator`. Unaliased, each would be REFUSED as unknown — so the migration is a
+        row per name in `[vocabulary] role_aliases`, and it resolves all the way: the Role
+        that comes back IS the worker, name included, so the board, the prompt and the
+        stored row agree.
+
+        A repo that keeps one of them as a role of its own keeps it: `roles.get` looks in
+        the role table before the alias table."""
         r = roles.load(self.repo)
-        got = roles.get(r, "orchestrator")
-        self.assertEqual(got.name, "lead")
-        self.assertIn(roles.CAP_SPAWN, got.capabilities)
-        self.assertEqual(got.prompt, r["lead"].prompt)
+        for retired in ("orchestrator", "lead", "builder", "qa", "py-qa"):
+            with self.subTest(role=retired):
+                got = roles.get(r, retired)
+                self.assertEqual(got.name, "worker")
+                self.assertIn(roles.CAP_SPAWN, got.capabilities)
+                self.assertEqual(got.prompt, r["worker"].prompt)
 
     def test_a_repo_can_write_an_alias_of_its_own(self):
         """The layering that `[vocabulary]` claims and that `roles.get` was not honouring:
@@ -482,10 +491,10 @@ class RolesTest(unittest.TestCase):
         in this system does."""
         (self.repo / ".switchboard").mkdir(exist_ok=True)
         (self.repo / ".switchboard" / "settings.toml").write_text(
-            "[vocabulary]\nrole_aliases = { foreman = \"lead\" }\n")
+            "[vocabulary]\nrole_aliases = { foreman = \"worker\" }\n")
         r = roles.load(self.repo)
-        self.assertEqual(roles.get(r, "foreman", self.repo).name, "lead")
-        self.assertEqual(roles.get(r, "orchestrator", self.repo).name, "lead")
+        self.assertEqual(roles.get(r, "foreman", self.repo).name, "worker")
+        self.assertEqual(roles.get(r, "orchestrator", self.repo).name, "worker")
 
     def test_an_unknown_role_is_refused_and_points_at_the_live_vocabulary(self):
         """Phase 1: an undefined `--role` used to be a role. It inherited the fallback's
@@ -541,7 +550,7 @@ class RolesTest(unittest.TestCase):
         that left the other would restore the contradiction with nothing failing."""
         every = " ".join([config.protocol(self.repo)]
                          + [r.prompt for r in roles.load(self.repo).values()])
-        lead = roles.load(self.repo)["lead"].prompt
+        owner = roles.load(self.repo)["worker"].prompt
         for retired in ("get other agents to do the work rather than doing it yourself",
                         "Do not do the work yourself",
                         "Do not read the codebase yourself",
@@ -549,27 +558,17 @@ class RolesTest(unittest.TestCase):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, every)
         # And the positive half, so the absence cannot be satisfied by saying nothing.
-        self.assertIn("Owning it means doing it", lead)
-        self.assertIn("That is authority, not an instruction", lead)
+        # Asked of `worker` since #326: it is the role that owns a task now.
+        self.assertIn("You are given one outcome and you own it", owner)
+        self.assertIn("it is not a reason to fan work out that one agent could carry",
+                      owner)
         # The one delegation nothing may make optional.
-        self.assertIn("reviewed by a fresh agent that did not write it", lead)
+        self.assertIn("reviewed by a fresh agent that did not write it", owner)
 
     def test_a_worker_gates_done_on_the_fresh_review(self):
         prompt = " ".join(roles.load(self.repo)["worker"].prompt.split())
         self.assertIn("reviewed by a fresh agent that did not write it", prompt)
         self.assertIn("before you call `sb done`", prompt)
-
-    def test_a_lead_keeps_routine_upward_messages_in_its_subtree(self):
-        prompt = " ".join(roles.load(self.repo)["lead"].prompt.split())
-        for phrase in (
-            "universal rule against progress narration governs what you send upward",
-            "Routine fan-out arrivals",
-            "merge-order coordination you resolved with your own children",
-            "final `sb done` rather than sending them one at a time",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, prompt)
-        self.assertNotIn("Message your parent only when something is parent-actionable", prompt)
 
     def test_the_protocol_forbids_quietly_doing_less_than_was_asked(self):
         """The other direction of scope, and the one that was ungoverned: "do only what you
@@ -601,28 +600,22 @@ class RolesTest(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, " ".join(role.prompt.split()))
 
-    def test_qa_reads_the_evidence_that_exists_instead_of_rerunning_it(self):
-        """DESIGN-TRUTH: "QA is used only for a specialized environment, perspective or
-        scenario that adds coverage; it is not the routine test runner." The old prompt
-        described a routine post-implementation stage, which is the slow loop that separates
-        a failure from the agent that could fix it. Both halves are pinned: whose the
-        ordinary tests are, and what qa does with evidence already bound to the commit."""
-        qa = " ".join(roles.load(self.repo)["qa"].prompt.split())
-        self.assertIn("the ordinary tests and builds are the author's", qa)
-        self.assertIn("Read what was already run on this commit and take it", qa)
-
     def test_planner_is_a_first_class_bounded_specialist(self):
         """The workflow repair chose a real configured role, not a researcher plus a model
         override and a grant that every caller has to reconstruct. The role owns the seed;
         the plugin command owns the detailed lifecycle."""
         planner = roles.load(self.repo)["planner"]
         self.assertEqual(planner.model, "strong")
-        self.assertEqual(planner.capabilities, frozenset({"spawn"}))
+        # The whole vocabulary since #326, like every other role: what a planner does and
+        # does not do is its prompt's, not a bundle's.
+        self.assertEqual(planner.capabilities, frozenset(roles.CAPABILITIES))
         said = " ".join(planner.prompt.split())
         self.assertIn("bounded specialist", said)
         self.assertIn("sb plugin plans planner", said)
         self.assertIn("Before reading the task brief", said)
-        self.assertNotIn("write-tracked", planner.capabilities)
+        # "It does not implement the plan" is the PROMPT's now, not a withheld
+        # `write-tracked` — that is what soft guidance means (#326).
+        self.assertIn("You do not implement the plan", said)
 
     def test_disabling_plans_removes_its_planner_role(self):
         """A plugin-specific role must not survive the commands its prompt tells it to use.
@@ -636,12 +629,9 @@ class RolesTest(unittest.TestCase):
         worker is the main agent for a whole job as often as a lead is, so the rule cannot
         live in one of them; and the diagnostic carve-out has to travel with it, or the rule
         reads as a ban on running anything while working."""
-        r = roles.load(self.repo)
-        for name in ("lead", "worker"):
-            with self.subTest(role=name):
-                said = " ".join(r[name].prompt.split())
-                self.assertIn("Make the whole change before you verify it", said)
-                self.assertIn("diagnostic", said)
+        said = " ".join(roles.load(self.repo)["worker"].prompt.split())
+        self.assertIn("Make the whole change before you verify it", said)
+        self.assertIn("diagnostic", said)
 
     def test_the_protocol_returns_missing_authority_not_multi_agent_work(self):
         """A universal size rule contradicted both roles whose configured authority is to
@@ -675,7 +665,7 @@ class RolesTest(unittest.TestCase):
         for canonical in ("--name", "sb waiting --all", "ONE short line"):
             with self.subTest(protocol=canonical):
                 self.assertIn(canonical, p)
-        for name in ("lead", "worker", "dispatcher"):
+        for name in ("worker", "dispatcher", "researcher"):
             said = r[name].prompt
             for restated in ("--name", "short line", "sb waiting", "--isolation own",
                              "sb merge"):
@@ -686,7 +676,7 @@ class RolesTest(unittest.TestCase):
         self.assertIn("isolation-at-the-spawn", rows)
         self.assertIn("merge-finished-isolated-child", rows)
 
-    def test_the_agent_tool_warning_is_universal_and_not_repeated_in_lead(self):
+    def test_the_agent_tool_warning_is_universal_and_not_repeated_in_a_role(self):
         p = config.protocol(self.repo)
         for phrase in (
             "always means a switchboard agent",
@@ -698,8 +688,6 @@ class RolesTest(unittest.TestCase):
         texts = [p] + [r.prompt for r in roles.load(self.repo).values()]
         self.assertEqual(1, sum(t.count("nobody can see those, message them, or resume them")
                                 for t in texts))
-        lead = roles.load(self.repo)["lead"].prompt
-        self.assertIn("switchboard meaning defined in the protocol", lead)
 
     def test_a_reviewers_fixes_stop_at_a_commit(self):
         """Seeding `write-tracked` made the reviewer the first role that produces commits,
@@ -713,15 +701,19 @@ class RolesTest(unittest.TestCase):
         self.assertIn("do not push", said)
         self.assertIn("do not open a pull request", said)
 
-    def test_a_dispatcher_and_a_lead_are_given_different_jobs(self):
+    def test_a_dispatcher_and_a_task_owner_are_given_different_jobs(self):
         """The one thing that justifies two prompts rather than one with a branch in it: a
-        dispatcher is built to hold nothing and a lead to hold everything about its task.
-        Asserted on the sentence each one opens with, so a merge that quietly re-unified
-        the two texts fails here."""
+        dispatcher is built to hold nothing and the agent it hands work to is built to hold
+        everything about its task. Asserted on the sentence each one opens with, so a merge
+        that quietly re-unified the two texts fails here.
+
+        The owner is `worker` since #326, and the dispatcher's own routing paragraph says
+        so — it offers `worker` and `researcher` and no longer a `lead`."""
         r = roles.load(self.repo)
         self.assertIn("hold no task", r["dispatcher"].prompt)
-        self.assertNotIn("hold no task", r["lead"].prompt)
-        self.assertIn("own one task from end to end", r["lead"].prompt)
+        self.assertNotIn("hold no task", r["worker"].prompt)
+        self.assertIn("You are given one outcome and you own it", r["worker"].prompt)
+        self.assertNotIn("`--role lead`", r["dispatcher"].prompt)
 
     # -- model tiers -----------------------------------------------------
 
@@ -752,21 +744,19 @@ class RolesTest(unittest.TestCase):
         r = roles.load(self.repo)
         want = {
             "dispatcher": ("claude", "claude-opus-4-8", "medium"),
-            "lead":       ("claude", "claude-opus-4-8", "medium"),
             "researcher": ("claude", "claude-sonnet-5", "medium"),
-            "qa":         ("claude", "claude-sonnet-5", "high"),
             "reviewer":   ("claude", "claude-sonnet-5", "high"),
             "worker":     ("claude", "claude-opus-5",   None),
-            "builder":    ("claude", "claude-opus-5",   "medium"),
             "planner":    ("claude", "claude-opus-5",   "high"),
         }
+        self.assertEqual(sorted(want), sorted(roles.load(self.repo)))
         got = {}
         for name in want:
             spec = roles.get(r, name).spec()
             got[name] = (spec.provider, spec.model, spec.effort)
         self.assertEqual(got, want)
 
-        self.assertEqual(roles.get(r, "qa").spec().cli_args(),
+        self.assertEqual(roles.get(r, "reviewer").spec().cli_args(),
                          ["--model", "claude-sonnet-5", "--effort", "high"])
         self.assertEqual(roles.get(r, "worker").spec().cli_args(),
                          ["--model", "claude-opus-5"])
@@ -794,7 +784,7 @@ class RolesTest(unittest.TestCase):
 
         settings.write_text("[routing]\ngpt_luna_direct_enabled = true\n")  # shipped default
         r = roles.load(self.repo)
-        for role in ("lead", "dispatcher", "reviewer"):
+        for role in ("dispatcher", "reviewer"):
             with self.subTest(role=role), \
                     self.assertRaises(models.ModelConfigError) as cm:
                 roles.get(r, role).spec(tier)

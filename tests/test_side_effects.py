@@ -106,7 +106,7 @@ class RepoMintedCapabilityTest(DeclaringFixture, unittest.TestCase):
         and the message still names it."""
         lead = self._lead()
         self._child("researcher-notes", file="notes.md", text="read only\n",
-                    role="researcher")
+                    role=self._narrow_role("reader", "spawn"))
         with self.assertRaises(ValueError) as cm:
             self.b.merge("researcher-notes", me=lead)
         self.assertIn("write-tracked", str(cm.exception))
@@ -152,7 +152,7 @@ class DoneBoundaryTest(DeclaringFixture, unittest.TestCase):
     def test_done_flags_an_isolated_agent_with_tracked_work_and_never_refuses(self):
         self._lead()
         self._child("researcher-notes", file="notes.md", text="read only\n",
-                    role="researcher")
+                    role=self._narrow_role("reader", "spawn"))
         # The report goes through — that is the whole asymmetry with `sb merge`.
         self.b.done("read the code", me="researcher-notes")
         self.assertEqual(self.b.done_flags, ["write-tracked"])
@@ -190,7 +190,7 @@ class DoneBoundaryTest(DeclaringFixture, unittest.TestCase):
         self.assertEqual(self.b.side_effect_capabilities(BOUNDARY_DONE), [])
         self._lead()
         self._child("researcher-notes", file="notes.md", text="read only\n",
-                    role="researcher")
+                    role=self._narrow_role("reader", "spawn"))
         self.b.done("read the code", me="researcher-notes")
         self.assertEqual(self.b.done_flags, [])
 
@@ -205,7 +205,7 @@ class BrokenTableTest(DeclaringFixture, unittest.TestCase):
         self.assertEqual(self.b.side_effect_capabilities(BOUNDARY_MERGE), [])
         self._lead()
         self._child("researcher-notes", file="notes.md", text="read only\n",
-                    role="researcher")
+                    role=self._narrow_role("reader", "spawn"))
         self.b.done("read the code", me="researcher-notes")
         self.assertEqual(self.b.done_flags, [])
         kinds = [e["kind"] for e in store.recent_events(self.db, limit=50)]

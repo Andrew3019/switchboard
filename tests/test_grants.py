@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from switchboard import roles as roles_mod  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard.broker import (  # noqa: E402
     CAP_DISPATCH, CAP_FORK, CAP_SPAWN, CAP_WRITE_TRACKED, HUMAN, Broker,
@@ -50,6 +51,18 @@ class Fixture:
     def spawn(self, parent: str, role: str, topic: str) -> str:
         return self.b.delegate("t", topic=topic, role=role, me=parent)
 
+    def narrow(self, name: str, *caps: str) -> str:
+        """A role template narrower than the vocabulary, handed to the broker directly.
+
+        SINCE #326 NOTHING ON DISK DECLARES ONE: roles are soft guidance, a definition's
+        `capabilities` list only widens, and every role resolves to everything. The grant
+        machinery is dormant rather than removed, and these tests are what keeps it
+        covered — so where one needs an agent that does NOT hold a capability, it narrows
+        the template itself. `researcher` and `worker` used to supply that difference; they
+        no longer do, and the property under test never depended on which role it was."""
+        self.b.roles[name] = roles_mod.Role(name=name, capabilities=frozenset(caps))
+        return name
+
     def held(self, name: str) -> set:
         return store.held_capabilities(self.db, name)
 
@@ -63,26 +76,26 @@ class IntersectionSeedingTest(Fixture, unittest.TestCase):
     is still bounded by possession)."""
 
     def test_a_spawn_seeds_the_full_template_beyond_the_spawner(self):
-        """The case the old ∩-rule refused, now deliberately allowed: a worker holding only
-        {spawn, write-tracked} spawns `--role lead`, and the child comes out a FULL lead —
-        `dispatch` and `fork` included — though the worker never held them. The spawner picks
-        the role; the role's template decides what the child holds."""
+        """The case the old ∩-rule refused, now deliberately allowed: a spawner holding
+        only {spawn} spawns a `worker`, and the child comes out with the whole template —
+        `dispatch` and `fork` included — though the spawner never held them. The spawner
+        picks the role; the role's template decides what the child holds."""
         top = self.top()
-        lead = self.spawn(top, "lead", "l")
-        worker = self.spawn(lead, "worker", "w")
-        self.assertEqual(self.held(worker), {CAP_WRITE_TRACKED, CAP_SPAWN})
-        child = self.spawn(worker, "lead", "sub")
-        self.assertEqual(self.held(child),
-                         {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK})
+        spawner = self.spawn(top, self.narrow("understudy", CAP_SPAWN), "u")
+        self.assertEqual(self.held(spawner), {CAP_SPAWN})
+        child = self.spawn(spawner, "worker", "sub")
+        self.assertEqual(self.held(child), set(roles_mod.CAPABILITIES))
 
-    def test_a_read_only_researcher_can_spawn_a_writable_child(self):
-        """The motivating case (Andrew, automode-block-stats): a `researcher` holds only
-        `spawn` and no `write-tracked`, yet a child it spawns of a role whose template holds
-        `write-tracked` — a `worker` here, a `builder` in practice, same mechanic — comes out
-        able to write, and the write gate agrees. The child gets its role template, not an
-        intersection with the researcher's set."""
+    def test_a_spawner_without_write_tracked_still_spawns_a_writable_child(self):
+        """The motivating case (Andrew, automode-block-stats), which used to be told with a
+        read-only `researcher`: a spawner holding only `spawn` and no `write-tracked` puts
+        up a child whose template holds it, and the child comes out able to write. The child
+        gets its role template, not an intersection with its spawner's set.
+
+        Since #326 no shipped role is short of `write-tracked`, so the narrow half is built
+        here rather than named — the mechanic is what this pins."""
         top = self.top()
-        r = self.spawn(top, "researcher", "r")
+        r = self.spawn(top, self.narrow("reader", CAP_SPAWN), "r")
         self.assertNotIn(CAP_WRITE_TRACKED, self.held(r))
         w = self.spawn(r, "worker", "w")
         self.assertIn(CAP_WRITE_TRACKED, self.held(w))
@@ -104,7 +117,7 @@ class IntersectionSeedingTest(Fixture, unittest.TestCase):
         top = self.top()
         w = self.spawn(self.spawn(top, "lead", "l"), "worker", "w")
         rows = store.capability_rows(self.db, w)
-        self.assertEqual([r["cap"] for r in rows], [CAP_SPAWN, CAP_WRITE_TRACKED])
+        self.assertEqual([r["cap"] for r in rows], sorted(roles_mod.CAPABILITIES))
         for row in rows:                               # both halves of the 2026-08-31 seed
             with self.subTest(cap=row["cap"]):
                 self.assertTrue(row["held"])
@@ -174,9 +187,8 @@ class GrantCommandTest(Fixture, unittest.TestCase):
         """No escalation past your own ceiling."""
         top = self.top()
         lead = self.spawn(top, "lead", "l")
-        w1 = self.spawn(lead, "worker", "w1")
-        self.b.grant(w1, CAP_SPAWN, me=lead)            # so it can have a subtree at all
-        w2 = self.spawn(w1, "worker", "w2")
+        w1 = self.spawn(lead, self.narrow("hand", CAP_SPAWN), "w1")
+        w2 = self.spawn(w1, self.narrow("scribe", CAP_SPAWN), "w2")
         self.assertNotIn(CAP_DISPATCH, self.passable(w1))
         with self.assertRaises(ValueError) as cm:
             self.b.grant(w2, CAP_DISPATCH, me=w1)
@@ -211,15 +223,16 @@ class GrantCommandTest(Fixture, unittest.TestCase):
         irrevocable, and an agent in a fresh clone resolves to HUMAN — "rowless ⇒ allow"
         would mean any clone bootstrap silently grants anything."""
         top = self.top()
-        w = self.spawn(self.spawn(top, "lead", "l"), "worker", "w")
+        w = self.spawn(self.spawn(top, "lead", "l"),
+                       self.narrow("hand", CAP_SPAWN), "w")
         self.b.require_capability(HUMAN, CAP_SPAWN)            # the gate: allowed
         with self.assertRaises(ValueError) as cm:
             self.b.grant(w, CAP_DISPATCH, me=HUMAN)            # the grant: refused
         self.assertIn("no row for you", str(cm.exception))
         with self.assertRaises(ValueError):
             self.b.grant(w, CAP_DISPATCH, me="ghost-not-in-store")
-        # `dispatch` and not `spawn`: a worker is seeded `spawn` since 2026-08-31, so
-        # granting it would leave nothing for the refusal to be visible in.
+        # A narrowed template, because since #326 every shipped role is seeded everything
+        # and a grant of any string would leave nothing for the refusal to be visible in.
         self.assertNotIn(CAP_DISPATCH, self.held(w))
 
     def test_an_unknown_capability_is_refused_rather_than_written(self):
@@ -230,7 +243,7 @@ class GrantCommandTest(Fixture, unittest.TestCase):
         for bad in ("wrte-tracked", "start", "sudo"):
             with self.subTest(cap=bad), self.assertRaises(ValueError):
                 self.b.grant(w, bad, delegable=True, me=top)
-        self.assertEqual(self.passable(w), {CAP_SPAWN, CAP_WRITE_TRACKED})
+        self.assertEqual(self.passable(w), set(roles_mod.CAPABILITIES))
 
     def test_the_top_is_never_a_target(self):
         top = self.top()
@@ -257,7 +270,7 @@ class NoSelfWideningTest(Fixture, unittest.TestCase):
         """The path the no-self-grant rule exists for: otherwise the split lasts as long as
         it takes to type one line."""
         top = self.top()
-        r = self.spawn(top, "researcher", "r")
+        r = self.spawn(top, self.narrow("reader", CAP_SPAWN), "r")
         self.b.grant(r, CAP_WRITE_TRACKED, delegable=True, me=top)
         with self.assertRaises(ValueError):
             self.b.grant(r, CAP_WRITE_TRACKED, me=r)
@@ -282,15 +295,14 @@ class DelegableTest(Fixture, unittest.TestCase):
     """`--delegable`: holding a cap and passing it on are separate. Exactly two read sites."""
 
     def test_the_motivating_case_from_163(self):
-        """A researcher (`{}`) granted `--delegable write-tracked` spawns a worker that CAN
-        write, while the researcher itself still cannot."""
+        """An agent holding only `spawn`, granted `--delegable write-tracked`, spawns a
+        worker that CAN write while it still cannot itself. Told with a narrowed template
+        since #326, because no shipped role supplies the "cannot" half any more."""
         top = self.top()
-        r = self.spawn(top, "researcher", "r")
-        # No `sb grant <r> spawn` any more: a researcher is seeded `spawn` since
-        # 2026-08-31, which is what makes fanning a read out its own decision.
+        r = self.spawn(top, self.narrow("reader", CAP_SPAWN), "r")
         self.b.grant(r, CAP_WRITE_TRACKED, delegable=True, me=top)
         w = self.spawn(r, "worker", "w")
-        self.assertEqual(self.held(w), {CAP_SPAWN, CAP_WRITE_TRACKED})
+        self.assertEqual(self.held(w), set(roles_mod.CAPABILITIES))
         self.b.require_capability(w, CAP_WRITE_TRACKED)               # the child may write
         with self.assertRaises(ValueError):
             self.b.require_capability(r, CAP_WRITE_TRACKED)           # the hub may not
@@ -302,12 +314,12 @@ class DelegableTest(Fixture, unittest.TestCase):
         top = self.top()
         lead = self.spawn(top, "lead", "l")
         w = self.spawn(lead, "worker", "w")
-        self.assertEqual(self.held(w), {CAP_SPAWN, CAP_WRITE_TRACKED})
+        self.assertEqual(self.held(w), set(roles_mod.CAPABILITIES))
         self.b.grant(w, CAP_WRITE_TRACKED, delegable=True, me=lead)   # over a held cap
         self.assertIn(CAP_WRITE_TRACKED, self.held(w))                # still held
         self.assertIn(CAP_WRITE_TRACKED, self.passable(w))            # and now passable
 
-        r = self.spawn(lead, "researcher", "r")
+        r = self.spawn(lead, self.narrow("reader", CAP_SPAWN), "r")
         self.b.grant(r, CAP_WRITE_TRACKED, delegable=True, me=lead)
         self.assertNotIn(CAP_WRITE_TRACKED, self.held(r))
         self.b.grant(r, CAP_WRITE_TRACKED, me=lead)                   # then the held form
@@ -337,7 +349,7 @@ class TopExemptionTest(Fixture, unittest.TestCase):
 
     def test_the_top_may_grant_a_cap_it_does_not_hold_as_delegable(self):
         top = self.top()
-        r = self.spawn(top, "researcher", "r")
+        r = self.spawn(top, self.narrow("reader", CAP_SPAWN), "r")
         self.assertNotIn(CAP_WRITE_TRACKED, self.passable(top))
         self.b.grant(r, CAP_WRITE_TRACKED, delegable=True, me=top)
         self.assertIn(CAP_WRITE_TRACKED, self.passable(r))
@@ -354,7 +366,7 @@ class TopExemptionTest(Fixture, unittest.TestCase):
         researcher, so the rule is enforced where it bites: a cap the GRANTER does not hold
         can only ever be passed through."""
         top = self.top()
-        r = self.spawn(top, "researcher", "r")
+        r = self.spawn(top, self.narrow("reader", CAP_SPAWN), "r")
         with self.assertRaises(ValueError) as cm:
             self.b.grant(r, CAP_WRITE_TRACKED, me=top)     # held, and the top holds none
         self.assertIn("--delegable", str(cm.exception))
@@ -370,9 +382,8 @@ class TopExemptionTest(Fixture, unittest.TestCase):
         forms refused."""
         top = self.top()
         lead = self.spawn(top, "lead", "l")
-        w = self.spawn(lead, "worker", "w")
-        self.b.grant(w, CAP_SPAWN, me=lead)               # a worker that fans out
-        kid = self.spawn(w, "worker", "k")
+        w = self.spawn(lead, self.narrow("hand", CAP_SPAWN, CAP_WRITE_TRACKED), "w")
+        kid = self.spawn(w, self.narrow("scribe", CAP_SPAWN, CAP_WRITE_TRACKED), "k")
         self.assertNotIn(CAP_FORK, self.passable(w))
         for delegable in (False, True):
             with self.subTest(delegable=delegable), self.assertRaises(ValueError):
@@ -383,14 +394,13 @@ class TopExemptionTest(Fixture, unittest.TestCase):
         """§2.3 end to end: a top equips a read-only researcher to seed a full lead, while
         the researcher's own held set stays `{spawn}`."""
         top = self.top()
-        r = self.spawn(top, "researcher", "r")
-        self.b.grant(r, CAP_SPAWN, me=top)                       # held: the top holds spawn
+        r = self.spawn(top, self.narrow("reader", CAP_SPAWN), "r")
         for cap in (CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK):
             self.b.grant(r, cap, delegable=True, me=top)
         self.assertEqual(self.passable(r),
                          {CAP_SPAWN, CAP_DISPATCH, CAP_WRITE_TRACKED, CAP_FORK})
         self.assertEqual(self.held(r), {CAP_SPAWN})
-        lead = self.spawn(r, "lead", "l")
+        lead = self.spawn(r, "worker", "l")
         # THE FULL LEAD TEMPLATE, `fork` included — which is what "seeds a full lead" was
         # always meant to say (obj. 27). It arrives by the ∩ doing its job: `fork` is in
         # `passable(r)` above, and since D2 it is in the lead template's effective set too.
@@ -411,10 +421,10 @@ class RestoreTest(Fixture, unittest.TestCase):
     def test_grants_are_dropped_and_the_seed_comes_back(self):
         top = self.top()
         lead = self.spawn(top, "lead", "l")
-        w = self.spawn(lead, "worker", "w")
-        # `dispatch` and not `spawn`: a worker is SEEDED `spawn` since 2026-08-31, and a
-        # grant of a cap the seed already carries would survive the restore for the wrong
-        # reason — the test needs a cap only the grant put there.
+        # A narrowed template: since #326 every shipped role is seeded the whole vocabulary,
+        # and a grant of a cap the seed already carries would survive the restore for the
+        # wrong reason — the test needs a cap only the grant put there.
+        w = self.spawn(lead, self.narrow("hand", CAP_SPAWN, CAP_WRITE_TRACKED), "w")
         self.b.grant(w, CAP_DISPATCH, reason="fan out", me=lead)
         self.assertEqual(self.held(w), {CAP_WRITE_TRACKED, CAP_SPAWN, CAP_DISPATCH})
         self._closed(w)
@@ -449,8 +459,8 @@ class RestoreTest(Fixture, unittest.TestCase):
         that puts it right (`sb grant`) can be typed by whoever notices first."""
         top = self.top()
         lead = self.spawn(top, "lead", "l")
-        w = self.spawn(lead, "worker", "w")
-        self.b.grant(w, CAP_DISPATCH, me=lead)         # not `spawn`: that is now seeded
+        w = self.spawn(lead, self.narrow("hand", CAP_SPAWN, CAP_WRITE_TRACKED), "w")
+        self.b.grant(w, CAP_DISPATCH, me=lead)         # a cap its template does not carry
         self._closed(w)
         self.b.restore(w)
         self.assertIn("not carried over", self.b.restore_note or "")
@@ -465,7 +475,7 @@ class RestoreTest(Fixture, unittest.TestCase):
         self._closed(w)
         self.b.restore(w)
         self.assertIsNone(self.b.restore_note)
-        self.assertEqual(self.held(w), {CAP_SPAWN, CAP_WRITE_TRACKED})
+        self.assertEqual(self.held(w), set(roles_mod.CAPABILITIES))
         self.assertEqual(store.unread_for(self.db, w), [])
 
 

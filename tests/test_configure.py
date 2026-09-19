@@ -161,12 +161,18 @@ class CeilingTest(Fixture, unittest.TestCase):
         Written against `agents.parent` directly because the promote verb is F2's and this
         property has to hold whatever eventually rewrites that column.
         """
-        self.agent("lead-x", role="lead")
+        # A role with a raised ceiling of its own. `lead` was the shipped one until #326
+        # stopped shipping it; the CEILING mechanism is untouched by that change — it is a
+        # role template's `[config_ceiling]`, not a capability — so the test declares the
+        # role it needs rather than borrowing one.
+        self.b.roles["longrun"] = roles_mod.Role(name="longrun",
+                                                 config_ceiling={"debounce": 900})
+        self.agent("lead-x", role="longrun")
         self.agent("plain", role="worker")
         self.agent("w1", role="worker", parent="plain")
 
-        # A lead may go to 900; the worker below it may not, and that is true before and
-        # after it is re-homed under the lead that can.
+        # A `longrun` may go to 900; the worker below it may not, and that is true before
+        # and after it is re-homed under the agent that can.
         self.assertEqual(self.b.configure("debounce", "900", me="lead-x")["value"], 900)
         with self.assertRaises(ValueError):
             self.b.configure("debounce", "900", me="w1")
@@ -184,7 +190,9 @@ class CeilingTest(Fixture, unittest.TestCase):
         """What makes the ceiling a ceiling rather than a check somebody once passed. A
         role narrowed after an agent tuned itself would otherwise leave that agent running
         past the new bound for the rest of its life."""
-        self.agent("l1", role="lead")
+        self.b.roles["longrun"] = roles_mod.Role(name="longrun",
+                                                 config_ceiling={"debounce": 900})
+        self.agent("l1", role="longrun")
         self.b.configure("debounce", "900", me="l1")
         cfg = roles_mod.effective_config({"debounce": "900"}, {"debounce": 300}, self.repo)
         self.assertEqual(cfg["debounce"], 300)

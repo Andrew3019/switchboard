@@ -17,6 +17,29 @@ prompt text and cannot run; a plugin is Python and can. `.md` versus `.py` is th
 sorting rule, and it is why the two now have separate names, separate directories, and
 separate bindings files. See `design/PLUGIN-REDESIGN.md` §1.
 
+Instructions, and nothing else
+------------------------------
+
+A preset never selects a role, a model, permissions, a place in the hierarchy or runtime
+configuration (INV-61, spec §5). It is a procedure — `adversarial`, `verify`, this repo's
+`house-rules` — and the whole point of keeping it to that is that the SAME preset then
+applies to any role on any model, and applying one cannot change what an agent IS.
+
+That is already the shape of this module rather than a rule bolted onto it: a preset has
+no fields, so there is nowhere to put a role or a model. Two consequences worth naming,
+because both look like counter-examples and neither is one:
+
+- `presets.toml` has a `[roles]` table. That BINDS a preset to a role — it says which
+  agents get these instructions — and it is the opposite of a preset choosing a role. The
+  choice still belongs to whoever types `--role`. See `defaults/presets.toml`, which keeps
+  the bindings out of `roles.toml` for exactly this reason.
+- A preset's TEXT may well tell its reader to `sb delegate --role reviewer`. That is an
+  instruction about some OTHER agent, which is what a procedure is made of. It selects
+  nothing about the agent holding the preset.
+
+`body()` is where the one shape that would break this is refused: TOML front matter, which
+is how a ROLE file declares its model and means nothing at all here.
+
 Why files rather than lines in the protocol:
 
 - The protocol is what EVERY agent needs. A preset is what SOME agents need, and paying
@@ -148,6 +171,37 @@ def flatten(text: str) -> str:
     return config.flatten(text)
 
 
+# What a preset may NOT declare — the whole of INV-61, enforced where the file is read.
+#
+# A preset is a reusable set of INSTRUCTIONS and nothing else: it never selects a role, a
+# model, permissions, a place in the hierarchy or runtime configuration (spec §5). Those are
+# separate choices, which is what lets one preset apply to any role on any model.
+#
+# Structurally a preset already cannot carry them: there is no field anywhere in this module
+# to put one in, and every path below turns the file into prompt TEXT. What is missing without
+# this check is the FRONT MATTER case. `config.front_matter` is how a ROLE file declares
+# `model = "careful"`, the notation is shipped and documented (`sb presets sb-setup`), and a
+# preset with a `+++` block gets none of that meaning — `flatten` would ship the raw TOML into
+# a system prompt as prose. So the one shape that looks like a bundled preset is refused by
+# name, rather than half-working.
+#
+# Refused however it arrived, unconditionally, for the same reason a bare plugin name is
+# (see the module docstring): this is a statement about the FILE, and there is no reading
+# under which the TOML was meant to be prompt text. Unlike a missing `@fragment`, it is
+# wrong in every repo that reads it, so surviving the spawn would be the worse outcome.
+def body(path: Path) -> str:
+    """One preset file's raw text, refused if it tries to be more than instructions."""
+    raw = path.read_text()
+    declared, _ = config.front_matter(raw)
+    if declared:
+        raise validate.Invalid(
+            f"{path}: a preset is instructions only and has no fields — it cannot select a "
+            f"role, model, permissions or configuration (spec §5). Delete the front matter "
+            f"({', '.join(sorted(declared))}); role and model are named at spawn with "
+            f"--role/--model, and configuration lives in the repo's config.")
+    return raw
+
+
 def text(repo: Path, name: str) -> tuple[Path, str]:
     """One preset's prose, and the file it came from. Raises `KeyError` if there is none.
 
@@ -164,7 +218,7 @@ def text(repo: Path, name: str) -> tuple[Path, str]:
     if name not in found:
         raise KeyError(name)
     path = found[name]
-    return path, config.prose(path.read_text())
+    return path, config.prose(body(path))
 
 
 def bindings(repo: Path) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
@@ -217,7 +271,7 @@ def resolve(
             line = _fragment(repo, n[len(SIGIL):],
                              explicit=n in explicit, on_event=on_event)
         elif n in found:
-            line = flatten(found[n].read_text())
+            line = flatten(body(found[n]))
         elif n in plugins_mod.enabled(repo):
             # The one-word-string failure, made loud. Not conditioned on `explicit`: a
             # bare plugin name is wrong however it arrived.
