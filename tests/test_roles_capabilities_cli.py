@@ -70,17 +70,29 @@ class RolesListingTest(ListingSandbox):
                          sorted(roles_mod.load(self.repo)))
 
     def test_a_named_role_exposes_tier_template_ceiling_and_prompt(self):
-        """The five fields, and only those: this is the readout a planner reads a role
-        off, so the shape is the contract."""
+        """The seven fields, and only those: this is the readout a planner reads a role
+        off, so the shape is the contract.
+
+        Two of them split the capability line into its two halves. Since #326 the effective
+        set is the shipped default under every name, so `capabilities` alone reads as nine
+        roles that happen to agree rather than as one default they all inherit — and the
+        only per-role fact in it is what a definition ADDS.
+        """
         defined = roles_mod.load(self.repo)
         name = sorted(defined)[0]
         got = self.data("roles", name)
-        self.assertEqual(sorted(got), ["capabilities", "config_ceiling", "model",
+        self.assertEqual(sorted(got), ["capabilities", "capabilities_added",
+                                       "capabilities_default", "config_ceiling", "model",
                                        "name", "prompt"])
         self.assertEqual(got["name"], name)
         self.assertEqual(got["model"], defined[name].model)
         self.assertEqual(got["capabilities"], sorted(roles_mod.template_capabilities(
             defined, name, is_top=False, repo=self.repo)))
+        self.assertEqual(got["capabilities_default"],
+                         sorted(roles_mod.ROLE_CAPABILITIES))
+        self.assertEqual(got["capabilities_added"],
+                         [c for c in got["capabilities"]
+                          if c not in roles_mod.ROLE_CAPABILITIES])
         self.assertEqual(got["config_ceiling"],
                          roles_mod.template_ceiling(defined, name, repo=self.repo))
         self.assertEqual(got["prompt"], defined[name].prompt)

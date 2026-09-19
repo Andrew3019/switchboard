@@ -64,6 +64,14 @@ guidance_file = "guidance.toml"
 # pointed at that.
 plugins_file  = "plugins.toml"
 plugins_dir   = "plugins"
+# The step library and the plan templates, as a repo layers them (spec §10: "repo-defined
+# roles, presets and step kinds are repo configuration in the same two-level scheme"). Read
+# under BOTH `shared_dir` and `repo_dir`, after the `plans` plugin's own directory, keyed by
+# filename with a later layer replacing the earlier one of that name — the same rule presets
+# use. A definition's filename is the step kind it mints, so this is how a repo gets a
+# `deploy` kind without editing switchboard. See `config.step_library_dirs`.
+step_library_dir   = "plans/library"
+step_templates_dir = "plans/templates"
 
 # Plugin state for `SCOPE = "user"` — per machine rather than per repo, for a plugin whose
 # data is a fact about the tool and not about whichever repo you were standing in. Repo

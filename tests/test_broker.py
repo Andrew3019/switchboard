@@ -32,7 +32,18 @@ from switchboard.broker import (  # noqa: E402
     HUMAN, INTERRUPT, MAIN, MAIN_NAME, NEXT_TURN, WHEN_IDLE, Broker, PaneNotReady,
     SbUnpinned, TaskUndelivered, Undeliverable,
 )
-from switchboard.herdr import Agent, HerdrError  # noqa: E402
+from switchboard.herdr import Agent, HerdrError, section_body  # noqa: E402
+
+
+def bodies(prompts) -> list[str]:
+    """The spawned fragments without their `## <label>` headings (INV-62).
+
+    Every assertion below that names a sentence in the prompt goes through this. The label
+    is the one thing the assembly adds to a fragment, so stripping it is what keeps these
+    tests about the TEXT the config layer produced rather than about the heading the
+    delivery layer puts over it — `broker.segment_label` and its own tests own that.
+    """
+    return [section_body(p) for p in prompts]
 
 
 class FakeHerdrAPI:
@@ -842,9 +853,14 @@ class BrokerTest(unittest.TestCase):
             role="worker", name="worker-t", parent="orch", workspace="ws",
             path=self.repo, task="t")
         self.assertEqual(self.h.started, [])
-        expected = [s["text"] for s in manifest["segments"] if s["included"]]
+        # The LABELLED sections, because that is what the spawn is handed: the two paths
+        # share `broker.labelled_segments`, and comparing bare texts here would pass while
+        # the live spawn delivered a shape the preview never showed (INV-62).
+        expected = broker_mod.labelled_segments(manifest["segments"])
         self.b.delegate("t", topic="t", role="worker", me="orch")
         self.assertEqual(self.h.started[-1]["prompts"], expected)
+        self.assertEqual(bodies(expected),
+                         [s["text"] for s in manifest["segments"] if s["included"]])
         self.assertEqual(manifest["delivery"]["initial_task"],
                          "separate first user message")
         self.assertTrue(manifest["external_boundaries"])
@@ -1134,7 +1150,9 @@ class BrokerTest(unittest.TestCase):
         self._start_top()
         prompts = self.h.started[-1]["prompts"]
         for p in prompts:                      # the rule Herdr.start_agent enforces
-            self.assertNotIn("\n", p)
+            # The BODY: one newline per fragment is now put there on purpose, by the
+            # section label, and `section_body` is the exemption the rule itself names.
+            self.assertNotIn("\n", section_body(p))
         joined = " ".join(prompts)
         self.assertIn("ship it", joined)
         self.assertIn("when the tests are green", joined)
@@ -4540,7 +4558,7 @@ class BrokerTest(unittest.TestCase):
     def test_every_agent_gets_the_protocol_at_spawn(self):
         from switchboard.broker import PROTOCOL_LINE
         self.b.delegate("t", topic="t", role="worker", me="orch")
-        self.assertIn(PROTOCOL_LINE, self.h.started[0]["prompts"])
+        self.assertIn(PROTOCOL_LINE, bodies(self.h.started[0]["prompts"]))
 
     def test_protocol_is_single_line(self):
         """herdr rejects newlines in agent args outright — length is fine."""
@@ -4555,7 +4573,7 @@ class BrokerTest(unittest.TestCase):
         from switchboard import broker as bmod
         with mock.patch.object(bmod, "PROTOCOL_LINE", "NEW PROTOCOL v2"):
             self.b.delegate("t", topic="t", role="worker", me="orch")
-        self.assertIn("NEW PROTOCOL v2", self.h.started[-1]["prompts"])
+        self.assertIn("NEW PROTOCOL v2", bodies(self.h.started[-1]["prompts"]))
 
     def test_a_repo_can_replace_the_protocol_and_it_reaches_the_spawn(self):
         """The config layer, end to end: a file in this repo, a flag on this spawn.
@@ -4568,7 +4586,7 @@ class BrokerTest(unittest.TestCase):
         (self.repo / ".switchboard" / "protocol.md").write_text("# ours\n\nSAY LESS.\n")
         Broker(self.db, self.h, repo=self.repo).delegate(
             "t", topic="t", role="worker", me="orch")
-        prompts = self.h.started[-1]["prompts"]
+        prompts = bodies(self.h.started[-1]["prompts"])
         self.assertIn("SAY LESS.", prompts)
         self.assertNotIn(PROTOCOL_LINE, prompts)
 
@@ -4578,7 +4596,8 @@ class BrokerTest(unittest.TestCase):
             '[spawn]\nidentity = "You are {name}. {parent} sent you."\n')
         Broker(self.db, self.h, repo=self.repo).delegate(
             "t", role="worker", name="w9", me="orch")
-        self.assertIn("You are w9. orch sent you.", self.h.started[-1]["prompts"])
+        self.assertIn("You are w9. orch sent you.",
+                      bodies(self.h.started[-1]["prompts"]))
 
     def test_a_repo_role_prompt_reaches_the_spawn(self):
         """A markdown file in `.switchboard/roles/`, straight onto the agent's system
@@ -4588,7 +4607,7 @@ class BrokerTest(unittest.TestCase):
         (d / "worker.md").write_text("+++\n+++\n\nMeasure twice.\n")
         Broker(self.db, self.h, repo=self.repo).delegate(
             "t", topic="t", role="worker", me="orch")
-        self.assertIn("Measure twice.", self.h.started[-1]["prompts"])
+        self.assertIn("Measure twice.", bodies(self.h.started[-1]["prompts"]))
 
     # -- worktree config links -------------------------------------------
 

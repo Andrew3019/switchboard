@@ -70,26 +70,26 @@ its layout is load-bearing in a way no bound preset's is.
 A procedure, not a mood. Use it when you are asked for an adversarial review of something —
 a design, a plan, a change.
 
-Every round of it is a spawn, so it is run by a lead put up for it. Which reader you are
-decides what you do, and there are three cases:
+Every round of it is a spawn, so it is run by one agent that owns the whole of it. Which
+reader you are decides what you do, and there are three cases:
 
-- You were spawned to run this review. You are that lead: the loop below is yours, and you
-  do not put up another lead for it.
-- You were asked for one while doing something else, and you can spawn — which includes a
-  worker or a builder mid-change, because the review of your own work is arranged by you
+- You were spawned to run this review. You are that owner: the loop below is yours, and you
+  do not put up another agent for it.
+- You were asked for one while doing something else, and you can spawn — which is every
+  agent, including one mid-change, because the review of your own work is arranged by you
   and not asked of your parent. Run the rounds yourself if you have the room for them: you
-  already hold the artifact, and a lead put up to type the same spawns is a boundary that
-  buys nothing. Delegate one lead when the loop would eat the context your own job needs,
-  or when it will run long enough to want its own owner — `sb delegate --role lead`, giving
-  it the artifact, where it is, and "read `sb presets adversarial` and run it". It then owns
-  the rounds, you report from what it reports, and you do not run rounds of your own beside
-  it.
-- You genuinely cannot spawn — a role whose template holds no `spawn`. Then you cannot run
-  this and should not try: `sb delegate` refuses you, and
+  already hold the artifact, and an agent put up to type the same spawns is a boundary that
+  buys nothing. Delegate one owner when the loop would eat the context your own job needs,
+  or when it will run long enough to want its own owner — `sb delegate --role worker`,
+  giving it the artifact, where it is, and "read `sb presets adversarial` and run it". It
+  then owns the rounds, you report from what it reports, and you do not run rounds of your
+  own beside it.
+- You genuinely cannot spawn — `sb delegate` refuses you. No role causes that any more, so
+  it takes something unusual, and when it happens you cannot run this and should not try:
   there is nothing left of the procedure once the spawns are removed. Say so where it will
   be read, naming the artifact and where it is, and get on with the rest of your task.
 
-The loop, for the lead running it. Keep one proposer for the whole review: the agent that
+The loop, for whoever is running it. Keep one proposer for the whole review: the agent that
 produced the artifact, or a fresh one handed it, whose job across every round is to defend
 or revise. Keep it alive between rounds so it remembers what it already tried and why it
 rejected it.

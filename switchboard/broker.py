@@ -191,6 +191,66 @@ LIFECYCLE_PROMPTS = (
      "children up to report here"),
 )
 
+# PROMPT SEPARATION (INV-62, spec §5). Starting configuration stays conceptually separate
+# rather than mashed into one opaque generated prompt:
+#
+#     Role guidance | Custom agent prompt | Preset A | Preset B | Task/Plan assignment
+#
+# The assembly has always BEEN a list of segments — `effective_instructions` below builds
+# one, each row knowing its kind, its source file and who owns it — and the structure was
+# then thrown away at the last step, where the texts were concatenated with a single space.
+# What the agent received was one unbroken paragraph running from the protocol through its
+# role prompt into three presets, with nothing in it to say where one ended. So the
+# separation existed for `sb instructions` and for nobody who had to act on it.
+#
+# These labels are that last step, and they are deliberately the ONLY change to prompt
+# content: the segment texts are untouched, the order is untouched, and what is added is one
+# markdown heading per segment naming where it came from. `##` rather than bare capitals
+# because the codex path delivers this as a markdown file (`AGENTS.md`) and the Claude path
+# as a system-prompt file, and a heading reads as one in both.
+#
+# The fifth column of the spec's diagram is NOT here, and that is the separation working:
+# the Task/Plan assignment is delivered as a separate first user message and never joins
+# the standing prompt at all (see `delivery.initial_task` and the external boundaries).
+#
+# The table in `prompts.toml` holding one heading per segment KIND. The words are not here
+# for the reason no prompt text is (`test_config` pins it): every sentence an agent is sent
+# lives in `defaults/`, and a repo overrides an entry without touching Python. What IS here
+# is the key, because a segment's kind is a fact about the assembly code.
+SEGMENT_LABELS = "section"
+
+
+def segment_label(segment: dict, labels: dict) -> str:
+    """The heading one assembled segment is delivered under.
+
+    A role prompt and a preset are the two that carry a NAME, and the name is the whole
+    value of the label for them: `PRESET house-rules` says which file to go and read when
+    an instruction in it turns out to be wrong, and `ROLE GUIDANCE (worker)` says the same
+    for a role. Everything else is one-of-a-kind and its label is the bare heading.
+
+    A kind with no entry in the table falls back to its own name in capitals, so adding a
+    segment and forgetting the heading costs legibility rather than an unlabelled fragment
+    or a crash at spawn.
+    """
+    base = labels.get(segment["kind"]) or segment["kind"].upper()
+    if segment.get("binding"):
+        return f"{base} {segment['binding']}"
+    if segment.get("role"):
+        return f"{base} ({segment['role']})"
+    return base
+
+
+def labelled_segments(segments: Sequence[dict]) -> list[str]:
+    """The included segments as the separate sections a provider is handed.
+
+    ONE function, consumed by the live spawn and by the renderer that previews it, for the
+    same reason they share `effective_instructions`: a preview of a shape the real spawn
+    does not have is worse than no preview.
+    """
+    return [f"{herdr_mod.SECTION_PREFIX}{segment['label']}\n{segment['text']}"
+            for segment in segments if segment["included"]]
+
+
 # HOW FAR BACK THE AUTOMATIC SWEEP CALLS A DEATH RECENT, in seconds — and the automatic
 # half only. Both halves used to share one `SWEEP_RECENT`, which is why the paragraphs
 # below are about what a TYPED sweep stopped doing before they are about what this bounds.
@@ -5172,6 +5232,11 @@ class Broker:
         prompt = as_prompt if as_prompt is not None else resolved_role.prompt
         segments.append({
             "kind": "ad-hoc-prompt" if as_prompt is not None else "role-prompt",
+            # Named in the label, so an agent reading an instruction it wants to argue with
+            # can say which role's file it came out of. `--as` carries no role: the prompt
+            # is the caller's own text and naming a role beside it would credit a file that
+            # contributed nothing.
+            **({} if as_prompt is not None else {"role": role}),
             "source": "literal --as" if as_prompt is not None else role_source,
             "condition": "non-empty prompt",
             "ownership": ("external-to-switchboard" if as_prompt is not None else role_owner),
@@ -5190,23 +5255,30 @@ class Broker:
         direct_source, direct_owner = self._configured_prompt_source("spawn.researcher_direct")
         direct = role == RESEARCHER_ROLE and self.is_top(parent)
         segments.append({
-            "kind": "researcher-direct", "source": direct_source,
+            "kind": "researcher-direct", "role": role, "source": direct_source,
             "condition": "researcher role spawned by the top dispatcher",
             "ownership": direct_owner, "included": direct,
             "text": self._say("spawn.researcher_direct") if direct else "",
         })
         segments.extend(self._binding_segments(role, with_, report=_report_bindings))
 
-        active = [s["text"] for s in segments if s["included"]]
+        # The labels come FIRST because the concatenation is built out of them (INV-62,
+        # `labelled_segments`). Numbering the rows after joining them was fine while the
+        # join threw the structure away; it is not while the join is what carries it.
+        labels = config.prompts(self.repo).get(SEGMENT_LABELS) or {}
         for order, segment in enumerate(segments, 1):
             segment["order"] = order
             segment["characters"] = len(segment["text"])
-            segment["flattening"] = "single-line fragment before provider assembly"
+            segment["label"] = segment_label(segment, labels)
+            segment["flattening"] = "single-line fragment, delivered under its own heading"
+        active = labelled_segments(segments)
         if spec.provider == codex_mod.PROVIDER:
-            delivery = "private CODEX_HOME/AGENTS.md; blank line between fragments"
+            delivery = ("private CODEX_HOME/AGENTS.md; one `## ` heading per segment, "
+                        "blank line between them")
             rendered = codex_mod.render_instructions(active)
         else:
-            delivery = "--append-system-prompt-file; one space between flat fragments"
+            delivery = ("--append-system-prompt-file; one `## ` heading per segment, "
+                        "blank line between them")
             rendered = herdr_mod.render_instructions(active)
         capabilities = self._preview_capabilities(role, parent=parent, name=name)
         just_in_time = (self._guidance_segments(role, capabilities["held"])
@@ -5587,7 +5659,7 @@ class Broker:
             role=role, name=name, parent=me, model=model, as_prompt=as_prompt,
             with_=with_, workspace=ws, path=where, task=task,
             _report_bindings=True)
-        prompts = [s["text"] for s in manifest["segments"] if s["included"]]
+        prompts = labelled_segments(manifest["segments"])
 
         self.link_config(where)     # a worktree must see repo-local config (roles.toml)
         # `confirmed` is what decides whether this id gets WRITTEN DOWN below. A caller

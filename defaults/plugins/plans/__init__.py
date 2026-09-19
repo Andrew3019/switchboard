@@ -5928,21 +5928,36 @@ def _catalogue(which: str) -> dict:
     A file that IS there and is not readable is refused, with its path, exactly as a
     plan's own file is. Silently skipping it would leave a plan resolving a link to nothing
     with no sign that the answer came from a typo in a JSON file.
+
+    LAYERED, most general first: this plugin's own directory, then the repo's committed one,
+    then its machine-local one (`config.step_library_dirs`). That is what makes "repo-defined
+    step kinds are repo configuration in the same two-level scheme" (spec §10) true rather
+    than aspirational — before it, a repo wanting a `deploy` kind had to add a JSON file
+    inside switchboard's own plugin directory, which is not an override of anything. Same
+    rule as presets: keyed by filename, and a later layer's `<name>.json` REPLACES the
+    earlier one of that name, so a repo can both add definitions and reshape a shipped one.
+
+    The repo is `Path.cwd()` and not a threaded `ctx.worktree`, which is a compromise worth
+    naming. `_catalogue` is reached only through `_lib`/`_kept`, and those are called from
+    eighteen places that would each have to grow an argument. It is the same path in every
+    real invocation — `cli` builds the plugin context with `worktree=b.repo`, and `b.repo`
+    is `Path.cwd()` — so what is lost is not correctness but the ability to point this at
+    another repo from a test without chdir.
     """
-    d = Path(__file__).resolve().parent / which
     out: dict[str, dict] = {}
-    try:
-        files = sorted(d.glob("*.json"))
-    except OSError:
-        return out
-    for f in files:
+    for d in config_mod.step_library_dirs(which, Path.cwd()):
         try:
-            spec = json.loads(f.read_text(encoding="utf-8"))
-        except (ValueError, UnicodeDecodeError, OSError) as e:
-            raise _BadDef(f"{f} is not readable JSON ({e}); fix it or move it aside") from e
-        if not isinstance(spec, dict):
-            raise _BadDef(f"{f} holds a {type(spec).__name__} where a definition should be")
-        out[f.stem] = spec
+            files = sorted(d.glob("*.json"))
+        except OSError:
+            continue
+        for f in files:
+            try:
+                spec = json.loads(f.read_text(encoding="utf-8"))
+            except (ValueError, UnicodeDecodeError, OSError) as e:
+                raise _BadDef(f"{f} is not readable JSON ({e}); fix it or move it aside") from e
+            if not isinstance(spec, dict):
+                raise _BadDef(f"{f} holds a {type(spec).__name__} where a definition should be")
+            out[f.stem] = spec
     return out
 
 

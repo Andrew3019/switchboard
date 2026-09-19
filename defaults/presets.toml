@@ -33,6 +33,14 @@
 # disposition, its own prompt), a preset is behaviour injected into it. Mixing the two made
 # "add a preset" look like "redefine the role".
 #
+# That split is the whole of INV-61 (spec §5): a preset is INSTRUCTIONS ONLY and never
+# selects a role, a model, permissions, hierarchy or runtime configuration. The `[roles]`
+# table below is not an exception — it binds instructions TO a role, which is the reverse:
+# whoever types `--role` still makes that choice, and the same preset stays applicable to
+# any role on any model. A preset FILE has no fields to declare one with, and a `+++` front
+# matter block (the notation a ROLE file uses for `model = "careful"`) is refused where the
+# file is read — see `presets.body`.
+#
 # Preset FILES layer the same way these bindings do: `defaults/presets/<name>.md` is
 # replaced by name by your `.switchboard/presets/<name>.md`. (This comment claimed the
 # opposite for a long time, and so did presets.py and verify.md — all three were wrong; see

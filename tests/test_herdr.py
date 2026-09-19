@@ -181,6 +181,11 @@ class SpawnTest(unittest.TestCase):
 
         One file cannot repeat the bug the way repeated flags could, but the fragments can
         still be dropped or reordered on the way into it, so the join is asserted whole.
+
+        A BLANK LINE between them since INV-62 (spec §5): each fragment arrives as its own
+        labelled section, and joining on a space ran them into one paragraph. That the
+        SEPARATOR is a blank line is the assertion; what the labels say is `prompts.toml`'s
+        and `broker.segment_label`'s.
         """
         fake = FakeHerdr(ok({"agent": AGENT_JSON}))
         try:
@@ -189,7 +194,7 @@ class SpawnTest(unittest.TestCase):
                 prompts=["PROTOCOL here", "you are w1", "role text", "a preset"])
             self.assertEqual(fake.argv().count("--append-system-prompt-file"), 1)
             self.assertEqual(herdr_mod.prompt_file_path("w1").read_text(),
-                             "PROTOCOL here you are w1 role text a preset")
+                             "PROTOCOL here\n\nyou are w1\n\nrole text\n\na preset")
         finally:
             herdr_mod.forget_prompt_file("w1")
 

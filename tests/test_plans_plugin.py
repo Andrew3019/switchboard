@@ -62,6 +62,7 @@ from switchboard import cli  # noqa: E402
 from switchboard import plugins  # noqa: E402
 from switchboard import roles as roles_mod  # noqa: E402
 from switchboard import store  # noqa: E402
+from switchboard.herdr import section_body  # noqa: E402
 
 from test_fork_lock import _held  # noqa: E402
 from test_shipped_plugins import ShippedSandbox  # noqa: E402
@@ -4746,7 +4747,13 @@ class TriggerTest(PlansSandbox):
             return self.sb("delegate", *argv, "--name", "a thing")
 
     def prompts(self) -> list[str]:
-        return self.h.started[-1]["prompts"]
+        """The spawned sections WITHOUT their `## <label>` headings (INV-62).
+
+        The label is the one thing the assembly adds to a fragment, so stripping it keeps
+        these assertions about the text the config layer produced. `broker.segment_label`
+        and `tests/test_config_model.py` own the headings themselves.
+        """
+        return [section_body(p) for p in self.h.started[-1]["prompts"]]
 
     def test_the_guide_prints_the_plan_making_instruction(self):
         """The condition, the owner and the route to a template — the three things knowing
