@@ -107,6 +107,19 @@ SIDE_EFFECT_BOUNDARIES = (BOUNDARY_MERGE, BOUNDARY_DONE)
 # (spec §2.2). It is NOT derived from the capability set in either direction — holding
 # `write-tracked` does not imply isolation, and an isolated agent is not thereby allowed
 # anything. The only capability in it is the gate: `own` requires `fork` ON THE CALLER.
+def with_handoff(task: Optional[str], handoff: Optional[str]) -> str:
+    """The first message a spawn delivers: the assignment, then what the receiver needs.
+
+    ONE FORMATTER, because `cli._validate` length-checks the composition it cannot make —
+    the taskless spawn's placeholder is the broker's and does not exist yet at validation —
+    and a second spelling of the join would make that check measure a different string from
+    the one that is sent.
+    """
+    text = (task or "").strip()
+    extra = (handoff or "").strip()
+    return f"{text} HANDOFF: {extra}" if extra else text
+
+
 ISOLATION_OWN = "own"
 ISOLATION_SHARED = "shared"
 ISOLATIONS = (ISOLATION_OWN, ISOLATION_SHARED)
@@ -5522,7 +5535,7 @@ class Broker:
         # user message — including to the taskless spawn's placeholder, where a child
         # waiting for its real instruction can still be told what it is walking into.
         if handoff and handoff.strip():
-            task = f"{task} HANDOFF: {handoff.strip()}"
+            task = with_handoff(task, handoff)
         if isolation not in ISOLATIONS:
             raise ValueError(
                 f"isolation is {' or '.join(ISOLATIONS)}, not {isolation!r}: `own` gives "

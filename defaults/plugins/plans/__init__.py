@@ -4039,14 +4039,18 @@ def take(ctx, args) -> Result:
 
     def _take(step, who, plan, lib):
         owner = to or who
-        marked = _assignable(step, owner, plan, steal=steal, self_review=self_review,
-                             verb="take", mine=owner == who)
+        marked = _assignable(step, owner, plan, by=who, steal=steal,
+                             self_review=self_review, verb="take")
         if isinstance(marked, Result):
             return marked
         prev = _owner(step)
         step["owner"] = owner
-        was["prev"], was["now"] = prev, owner
-        return (("steal" if prev else "take"),
+        # GIVING AWAY YOUR OWN STEP IS A HANDOFF, not a steal: nothing was taken from
+        # anybody, and the only agent that could be told is the one that typed the
+        # command. So the steal machinery is not armed for it.
+        was["prev"] = None if prev == who else prev
+        was["now"] = owner
+        return (("steal" if was["prev"] else "take"),
                 f"{step['id']} owner {prev or 'unowned'} → {owner}{marked}")
 
     with _owning(ctx.state_dir):
@@ -4057,8 +4061,8 @@ def take(ctx, args) -> Result:
     return _told(ctx, done, prev, was.get("now") or ctx.agent or "human")
 
 
-def _assignable(step: dict, to: Optional[str], plan: dict, *, steal: bool,
-                self_review: bool, verb: str, mine: bool = True) -> Any:
+def _assignable(step: dict, to: Optional[str], plan: dict, *, by: str, steal: bool,
+                self_review: bool, verb: str) -> Any:
     """May `to` own this step? An independence suffix for the changelog, or a refusal.
 
     The one predicate behind three callers — `take`, `take --for`, and the PREFLIGHT a
@@ -4070,13 +4074,20 @@ def _assignable(step: dict, to: Optional[str], plan: dict, *, steal: bool,
     `to` is None on that preflight: there is no assignee yet, so only the OWNERSHIP half is
     asked. Independence is not skipped so much as trivially satisfied — a fresh agent has
     contributed to nothing — and the assignment itself asks it again for real.
+
+    **A CALLER HANDING OVER ITS OWN STEP NEEDS NO `--steal`.** `--steal` is a safeguard for
+    an owner that did not consent, and the owner here is the agent typing the command: a
+    lead that owns `Implement` and spawns a worker to do it is the COMMONEST delegation
+    there is, and making it type `--steal` to give away its own work — and then mailing
+    itself "taken from you" — would be the wrong word for the wrong event. So `by` is asked
+    for, and `prev == by` passes.
     """
     prev = _owner(step)
     if to is not None and prev == to:
-        whose = "yours" if mine else f"{to}'s"
+        whose = "yours" if to == by else f"{to}'s"
         return Result(human=f"{step['id']} is already {whose} — nothing to take",
                       data={"plan": None, "step": step.get("id"), "already_owned": True})
-    if prev and not steal:
+    if prev and prev != by and not steal:
         return _denied(step, f"{step['id']} is owned by {prev} — it is theirs to "
                              f"release, or take it anyway with `take {step['id']} "
                              f"--steal`, which tells them", owner=prev)
@@ -4095,11 +4106,19 @@ def _assignable(step: dict, to: Optional[str], plan: dict, *, steal: bool,
 # A change record's review is normally closed by neither verb but DERIVED off `change.review`
 # when its PR opens (`_derived_review`), so the same guard and override run there too.
 SELF_REVIEWED = "self-reviewed"
-# The changelog actions that name a contributor to the step they are about: a take or steal
-# names the new owner as `by`, a release or complete the owner doing it, and a tick whoever
-# closed it — an implement step can be ticked without ever being taken. A move's detail is
-# written `<step> owner <was> → <now>`, which also names an owner a hand-edit had pre-staged.
+# The changelog actions that name a contributor to the step they are about: a release or
+# complete names the owner doing it, and a tick whoever closed it — an implement step can be
+# ticked without ever being taken. A move's detail is written `<step> owner <was> → <now>`,
+# which also names an owner a hand-edit had pre-staged.
 _OWNING_ACTIONS = ("take", "steal", "release", "complete", "tick")
+# THE TWO WHOSE `by` IS NOT A CONTRIBUTOR, since `take --for` (#328). A take or a steal
+# NAMES its new owner in the owner move, so `by` adds nothing except the agent that TYPED
+# it — which need not be the owner at all now that a spawn can assign a step to its child.
+# Counting it made every delegator a recorded contributor to the step it handed out, which
+# fails safe and is still wrong: a reviewer that spawns a fixer would lose independence on
+# the plan it was spawned to review. For an ordinary `take` the two are the same agent and
+# nothing changes.
+_TYPED_NOT_OWNED = ("take", "steal")
 _OWNER_MOVE = re.compile(r"^\S+ owner (?P<was>\S+) → (?P<now>\S+)")
 
 
@@ -4107,8 +4126,9 @@ def _contributed(plan: dict, who: str) -> list[str]:
     """The ids of this plan's `implement`-kind steps that `who` owns, owned or contributed to.
 
     A RECORDED CONTRIBUTOR IS AN OWNER ON THE RECORD (#321 A3): the step's current `owner`,
-    and every agent the step's ownership events name — the `by` of a take, steal, release,
-    complete or tick, and both sides of an owner move. Read from switchboard's own record and never
+    and every agent the step's ownership events name — the `by` of a release, complete or
+    tick (see `_TYPED_NOT_OWNED` for why a take's is not one), and both sides of an owner
+    move. Read from switchboard's own record and never
     from git, because agents on one plan share a worktree and one git identity. What this
     cannot see is an owner a hand-edit set and a later hand-edit replaced with no verb between:
     no event was ever written for it.
@@ -4125,7 +4145,8 @@ def _contributed(plan: dict, who: str) -> list[str]:
         if n is None or n not in ids:
             continue
         moved = _OWNER_MOVE.match(detail)
-        if who == e.get("by") or (moved and who in (moved["was"], moved["now"])):
+        acted = who == e.get("by") and e.get("action") not in _TYPED_NOT_OWNED
+        if acted or (moved and who in (moved["was"], moved["now"])):
             hit.add(n)
     return [sid for n, sid in ids.items() if n in hit]
 
@@ -4254,8 +4275,17 @@ def assign_on_spawn(ctx, *, to: Optional[str] = None, step: Optional[str] = None
         {"ok": bool, "error": str|None, "step": {...}|None, "plan": {...}|None}
     """
     out: dict = {"ok": True, "error": None, "step": None, "plan": None}
+    who = ctx.agent or "human"
 
     def no(why: str, **data) -> dict:
+        # WHAT ALREADY LANDED IS PART OF THE REFUSAL. The two halves are two writes, so a
+        # plan that refuses after the step was assigned leaves a fact behind — and a
+        # failure that does not name it reads as "nothing happened", which is how the step
+        # comes to be owned by an agent nobody believes owns it.
+        done = out.get("step") if not check else None
+        if isinstance(done, dict) and done.get("owner"):
+            why += (f" — NOTE: {done.get('plan')}/{done.get('step')} WAS already assigned "
+                    f"to {done['owner']}; that stands")
         out.update(ok=False, error=why)
         out.update(data)
         return out
@@ -4267,7 +4297,7 @@ def assign_on_spawn(ctx, *, to: Optional[str] = None, step: Optional[str] = None
             if bad is not None:
                 return no(bad)
             found, one = got
-            marked = _assignable(one, None, found, steal=steal, self_review=False,
+            marked = _assignable(one, None, found, by=who, steal=steal, self_review=False,
                                  verb="take")
             if isinstance(marked, Result):
                 return no(str(marked.data.get("error") or marked.human))
@@ -4291,10 +4321,19 @@ def assign_on_spawn(ctx, *, to: Optional[str] = None, step: Optional[str] = None
                            "notice_skipped": r.data.get("notice_skipped")}
 
     if plan is not None:
-        got = _own_plan(ctx, plan, to, check=check)
+        got = _own_plan(ctx, plan, to, by=who, steal=steal, check=check)
         if isinstance(got, str):
             return no(got)
         out["plan"] = got
+        # OUTSIDE THE LOCK, exactly as a step steal's notice is, and for the same reason: a
+        # slow `sb tell` must not hold every ownership verb in the repo. A notice that
+        # cannot be sent leaves the handover standing and says so.
+        prev = got.get("previous_owner")
+        if not check and prev and prev != who:
+            sent = _ask(ctx, "tell", prev,
+                        f"plan {got.get('plan')} is now {to}'s end to end (--steal) — you "
+                        f"are no longer accountable for it landing", clock=_Budget())
+            got["notified"] = prev if sent is not None else None
     return out
 
 
@@ -4320,7 +4359,8 @@ def _resolved_step(doc: dict, given: str) -> tuple[Any, Optional[str]]:
     return (plan, step), None
 
 
-def _own_plan(ctx, given: str, to: Optional[str], *, check: bool) -> Any:
+def _own_plan(ctx, given: str, to: Optional[str], *, by: str, steal: bool,
+              check: bool) -> Any:
     """Record `to` as this plan's END-TO-END owner. The facts, or a string saying why not.
 
     END-TO-END OWNERSHIP IS NOT THE `planner` FIELD and not a step's `owner`. `planner`
@@ -4329,6 +4369,11 @@ def _own_plan(ctx, given: str, to: Optional[str], *, check: bool) -> Any:
     gate holds an agent to. One field, `owner`, system-held (`_HELD_PLAN`) exactly as a
     step's is — an agent's `edit` hands it back unchanged rather than setting it, because
     ownership changes hands through a verb that records the move.
+
+    TAKING IT FROM SOMEBODY ELSE IS A STEAL, on the same terms a step's ownership is: it
+    needs `--steal`, it is recorded, and the previous owner is told (by the caller, outside
+    the lock). Handing over your OWN plan needs neither — nothing was taken and the only
+    agent to tell is the one typing the command.
 
     WHAT CONSUMES IT DOES NOT EXIST YET, stated because the gap is the point: the `done`
     gate is #329's and was explicitly cut from it in the de-hardening pass. So this records
@@ -4340,15 +4385,18 @@ def _own_plan(ctx, given: str, to: Optional[str], *, check: bool) -> Any:
         if plan is None:
             bad = _missing(doc, given)
             return str(bad.data.get("error") or bad.human)
-        if check:
-            return {"plan": plan.get("id"), "owner": plan.get("owner")}
         prev = str(plan.get("owner") or "").strip() or None
-        who = ctx.agent or "human"
+        if prev and prev != by and prev != to and not steal:
+            return (f"{plan['id']} is already {prev}'s end to end — it is theirs to hand "
+                    f"over, or take it anyway with `--steal`, which tells them")
+        if check:
+            return {"plan": plan.get("id"), "owner": prev}
         plan["owner"] = to
-        _log(ctx, plan, who, "own", "end-to-end ownership assigned at spawn",
+        _log(ctx, plan, by, "own", "end-to-end ownership assigned at spawn",
              f"{plan['id']} owner {prev or 'unowned'} → {to}")
         _write(ctx.state_dir, doc, seal)
-        return {"plan": plan.get("id"), "owner": to, "previous_owner": prev}
+        return {"plan": plan.get("id"), "owner": to,
+                "previous_owner": None if prev == by else prev}
 
 def release(ctx, args) -> Result:
     """Stop owning a step. It becomes explicitly unowned, which is what surfaces it.

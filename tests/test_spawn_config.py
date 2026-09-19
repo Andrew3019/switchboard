@@ -234,6 +234,75 @@ class AssignStepTest(SpawnConfigSandbox):
         db.close()
         self.assertTrue(any("step-2" in b and name in b for b in told), told)
 
+    def test_handing_over_a_step_you_own_needs_no_steal_and_tells_nobody(self):
+        """THE COMMONEST DELEGATION THERE IS: a lead owns `Implement` and spawns a worker
+        to do it. `--steal` is a safeguard for an owner that did not consent, and the owner
+        here is the agent typing the command — so requiring it would be the wrong word for
+        the event, and the tell it triggers would be the caller mailing itself."""
+        self.plan("shape the work", "build it")
+        self.live("lead-1")
+        self.as_agent("lead-1")
+        self.ok("plugin", "plans", "take", "step-2")
+        name = self.spawned("build it", "--assign-step", "step-2",
+                            "--name", "the build")["name"]
+        self.assertEqual(self.step("step-2")["owner"], name)
+        self.assertEqual(self.data("plugin", "plans", "changelog", "p-1")[-1]["action"],
+                         "take")                      # a handoff, not a steal
+        self.assertEqual(self.events("step_stolen"), [])
+        db = store.connect(self.repo)
+        told = [m["body"] for m in store.unread_for(db, "lead-1", mark=False)]
+        db.close()
+        self.assertEqual(told, [], "the caller was mailed about its own handoff")
+
+    def test_assigning_a_step_does_not_make_the_delegator_a_contributor_to_it(self):
+        """#321 reads the changelog to decide who may review. A take NAMES its new owner in
+        the owner move, so counting `by` as well made every delegator a recorded
+        contributor to the step it handed out — and a reviewer that spawns a fixer would
+        then be refused the review it was spawned for. The spawnee is still judged, and
+        still fresh."""
+        self.plan("shape the work", "build it", "check it")
+        # `create` does not parse a `Name:kind` suffix, so the review step's kind is set
+        # the way a lead shapes a plan — in the file. The guard is keyed on kind and never
+        # on a display name, which is exactly what this has to be true of.
+        self.edit_step("step-3", kind="review")
+        self.live("lead-1")
+        self.as_agent("lead-1")
+        name = self.spawned("build it", "--assign-step", "step-2",
+                            "--name", "the build")["name"]
+        self.assertEqual(self.step("step-2")["owner"], name)
+        # The delegator may still take the review: it assigned the work, it did not do it.
+        self.ok("plugin", "plans", "take", "step-3")
+        self.assertEqual(self.step("step-3")["owner"], "lead-1")
+        # And the agent that actually owns the implementation still cannot.
+        code, _, err = self.sb("plugin", "plans", "release", "step-3")
+        self.assertEqual(code, 0, err)
+        self.as_agent(name)
+        code, _, err = self.sb("plugin", "plans", "take", "step-3")
+        self.assertEqual(code, 1)
+        self.assertIn("review is independent by default", err)
+
+    def test_an_assignment_that_fails_after_the_spawn_names_the_child_and_exits_one(self):
+        """The race the two-call split leaves open: the step was free at the check and
+        gone by the assignment. There is an agent up and it owns nothing, so the caller is
+        told which agent, what went wrong and how to finish by hand — and the exit code
+        says the call did not do what was asked."""
+        self.plan("shape the work", "build it")
+        self.live("lead-1")
+        self.as_agent("lead-1")
+        boom = mock.patch.object(cli.assign_mod, "apply",
+                                 side_effect=cli.assign_mod.AssignmentRefused("gone"))
+        with boom:
+            code, out, err = self.spawn("build it", "--assign-step", "step-2",
+                                        "--name", "the build")
+        self.assertEqual(code, 1)
+        said = out + err
+        self.assertIn("gone", said)
+        self.assertIn("worker-the-build", said)
+        self.assertIn("--for worker-the-build", said)
+        self.assertEqual(len(self.events("assign_failed")), 1)
+        self.assertIsNone(self.step("step-2")["owner"])
+        self.assertEqual(self.row("worker-the-build")["name"], "worker-the-build")
+
     def test_steal_without_a_step_to_steal_is_refused(self):
         self.as_agent("lead-1")
         self.live("lead-1")
@@ -273,6 +342,43 @@ class OwnPlanTest(SpawnConfigSandbox):
                 "--version", doc["version"])
         self.assertEqual(self._doc()["plans"][0]["owner"], name)
 
+    def test_taking_a_plan_from_another_owner_needs_steal_and_tells_them(self):
+        """Symmetric with a Step's ownership, and for the same reason: end-to-end
+        ownership is an accountability, and moving one silently means two agents each
+        believe they are accountable — or nobody does."""
+        self.plan("shape the work")
+        self.live("lead-1", "w1")
+        self.as_agent("lead-1")
+        first = self.spawned("land it", "--own-plan", "p-1", "--name", "the plan")["name"]
+        code, _, err = self.spawn("take over", "--own-plan", "p-1", "--name", "a retry")
+        self.assertEqual(code, 1)
+        self.assertIn("already", err)
+        self.assertIn("--steal", err)
+        self.assertEqual(self.h.started[-1]["name"], first)   # nothing new spawned
+        self.assertEqual(self._doc()["plans"][0]["owner"], first)
+
+        second = self.spawned("take over", "--own-plan", "p-1", "--steal",
+                              "--name", "a retry")["name"]
+        self.assertEqual(self._doc()["plans"][0]["owner"], second)
+        db = store.connect(self.repo)
+        told = [m["body"] for m in store.unread_for(db, first, mark=False)]
+        db.close()
+        self.assertTrue(any("p-1" in b and second in b for b in told), told)
+
+    def test_handing_over_a_plan_you_own_needs_no_steal(self):
+        """The same handoff rule a Step has: the only agent that could be told is the one
+        typing the command."""
+        self.plan("shape the work")
+        self.live("lead-1")
+        self.as_agent("lead-1")
+        self._save({**self._doc(), "plans": [{**self._doc()["plans"][0],
+                                              "owner": "lead-1"}]})
+        name = self.spawned("land it", "--own-plan", "p-1", "--name", "the plan")["name"]
+        self.assertEqual(self._doc()["plans"][0]["owner"], name)
+        db = store.connect(self.repo)
+        self.assertEqual(store.unread_for(db, "lead-1", mark=False), [])
+        db.close()
+
     def test_a_plan_that_is_not_there_is_refused_before_anything_spawns(self):
         self.as_agent("lead-1")
         self.live("lead-1")
@@ -280,6 +386,35 @@ class OwnPlanTest(SpawnConfigSandbox):
         self.assertEqual(code, 1)
         self.assertEqual(self.h.started, [])
         self.assertIn("p-9", err)
+
+
+class NoProviderTest(SpawnConfigSandbox):
+    """The other half of "the seam fails loudly": a repo where nothing owns Steps.
+
+    `plans` ships enabled, so this is the repo that turned it off — and the flag must then
+    refuse rather than spawn an agent and quietly assign nothing, which is the failure the
+    obligations seam is allowed to have and this one is not.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # `"!reset"`, not `[]`: arrays JOIN (config merge rule 3), so an empty list would
+        # keep every shipped plugin and this class would be testing nothing.
+        (self.sw / "plugins.toml").write_text('enabled = ["!reset"]\n')
+
+    def test_assign_step_with_no_plugin_that_owns_steps_refuses_and_spawns_nothing(self):
+        self.as_agent("lead-1")
+        self.live("lead-1")
+        code, _, err = self.spawn("go", "--assign-step", "step-1", "--name", "a thing")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.h.started, [])
+        self.assertIn("no enabled plugin owns Plan Steps", err)
+
+    def test_a_spawn_that_assigns_nothing_is_untouched_by_the_seam(self):
+        """The cost of the seam on every OTHER spawn is nothing — it is not consulted."""
+        self.as_agent("lead-1")
+        self.live("lead-1")
+        self.assertTrue(self.spawned("go", "--name", "a thing")["name"])
 
 
 class PlacementTest(SpawnConfigSandbox):

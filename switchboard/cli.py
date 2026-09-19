@@ -250,17 +250,19 @@ def build_parser() -> argparse.ArgumentParser:
     # costs a refusal rather than a live agent with nothing to do.
     d.add_argument("--assign-step", dest="assign_step", metavar="STEP",
                    help="the Plan Step this child takes — an id (step-2, p-1/step-2) or "
-                        "its board name. Unowned steps assign freely; an owned one needs "
-                        "--steal")
+                        "its board name. An unowned step assigns freely and so does one "
+                        "of YOUR OWN, which is a handoff; somebody else's needs --steal")
     d.add_argument("--steal", action="store_true",
-                   help="assign --assign-step even though somebody owns it: recorded, and "
-                        "the previous owner is told unless it has already finished")
+                   help="assign --assign-step or --own-plan although ANOTHER agent owns "
+                        "it: recorded, and that agent is told unless it has finished. Not "
+                        "needed to hand over something you own yourself")
     # END-TO-END PLAN OWNERSHIP (§11, §6). The `done` gate that consumes it is #329's and
     # was cut from that issue's lean scope, so this records the accountable owner and
     # nothing yet refuses a `done` on it.
     d.add_argument("--own-plan", dest="own_plan", metavar="PLAN",
                    help="make this child the Plan's end-to-end owner — accountable for it "
-                        "landing, not just for one step")
+                        "landing, not just for one step. Taking it from another owner "
+                        "needs --steal, as a step does")
 
     # A capability, handed to an agent in your own subtree, for the rest of its life.
     # There is deliberately NO `sb revoke` and no `--ttl`: the agent's lifecycle is the
@@ -752,10 +754,11 @@ def _validate(args) -> None:
         # has to know the flag can be absent.
         if args.isolation is None:
             args.isolation = broker_mod.ISOLATION_SHARED
-        if args.steal and args.assign_step is None:
+        if args.steal and args.assign_step is None and args.own_plan is None:
             raise validate.Invalid(
-                "--steal says how to take a step and --assign-step says which — give both, "
-                "or neither.")
+                "--steal says HOW to take an ownership that is somebody else's; "
+                "--assign-step and --own-plan say WHICH. Give it with one of them, or "
+                "not at all.")
         if args.assign_step is not None:
             args.assign_step = validate.line(args.assign_step, "--assign-step",
                                              max_len=validate.MAX_REF)
@@ -816,9 +819,15 @@ def _validate(args) -> None:
         args.with_ = [validate.line(w, "--with", max_len=validate.MAX_PROMPT)
                       for w in args.with_]
         # ONE LINE, like the task it rides with: it is delivered inline as the child's
-        # first message, and herdr refuses a newline in anything it sends.
+        # first message, and herdr refuses a newline in anything it sends. Checked AS
+        # JOINED as well, through the broker's own formatter: two values each inside the
+        # limit compose to one that is not, and the refusal has to name the flag while
+        # there is still a flag to name.
         if args.handoff is not None:
             args.handoff = validate.line(args.handoff, "--handoff")
+            if args.task is not None:
+                validate.line(broker_mod.with_handoff(args.task, args.handoff),
+                              "the task and --handoff together")
 
     elif cmd == "instructions":
         args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
