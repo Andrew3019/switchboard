@@ -198,6 +198,31 @@ class SpawnTest(unittest.TestCase):
         finally:
             herdr_mod.forget_prompt_file("w1")
 
+    def test_a_labelled_section_is_accepted_and_a_wrapped_body_is_still_refused(self):
+        """The single-line rule's one exemption, against the REAL guard.
+
+        `FakeHerdr` in the broker tests does not run this check, so nothing else exercises
+        it: before the exemption every labelled section carried a newline and every Claude
+        spawn would have raised here. Both halves matter — the heading passes, and a body
+        that wraps under it still takes the spawn down, which is the failure
+        `test_a_wrapped_description_does_not_kill_every_dispatcher_spawn` is about.
+        """
+        fake = FakeHerdr(ok({"agent": AGENT_JSON}))
+        try:
+            Herdr("herdr", runner=fake).start_agent(
+                "w1", "w1:p9", prompts=["## SWITCHBOARD PROTOCOL\nOne line of protocol.",
+                                        "## PRESET house-rules\nOne line of rules."])
+            self.assertEqual(
+                herdr_mod.prompt_file_path("w1").read_text(),
+                "## SWITCHBOARD PROTOCOL\nOne line of protocol.\n\n"
+                "## PRESET house-rules\nOne line of rules.")
+        finally:
+            herdr_mod.forget_prompt_file("w1")
+        with self.assertRaises(ValueError) as e:
+            Herdr("herdr", runner=FakeHerdr(ok({"agent": AGENT_JSON}))).start_agent(
+                "w2", "w2:p9", prompts=["## PRESET wrapped\nfirst line\nsecond line"])
+        self.assertIn("single-line", str(e.exception))
+
     def test_a_prompt_file_that_cannot_be_written_fails_the_spawn_loudly(self):
         """No file, no spawn — and herdr is never called.
 
