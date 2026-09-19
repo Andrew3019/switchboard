@@ -6310,6 +6310,26 @@ class Broker:
             n += 1
         return f"{stem}-{n}"
 
+    def prospective_name(self, *, role: str, topic: Optional[str]) -> str:
+        """What `delegate` WOULD name this spawn, without spawning it.
+
+        For the one caller that has to know a name before there is an agent to hold it:
+        `sb delegate --assign-step` checks the assignment before it spawns, and a step
+        PRE-STAGED onto that name (`take <step> --for <name>`) reads as owned by somebody
+        else unless the check is told which name is about to exist.
+
+        The alias resolution is here and not left to the caller, because the name is built
+        from the role a spawn RESOLVES to and not from what was typed — a `--role lead` in
+        a repo that retired it composes `worker-…`, and a check that guessed `lead-…`
+        would be asking about an agent that will never exist.
+
+        NOT A RESERVATION. `_compose_name` picks the first free suffix against the store
+        and herdr as they stand, and both can move between here and the spawn. The
+        assignment itself is the authority; this only lets the early check ask the right
+        question.
+        """
+        return self._compose_name(roles_mod.get(self.roles, role, self.repo).name, topic)
+
     def _herdr_names(self) -> set[str]:
         """The names herdr enforces machine-wide right now — the OTHER namespace this
         clone's store cannot see.

@@ -4264,10 +4264,16 @@ def assign_on_spawn(ctx, *, to: Optional[str] = None, step: Optional[str] = None
     agent with no step — and it is the same predicate the real assignment runs
     (`_assignable`), not a second reading of the rule.
 
-    `to` is the spawnee, and is None on the check: there is no agent yet. Independence is
-    therefore only really asked at the assignment, which is correct rather than lenient —
-    a fresh agent has contributed to nothing, so the answer cannot change between the two
-    calls for the agent a spawn is about to make.
+    `to` on the CHECK is the name the spawn is ABOUT to use, not a row that exists — sb
+    composes it before it spawns anything and passes it here. That is what makes the check
+    agree with the assignment in the one case where they otherwise could not: a step
+    PRE-STAGED onto that name (`take <step> --for <name>`, which #314 blesses for an agent
+    that does not exist yet). Without the name the check sees a step "owned by somebody
+    else" and tells the caller to steal it from the agent it is about to create. `None` is
+    still accepted — a caller that cannot know the name gets the ownership half only.
+
+    A STEP THE SPAWNEE ALREADY OWNS IS A NO-OP, at both ends. The caller asked for that
+    agent to own it and it does; nothing moves, nothing is logged, and nobody is told.
 
     Plain data out, never a `Result`: this crosses back into `switchboard/`, which must not
     grow a dependency on this plugin's types.
@@ -4283,7 +4289,7 @@ def assign_on_spawn(ctx, *, to: Optional[str] = None, step: Optional[str] = None
         # failure that does not name it reads as "nothing happened", which is how the step
         # comes to be owned by an agent nobody believes owns it.
         done = out.get("step") if not check else None
-        if isinstance(done, dict) and done.get("owner"):
+        if isinstance(done, dict) and done.get("owner") and not done.get("already_owned"):
             why += (f" — NOTE: {done.get('plan')}/{done.get('step')} WAS already assigned "
                     f"to {done['owner']}; that stands")
         out.update(ok=False, error=why)
@@ -4292,17 +4298,24 @@ def assign_on_spawn(ctx, *, to: Optional[str] = None, step: Optional[str] = None
 
     if step is not None:
         if check:
+            noop = False
             doc, _ = _read(ctx.state_dir)
             got, bad = _resolved_step(doc, step)
             if bad is not None:
                 return no(bad)
             found, one = got
-            marked = _assignable(one, None, found, by=who, steal=steal, self_review=False,
+            marked = _assignable(one, to, found, by=who, steal=steal, self_review=False,
                                  verb="take")
             if isinstance(marked, Result):
-                return no(str(marked.data.get("error") or marked.human))
+                # `already_owned` is the one Result that is not a refusal: the spawnee
+                # holds the step already, which is the end state that was asked for. The
+                # assignment will be a no-op and the check has to say so, or the two
+                # disagree about the same file.
+                if not marked.data.get("already_owned"):
+                    return no(str(marked.data.get("error") or marked.human))
+                noop = True
             out["step"] = {"plan": found.get("id"), "step": one.get("id"),
-                           "owner": _owner(one)}
+                           "owner": _owner(one), "already_owned": noop}
         else:
             args = SimpleNamespace(step=step, steal=steal, self_review=False,
                                    reason=f"assigned at spawn to {to}")
@@ -4310,15 +4323,31 @@ def assign_on_spawn(ctx, *, to: Optional[str] = None, step: Optional[str] = None
             r = take(ctx, args)
             if not r.ok:
                 return no(str(r.data.get("error") or r.human))
-            one = r.data.get("step")
-            out["step"] = {"plan": r.data.get("plan"), "owner": to,
-                           "step": one.get("id") if isinstance(one, dict) else one,
-                           # Whether the steal's notice LANDED, verbatim from `_told`:
-                           # `notified` is the agent that got it, and `notice_skipped`
-                           # says why nobody did. A spawn that stole a step and could not
-                           # say so has to report that, not just report the steal.
-                           "notified": r.data.get("notified"),
-                           "notice_skipped": r.data.get("notice_skipped")}
+            if r.data.get("already_owned"):
+                # NOTHING MOVED, so nothing may be reported as having moved. `take`'s
+                # early result carries no plan — it never read one — and passing that
+                # straight out is what wrote a `step_stolen` event with a NULL plan id
+                # against a plan whose changelog said nothing had happened. The ids are
+                # resolved here instead, and the no-op is marked so sb logs no event.
+                doc, _ = _read(ctx.state_dir)
+                got, bad = _resolved_step(doc, step)
+                if bad is not None:
+                    return no(bad)
+                found, one = got
+                out["step"] = {"plan": found.get("id"), "step": one.get("id"),
+                               "owner": to, "already_owned": True,
+                               "notified": None, "notice_skipped": None}
+            else:
+                one = r.data.get("step")
+                out["step"] = {"plan": r.data.get("plan"), "owner": to,
+                               "step": one.get("id") if isinstance(one, dict) else one,
+                               "already_owned": False,
+                               # Whether the steal's notice LANDED, verbatim from `_told`:
+                               # `notified` is the agent that got it, and `notice_skipped`
+                               # says why nobody did. A spawn that stole a step and could
+                               # not say so has to report that, not just report the steal.
+                               "notified": r.data.get("notified"),
+                               "notice_skipped": r.data.get("notice_skipped")}
 
     if plan is not None:
         got = _own_plan(ctx, plan, to, by=who, steal=steal, check=check)

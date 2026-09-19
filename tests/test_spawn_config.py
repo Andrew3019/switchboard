@@ -303,6 +303,81 @@ class AssignStepTest(SpawnConfigSandbox):
         self.assertIsNone(self.step("step-2")["owner"])
         self.assertEqual(self.row("worker-the-build")["name"], "worker-the-build")
 
+    def test_a_step_pre_staged_onto_the_spawnee_is_a_clean_no_op(self):
+        """THE GAP-REVIEW BUG. `take <step> --for <name>` pre-stages a step onto an agent
+        that does not exist yet (#314 blesses it), and the spawn that then creates that
+        agent was asked for the end state that already holds.
+
+        It used to report a move that never happened: the receipt printed `None/step-1`,
+        sb wrote a `step_stolen` event with a NULL `plan_id` — so no `history(plan_id=…)`
+        read could find it — and the plan's own changelog said nothing had happened. The
+        two records the design calls complementary contradicted each other.
+
+        With `--steal` too, and that is the half that bit: a steal of a step nobody else
+        holds is not a steal.
+        """
+        for flags in ([], ["--steal"]):
+            with self.subTest(flags=flags or "none"):
+                self.setUp()
+                self.plan("shape the work", "build it")
+                self.live("lead-1")
+                self.as_agent("lead-1")
+                self.ok("plugin", "plans", "take", "step-1", "--for", "worker-the-fix")
+                got = self.spawned("fix it", "--name", "the fix",
+                                   "--assign-step", "step-1", *flags)
+                self.assertEqual(got["name"], "worker-the-fix")
+                self.assertEqual(self.step("step-1")["owner"], "worker-the-fix")
+
+                # NOTHING MOVED, so nothing claims it did — in either record.
+                self.assertEqual(self.events("step_stolen"), [])
+                self.assertEqual(self.events("step_assigned"), [])
+                self.assertEqual([e["action"] for e in
+                                  self.data("plugin", "plans", "changelog", "p-1")],
+                                 ["create", "take"])
+
+                # And the receipt names the real plan, not a null one.
+                said = got["assigned"]["step"]
+                self.assertEqual(said["plan"], "p-1")
+                self.assertEqual(said["step"], "step-1")
+                self.assertTrue(said["already_owned"])
+                self.assertIsNone(said["notified"])
+
+    def test_no_assignment_event_is_ever_written_without_the_plan_it_is_about(self):
+        """The shape the NULL `plan_id` took, pinned as a property rather than as one
+        case: an event nothing can find by its plan is an event that cannot be
+        contradicted by the plan it claims to describe."""
+        self.plan("shape the work", "build it")
+        self.live("lead-1", "w1")
+        self.as_agent("w1")
+        self.ok("plugin", "plans", "take", "step-2")
+        self.as_agent("lead-1")
+        self.ok("plugin", "plans", "take", "step-1", "--for", "worker-pre-staged")
+        self.spawned("a", "--name", "one", "--assign-step", "step-2", "--steal")
+        self.spawned("b", "--name", "pre staged", "--assign-step", "step-1")
+        for kind in ("step_assigned", "step_stolen", "plan_owned"):
+            for e in self.events(kind):
+                with self.subTest(kind=kind):
+                    self.assertTrue(e["plan_id"], f"{kind} written with no plan: {dict(e)}")
+
+    def test_the_preflight_agrees_with_the_assignment_on_a_pre_staged_step(self):
+        """The reverse gap: the check used to refuse what the assignment would accept, and
+        the refusal told the caller to steal the step from the agent it was creating. sb
+        composes the prospective name before it spawns, so both ends ask the same
+        question — and a step pre-staged onto somebody ELSE is still refused."""
+        self.plan("shape the work", "build it")
+        self.live("lead-1")
+        self.as_agent("lead-1")
+        self.ok("plugin", "plans", "take", "step-1", "--for", "worker-the-fix")
+        self.assertTrue(self.spawned("fix it", "--name", "the fix",
+                                     "--assign-step", "step-1")["name"])
+
+        self.ok("plugin", "plans", "take", "step-2", "--for", "somebody-else")
+        code, _, err = self.spawn("build it", "--name", "the build",
+                                  "--assign-step", "step-2")
+        self.assertEqual(code, 1)
+        self.assertIn("owned by somebody-else", err)
+        self.assertEqual(len(self.h.started), 1)      # only the first spawn ever ran
+
     def test_steal_without_a_step_to_steal_is_refused(self):
         self.as_agent("lead-1")
         self.live("lead-1")

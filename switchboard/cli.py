@@ -1907,10 +1907,18 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # for after the spawn they would leave a live agent with nothing to do.
         if args.assign_step is not None or args.own_plan is not None:
             try:
+                # THE NAME THIS SPAWN WILL USE, worked out before it exists. A step
+                # pre-staged onto that name (`take <step> --for <name>`) is owned by the
+                # agent we are about to create, and a check that did not know the name
+                # told the caller to `--steal` it from its own child.
                 assign_mod.check(b.repo, db, agent=(None if me == HUMAN else me),
+                                 to=b.prospective_name(role=args.role, topic=args.name),
                                  step=args.assign_step, plan=args.own_plan,
                                  steal=args.steal)
             except (assign_mod.NoAssigner, assign_mod.AssignmentRefused) as e:
+                print(f"sb: {e}", file=sys.stderr)
+                return 1
+            except ValueError as e:         # a topicless spawn: `delegate` refuses it too
                 print(f"sb: {e}", file=sys.stderr)
                 return 1
         join = b.join_workspace(args.workspace) if args.workspace else {}
@@ -1957,7 +1965,11 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             step, plan = got.get("step"), got.get("plan")
             if isinstance(step, dict):
                 human += f"\n  step      {step.get('plan')}/{step.get('step')} → {name}"
-                if step.get("notified"):
+                if step.get("already_owned"):
+                    # Nothing moved: the step was pre-staged onto this name before the
+                    # spawn. Said out loud, because "→ name" alone reads as a move.
+                    human += " (already theirs — it was pre-staged; nothing moved)"
+                elif step.get("notified"):
                     human += f" (stolen from {step['notified']}, and it was told)"
                 elif step.get("notice_skipped"):
                     human += f" (stolen — {step['notice_skipped']})"

@@ -74,15 +74,21 @@ def provider(repo: Path) -> plugins_mod.Loaded:
 
 
 def check(repo: Path, db, *, agent: Optional[str], step: Optional[str],
-          plan: Optional[str], steal: bool) -> dict:
+          plan: Optional[str], steal: bool, to: Optional[str] = None) -> dict:
     """Would this assignment land? Reads, writes nothing. Raises on anything but yes.
 
     Run BEFORE the spawn, which is the whole reason it exists separately: the refusals worth
     catching early — a step id that is not a step, a step somebody owns — are exactly the
     ones a caller can fix by retyping, and paying for them with a pane, a worktree and an
     agent that then has nothing to do is the failure this removes.
+
+    `to` is the name the spawn is ABOUT to use (`Broker.prospective_name`), not a row that
+    exists. It is what lets the check ask the same question the assignment will: a step
+    pre-staged onto that name is the spawnee's already, and without the name the check
+    reads it as somebody else's and asks the caller to steal from its own child. `None`
+    means a caller that cannot know the name; the ownership half is then all that is asked.
     """
-    return _call(repo, db, agent=agent, to=None, step=step, plan=plan, steal=steal,
+    return _call(repo, db, agent=agent, to=to, step=step, plan=plan, steal=steal,
                  check=True)
 
 
@@ -135,6 +141,13 @@ def record(db, *, agent: str, parent: Optional[str], got: dict, steal: bool) -> 
     a Step and a Plan did more than start an agent.
     """
     s: Any = got.get("step")
+    # A NO-OP IS NOT AN EVENT. The spawnee already owned the step, so the plan's changelog
+    # records nothing — and the two records are meant to be complementary, not contradictory.
+    # An event here said a steal had happened against a plan whose own history said none had,
+    # and (because nothing was read) carried a NULL `plan_id`, so no `history(plan_id=…)`
+    # read could even find it to be contradicted by.
+    if isinstance(s, dict) and s.get("already_owned"):
+        s = None
     if isinstance(s, dict):
         # `plan_id`/`step_id` are the log's SUBJECT columns, not payload: an event about a
         # Step is read back through `history(step_id=...)`, and a spawn's assignment has to
