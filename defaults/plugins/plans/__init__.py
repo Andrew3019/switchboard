@@ -467,6 +467,7 @@ from switchboard import models as models_mod
 from switchboard import plugins as plugins_mod
 from switchboard import presets as presets_mod
 from switchboard import roles as roles_mod
+from switchboard import store as store_mod
 from switchboard.plugins import Result
 
 # THE VOCABULARY IS READ FROM THE MODULES THAT OWN IT, never re-listed here and never
@@ -5937,15 +5938,29 @@ def _catalogue(which: str) -> dict:
     rule as presets: keyed by filename, and a later layer's `<name>.json` REPLACES the
     earlier one of that name, so a repo can both add definitions and reshape a shipped one.
 
-    The repo is `Path.cwd()` and not a threaded `ctx.worktree`, which is a compromise worth
-    naming. `_catalogue` is reached only through `_lib`/`_kept`, and those are called from
-    eighteen places that would each have to grow an argument. It is the same path in every
-    real invocation — `cli` builds the plugin context with `worktree=b.repo`, and `b.repo`
-    is `Path.cwd()` — so what is lost is not correctness but the ability to point this at
-    another repo from a test without chdir.
+    THE REPO IS THE WORKTREE ROOT, resolved here rather than threaded from `ctx.worktree`.
+    `_catalogue` is reached only through `_lib`/`_kept`, and those are called from twenty
+    places that would each have to grow an argument; `store.worktree_root()` is the exact
+    call `cli` makes to build `b.repo`, so resolving it again costs one `git rev-parse` and
+    lands in the same place.
+
+    It is NOT `Path.cwd()`, which this used until a review caught it: `b.repo` is the git
+    toplevel, so from any subdirectory of the worktree `Path.cwd()` finds no `.switchboard/`
+    and the repo's layers silently vanished — a repo-defined kind rendering "no such
+    definition", and `_kind_completion` losing a repo kind's `"completion": "system"`.
+    Agents stand in subdirectories routinely, and the failure was silent both ways.
+
+    A cwd outside a git repo falls back to the shipped catalogue alone rather than raising.
+    Unreachable through `sb`, which makes the same call first and refuses the command — so
+    this is for a direct import, and the shape of the fallback is the one that is right for
+    one: there is nothing to layer, and the shipped definitions are the whole answer.
     """
+    try:
+        repo = store_mod.worktree_root()
+    except (RuntimeError, OSError):
+        repo = None
     out: dict[str, dict] = {}
-    for d in config_mod.step_library_dirs(which, Path.cwd()):
+    for d in config_mod.step_library_dirs(which, repo):
         try:
             files = sorted(d.glob("*.json"))
         except OSError:

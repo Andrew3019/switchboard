@@ -846,24 +846,53 @@ STEP_LIBRARY_PLUGIN = "plans"
 STEP_CATALOGUES = {"library": "step_library_dir", "templates": "step_templates_dir"}
 
 
-def step_library_dirs(which: str = "library", repo: Optional[Path] = None) -> list[Path]:
-    """One step catalogue's layers, most general first: shipped, committed, machine-local.
+def step_library_layers(which: str = "library",
+                        repo: Optional[Path] = None) -> list[tuple[str, Path]]:
+    """One step catalogue's layers as `(origin, dir)`, most general first.
 
     The same three-layer shape as presets, and the same rule on top of it — keyed by
     filename, a later layer replacing the earlier one of that name. Shipped lives inside the
     plugin because the definitions are the plugin's own; the two repo layers are ordinary
     `[paths]` entries, so a repo mints a step kind by adding a JSON file and nothing else.
+
+    ORIGINS ARE PAIRED WITH THEIR DIRECTORY here rather than zipped onto the list
+    afterwards, which is what a review caught: with no repo in play the list holds the
+    plugin's directory alone, and zipping the tail of the origins onto it labelled
+    switchboard's own definitions `repo`.
+
+    Gated on ENABLEMENT and not merely availability, exactly as `roles()` is: `cli` refuses
+    a disabled plugin's verbs outright, so a disabled `plans` contributes no step kinds and
+    a readout saying otherwise would advertise a vocabulary nothing accepts. A plugin that is
+    RUNNING is by definition enabled, so this costs the plugin's own read nothing.
     """
     from . import plugins                          # see `roles()` — globs, imports nothing
     key = STEP_CATALOGUES[which]
-    out = []
-    plugin = plugins.available(repo).get(STEP_LIBRARY_PLUGIN)
-    if plugin is not None:
-        out.append(plugin / which)
-    for d in (shared_path_for(key, repo), path_for(key, repo)):
+    out: list[tuple[str, Path]] = []
+    if STEP_LIBRARY_PLUGIN in set(plugin_enablement(repo)):
+        plugin = plugins.available(repo).get(STEP_LIBRARY_PLUGIN)
+        if plugin is not None:
+            # "switchboard" only for a SHIPPED plugin: a repo that replaces the whole
+            # `plans` directory owns those definitions, and `_owner` says which it is.
+            out.append((_shipped_plugin_origin(plugin), plugin / which))
+    for origin, d in (("repo (committed)", shared_path_for(key, repo)),
+                      ("repo", path_for(key, repo))):
         if d is not None:
-            out.append(d)
+            out.append((origin, d))
     return out
+
+
+def _shipped_plugin_origin(plugin: Path) -> str:
+    """`switchboard` for a plugin under `defaults/`, `repo` for one a repo replaced."""
+    try:
+        plugin.resolve().relative_to(defaults_dir().resolve())
+    except (ValueError, OSError):
+        return "repo"
+    return "switchboard"
+
+
+def step_library_dirs(which: str = "library", repo: Optional[Path] = None) -> list[Path]:
+    """`step_library_layers` without the origins — what a reader of the files wants."""
+    return [d for _, d in step_library_layers(which, repo)]
 
 
 @dataclass(frozen=True)
@@ -955,12 +984,8 @@ def step_kind_layers(repo: Optional[Path] = None) -> list[Defined]:
     (`create-pr` is `open_pr`); that mapping belongs to the plugin, so what is reported here
     is the definition, and the plugin's own refusal is what knows the difference.
     """
-    origins = ["switchboard", "repo (committed)", "repo"]
-    dirs = step_library_dirs("library", repo)
-    # One plugin layer and up to two repo ones. When the plugin is gone the repo layers are
-    # still there and still theirs, so the origins are zipped from the END.
-    return _defined(list(zip(origins[len(origins) - len(dirs):],
-                             (_stems(d, "*.json") for d in dirs))))
+    return _defined([(origin, _stems(d, "*.json"))
+                     for origin, d in step_library_layers("library", repo)])
 
 
 def vocabulary_layers(repo: Optional[Path] = None) -> dict[str, list[Defined]]:

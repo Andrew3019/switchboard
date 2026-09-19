@@ -241,6 +241,46 @@ class TwoLevelConfigTest(Sandbox, unittest.TestCase):
         self.assertIn("migration-researcher", config.roles(self.repo))
         self.assertIn("architecture-critique", presets.available(self.repo))
 
+    def test_a_repo_step_definition_resolves_from_a_subdirectory_of_the_worktree(self):
+        """The regression a review caught, pinned where it broke.
+
+        `plans._catalogue` has no `ctx` to read the worktree off — `_lib`/`_kept` are called
+        from twenty places — so it resolves one itself, and it resolved `Path.cwd()`. But the
+        worktree root is `git rev-parse --show-toplevel`, so from ANY subdirectory the repo's
+        layers vanished: a repo-defined kind rendered "no such definition" and
+        `_kind_completion` lost its `"completion": "system"`, silently, both ways. Agents
+        stand in subdirectories routinely.
+
+        Driven on `_catalogue` directly, against a real `git init`, because the thing under
+        test is which directory gets resolved — a sandbox that is not a git worktree cannot
+        tell the fix from the bug.
+        """
+        import importlib.util
+        import os
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, capture_output=True)
+        d = self.repo / ".switchboard-shared" / "plans" / "library"
+        d.mkdir(parents=True)
+        (d / "deploy.json").write_text('{"about": "ship it", "completion": "system"}\n')
+        plugin = Path(__file__).resolve().parent.parent / "defaults" / "plugins" / "plans"
+        spec = importlib.util.spec_from_file_location("plans_layers", plugin / "__init__.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        sub = self.repo / "deep" / "deeper"
+        sub.mkdir(parents=True)
+        cwd = Path.cwd()
+        self.addCleanup(os.chdir, cwd)
+        for where in (self.repo, sub):
+            with self.subTest(cwd=str(where.relative_to(self.repo)) or "."):
+                os.chdir(where)
+                lib = mod._catalogue("library")
+                self.assertIn("deploy", lib)
+                self.assertEqual(lib["deploy"]["completion"], "system")
+                # The shipped definitions still layer under it, so the repo layer ADDS
+                # rather than replacing the catalogue.
+                self.assertIn("merge", lib)
+
     def test_changing_repo_config_does_not_mutate_a_running_session(self):
         """"Changing repo configuration affects new agents and never silently mutates
         running sessions" (§10). Resolution is at spawn, and the proof is that the payload
