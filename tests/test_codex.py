@@ -195,6 +195,22 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
                                          repo=self.repo)).expanduser().resolve()
         self.assertIn(user_state, roots, roots)
 
+    def test_the_home_is_granted_because_the_sandbox_binds_every_tool_too(self):
+        """Codex's sandbox is a KERNEL one, so unlike Claude Code's tool-level check it
+        binds every process the agent starts. Found live 2026-09-08: a repo's own
+        `tools/remote_build.py`, a script the agent had been asked to run, died with
+        `[Errno 30] Read-only file system: '/root/.cache/lore-remote-build/last-activity'`
+        — a path nothing in switchboard has ever heard of, and no curated list ever will.
+        The tooling class keeps its state under `$HOME`; `/etc`, `/usr` and any checkout
+        outside `$HOME` stay read-only, which is the difference between this and turning
+        the sandbox off."""
+        roots = [Path(r) for r in
+                 self.config(self.write())["sandbox_workspace_write"]["writable_roots"]]
+        self.assertIn(Path.home().resolve(), roots, roots)
+        # Codex's alone. Claude Code checks Read/Write/Edit and never a Bash path, so the
+        # shared list must not grow a grant only the sandbox needs.
+        self.assertNotIn(str(Path.home().resolve()), store.agent_roots(self.repo))
+
     def test_auth_is_a_symlink_to_the_one_credential(self):
         """Decided, not incidental (Andrew, 2026-08-22): a copy would be a second
         credential per agent, stale the moment the human re-logs in. A private CODEX_HOME

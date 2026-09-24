@@ -34,10 +34,11 @@ string, exactly as before, when none does.
 
 Three pieces:
 
-* `settings_file()` writes the per-repo settings JSON that carries BOTH hooks, and
-  `stop_hook_args()` turns it into the `--settings <path>` every spawn passes. Only agents
-  we spawn are handed the file, which is the whole of the isolation — an ordinary `claude`
-  session never sees it, and no file of the human's is ever written to or read.
+* `settings_file()` writes the per-repo settings JSON that carries BOTH hooks — and the
+  directory grant that lets an agent write the notes and briefs the protocol asks it for —
+  and `stop_hook_args()` turns it into the `--settings <path>` every spawn passes. Only
+  agents we spawn are handed the file, which is the whole of the isolation — an ordinary
+  `claude` session never sees it, and no file of the human's is ever written to or read.
 * `codex_hook_commands()` is the same two hooks for the other provider. Codex's hook
   system is Claude-Code-shaped on purpose — same event names, same output schema, same
   `stop_hook_active` flag — so only the WIRING differs: a TOML block in the agent's
@@ -85,7 +86,8 @@ def _entry_point(script: str = "sb-stop-hook") -> Path:
 
 
 def settings_file(cwd: Optional[Path] = None) -> Path:
-    """Write (idempotently) the settings JSON that carries our hooks, and return it.
+    """Write (idempotently) the settings JSON that carries our hooks and the directory
+    grant, and return it.
 
     Under the store directory, which is the shared `.git` — never in a worktree, never
     anywhere near `~/.claude`. Keyed by a hash of the gate's absolute path because that
@@ -110,6 +112,21 @@ def settings_file(cwd: Optional[Path] = None) -> Path:
     db = shlex.quote(str(store.db_path(cwd)))
     body = json.dumps(
         {
+            # THE DIRECTORY GRANT, and it is not a widening of what an agent may do — it
+            # is the places the injected protocol already tells it to write. Claude Code
+            # checks Read/Write/Edit against the session's workspace, and a forked
+            # worktree's `.switchboard` is a SYMLINK to the primary checkout, so a parent
+            # writing `.switchboard/briefs/<topic>/brief.md` — the protocol's own
+            # instruction for any task longer than one line — lands outside it. In an
+            # interactive pane that is the *always allow access to … from this project*
+            # dialog, and the agent sits on a question nobody is there to answer; under
+            # `-p` it is a flat denial. Reported by Andrew 2026-09-23 and reproduced both
+            # ways against Claude Code 2.1.281.
+            #
+            # `store.agent_roots` is the same list codex's sandbox is given as
+            # `writable_roots` — one definition, two dialects. Bash is not checked by path
+            # on this side, so Claude needs no equivalent of codex's `$HOME` grant.
+            "permissions": {"additionalDirectories": store.agent_roots(cwd)},
             "hooks": {
                 # The turn-STARTED edge. One firing per turn, ~74 ms, nothing per tool
                 # call. No matcher: every prompt an agent is given starts a turn, whether

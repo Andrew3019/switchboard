@@ -75,7 +75,8 @@ AUTH_FILE = config.setting("codex.auth_file")
 SANDBOX_MODE = config.setting("codex.sandbox_mode")
 APPROVAL_POLICY = config.setting("codex.approval_policy")
 HOOK_TIMEOUT = config.setting("codex.hook_timeout")
-HERDR_CONFIG_DIR = config.setting("codex.herdr_config_dir")
+# `codex.herdr_config_dir` is read by `store.agent_roots`, which is where the socket
+# grant now lives: it is a fact about herdr and both providers need it.
 
 # A codex SUB-PROVIDER name — `deepseek`, and whatever a user adds beside it. It arrives
 # from a tier's `codex_provider` and is then used twice unescaped: as half of the dotted
@@ -355,76 +356,40 @@ def render_instructions(prompts: Sequence[str]) -> str:
 def _switchboard_root(cwd: Optional[Path]) -> Optional[Path]:
     """The resolved `.switchboard` tree for ``cwd``, or None outside a worktree."""
     from . import store
-    try:
-        return (store.worktree_root(cwd) / ".switchboard").resolve()
-    except Exception:                    # noqa: BLE001 — no worktree to grant
-        return None
+    return store.switchboard_root(cwd)
 
 
 def _writable_roots(cwd: Optional[Path]) -> list[str]:
     """The directories outside its own worktree a codex agent must be able to write to.
 
-    Four, and no more than four. Narrow on purpose: the sandbox is the only risk control
-    codex has in this mode (there is no `--ask-for-approval` analogue), so every path
-    here is one the agent genuinely cannot work without. The test of a root is the
-    INJECTED PROTOCOL: each of these is somewhere that text tells every agent to write.
+    `store.agent_roots` is the shared list — the four places the injected protocol tells
+    every agent to write, whichever provider it is running on — and this adds the one
+    entry that is codex's alone.
 
-    * The shared `.git` — the whole of it, not just the `agentflow` store beneath it.
-      Two things live there and an agent needs both. The STORE (`<shared .git>/agentflow`)
-      holds the database, the prompt files and the hook settings, and an agent in a
-      worktree is not standing anywhere near it. And GIT ITSELF: a forked worktree's own
-      `.git` is a FILE pointing at `<shared .git>/worktrees/<name>/`, and objects and refs
-      are written under `<shared .git>` too — so with only the store writable, `git
-      commit` fails with exit 128 on `index.lock`, and so do `git push` and `gh pr
-      create`. The protocol's closing instruction is *commit your work, then `sb done`*;
-      without this the one thing every worker must do is the one thing it cannot. (Missed
-      by the spike because that checkout was under /tmp, which `workspace-write` grants
-      anyway.) The `agentflow` subdirectory is covered by this entry, so it is not listed
-      separately.
-    * The herdr SOCKET's directory. Every `sb` verb that reaches another agent or the
-      board goes through the herdr binary, which talks to that socket; a denied write
-      there is an agent that can do its work and tell nobody.
+    THE HUMAN'S HOME, and here is why it belongs to this provider and not to the shared
+    list. Claude Code's permission system gates the agent's own file TOOLS: Read, Write
+    and Edit are checked against the workspace, and a `Bash` command is not checked by
+    path at all. Codex's sandbox is a kernel one, so it binds every process the agent
+    starts — a build script, `gh`, `pip`, a test runner. Those tools keep their state
+    under `$HOME` by convention and no curated list will ever name them all: found live
+    2026-09-08, when a repo's own `tools/remote_build.py` died with `[Errno 30]
+    Read-only file system: '/root/.cache/lore-remote-build/last-activity'` — a script the
+    agent was asked to run, failing on a path nothing in switchboard has ever heard of.
 
-      Read from the environment where herdr itself put it, falling back to the documented
-      default — the same reasoning as every other fact about the binary on your PATH.
-    * The REAL `.switchboard` tree, resolved. In a worktree that name is a SYMLINK to the
-      primary checkout's directory, and the sandbox resolves symlinks before it decides —
-      so a write to `.switchboard/notes/<agent>-<topic>.md` lands outside the worktree and
-      is denied even though the path an agent types is inside it. That is where notes and
-      briefs live, and the protocol tells children to write both. Found live, 2026-08-23:
-      `apply_patch` on a note failed until the human dropped the sandbox entirely.
-      Computed from the worktree TOP rather than `cwd`, which may be a subdirectory; in the
-      primary checkout the same computation finds the real directory it already is.
-    * The switchboard USER-STATE root — `~/.local/state/switchboard` by default. Every
-      user-scope plugin keeps its data under it, `report-bug` included, and the protocol
-      tells every agent to file a bug when switchboard itself breaks. Found live in the
-      same session: `sb plugin report-bug file` died with `[Errno 1] Operation not
-      permitted`, which is an agent that cannot report the very thing stopping it. Granted
-      as the whole root rather than one plugin's subdirectory, because the protocol names
-      more than one plugin and each keeps its state beside the others.
+    So this is the tooling grant, and it is the smallest thing that closes that class
+    without dropping the sandbox: writes below `$HOME` are the agent's own machine state,
+    and `/etc`, `/usr`, `/var` and any checkout outside `$HOME` stay read-only. Skipped
+    when `$HOME` is unset or resolves to `/`, where granting it would be the same as
+    turning the sandbox off by accident rather than on purpose (`codex.sandbox_mode`).
     """
-    roots: list[str] = []
     from . import store
+    roots = store.agent_roots(cwd)
     try:
-        roots.append(str(store.repo_root(cwd)))
-    except Exception:                    # noqa: BLE001 — not in a repo; codex will say so
+        home = Path.home().resolve()
+        if str(home) != home.root:
+            roots.append(str(home))
+    except Exception:                    # noqa: BLE001 — no home is not a spawn failure
         pass
-    sock = os.environ.get("HERDR_SOCKET_PATH")
-    roots.append(str(Path(sock).expanduser().parent if sock
-                     else Path(HERDR_CONFIG_DIR).expanduser()))
-    # `write_home` ensures this resolved directory exists before the spawn. Keep granting
-    # it unconditionally there so notes and briefs created after spawn stay inside the
-    # grant, including when the checkout has a symlink at `.switchboard`.
-    switchboard_root = _switchboard_root(cwd)
-    if switchboard_root is not None:
-        roots.append(str(switchboard_root))
-    try:
-        roots.append(str(Path(config.setting("paths.user_state", repo=cwd))
-                         .expanduser().resolve()))
-    except Exception:                    # noqa: BLE001 — no config to read is not a spawn
-        pass                             # failure; the agent loses report-bug, not its job
-    # De-duplicated, order kept: the primary checkout can make two of these the same path,
-    # and a repeated root in the TOML is noise in a file a human sometimes reads.
     return list(dict.fromkeys(roots))
 
 
@@ -537,7 +502,8 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
         # report-agent-session` and `notification show` failed anyway. So an agent can
         # neither be seen nor ring anyone. Nor, once those were fixed, write the note the
         # protocol asks it for or file the bug the protocol tells it to file. See
-        # `_writable_roots` for what each of the four is and why it is not optional.
+        # `store.agent_roots` for what each of the four is and why it is not
+        # optional, and `_writable_roots` for the one grant that is codex's alone.
         #
         # `network_access` — off by default in this mode, which is not what
         # `--permission-mode auto` means for a claude agent: no `git fetch`, no `git
