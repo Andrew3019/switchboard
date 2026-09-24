@@ -360,48 +360,47 @@ def _switchboard_root(cwd: Optional[Path]) -> Optional[Path]:
 
 
 def _tool_state_roots() -> list[str]:
-    """Where the TOOLS an agent runs keep their state — and nothing else in `$HOME`.
+    """Where the TOOLS an agent runs keep their state. One directory, and it is a cache.
 
     Codex's sandbox is a KERNEL one, so unlike Claude Code's tool-level check it binds
     every process the agent starts: a build script, `gh`, `pip`, a test runner. Found live
     2026-09-08 — a repo's own `tools/remote_build.py`, a script the agent had been asked
     to run, died with `[Errno 30] Read-only file system:
     '/root/.cache/lore-remote-build/last-activity'`. Nothing in switchboard has ever heard
-    of that path and nothing ever will; what it has in common with the next one is only
-    that it is under an XDG base directory.
+    of that path and nothing ever will, which is why this grant is a BASE directory rather
+    than a path.
 
-    So the grant is the XDG bases, and the whole of `$HOME` is deliberately NOT it. Under
-    `$HOME` and staying READ-ONLY: `~/.codex/auth.json` — the ONE credential every codex
-    agent on the machine and the human's own CLI share, so a single bad write logs the
-    whole fleet out at once (`_link_auth`) — and `~/.ssh`, `~/.claude`, `~/.gnupg`,
-    `~/.netrc`, the shell rc files, and `~/.local/bin`, which is where the provider CLIs
-    themselves live. `approval_policy = "never"` means no human sees the write that would
-    take any of those out. Raised in review of this change (2026-09-23); codex has no
-    deny-list to express `$HOME` minus those — `sandbox_workspace_write.deny_roots` is
-    `unknown configuration field` under `--strict-config` — so an allow-list is the only
-    narrowing there is.
+    ONE BASE, BECAUSE ONE IS ALL ANY FAILURE HAS EVER NAMED. This grant was `$HOME` and
+    then the XDG spec's four bases, and both rounds of review found the same thing under
+    the wider version: a live shared credential. `~/.codex/auth.json` authenticates every
+    codex agent on the machine and the human's own CLI, so one bad write logs the fleet
+    out; `~/.config/gh/hosts.yml` is the real gh OAuth token, and losing it takes `gh pr
+    create` — which the protocol tells every worker to run — out from under everybody at
+    once. With `approval_policy = "never"` nobody sees the write that does it. Codex has
+    no deny-list to say "$HOME except those": `sandbox_workspace_write.deny_roots` is
+    `unknown configuration field` under `--strict-config` on 0.154.0, so the allow-list IS
+    the protection and every entry has to earn its place.
 
-    What that costs: a non-XDG toolchain cache — `~/.npm`, `~/.cargo`, `~/go`, `~/.m2` —
-    is still denied, and the day one of those is in the way it gets named here beside the
-    others, with the same question asked of it.
+    A cache is the one base where that is easy to say: by definition nothing in it is a
+    secret and nothing in it is the only copy. `~/.config`, `~/.local/share` and
+    `~/.local/state` are NOT here — none was ever tied to an observed denial, and
+    switchboard's own state under `~/.local/state/switchboard` is granted by name in
+    `store.agent_roots` already.
 
-    Only directories that already EXIST are returned. bwrap refuses to bind a writable
+    What that costs: a tool that writes somewhere else — `~/.npm`, `~/.cargo`, `~/go`,
+    `~/.m2`, or a config file rather than a cache — is still denied. The cure is to name
+    THAT path here when a real failure names it, one entry at a time, never a base
+    directory added because the spec has one.
+
+    Only a directory that already EXISTS is returned. bwrap refuses to bind a writable
     root that is not there and takes the whole spawn down with it (see `write_home`), and
-    a base directory the machine has never used is one no tool on it writes to either.
+    a cache directory the machine has never used is one no tool on it writes to either.
     """
-    bases = [("XDG_CACHE_HOME", "~/.cache"),
-             ("XDG_CONFIG_HOME", "~/.config"),
-             ("XDG_DATA_HOME", "~/.local/share"),
-             ("XDG_STATE_HOME", "~/.local/state")]
-    roots: list[str] = []
-    for var, default in bases:
-        try:
-            d = Path(os.environ.get(var) or default).expanduser().resolve()
-            if d.is_dir():
-                roots.append(str(d))
-        except Exception:                # noqa: BLE001 — one unreadable base is not a spawn
-            pass                         # failure; the agent loses one grant, not its job
-    return roots
+    try:
+        d = Path(os.environ.get("XDG_CACHE_HOME") or "~/.cache").expanduser().resolve()
+        return [str(d)] if d.is_dir() else []
+    except Exception:                    # noqa: BLE001 — an unreadable base is not a spawn
+        return []                        # failure; the agent loses one grant, not its job
 
 
 def _writable_roots(cwd: Optional[Path]) -> list[str]:
@@ -525,9 +524,9 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
         # neither be seen nor ring anyone. Nor, once those were fixed, write the note the
         # protocol asks it for or file the bug the protocol tells it to file. See
         # `store.agent_roots` for what each of the four is and why it is not
-        # optional, and `_tool_state_roots` for the grants that are codex's alone —
-        # the XDG bases, because this sandbox binds the agent's TOOLS and not just its
-        # own file calls.
+        # optional, and `_tool_state_roots` for the one grant that is codex's alone —
+        # the cache base, because this sandbox binds the agent's TOOLS and not just
+        # its own file calls.
         #
         # `network_access` — off by default in this mode, which is not what
         # `--permission-mode auto` means for a claude agent: no `git fetch`, no `git
