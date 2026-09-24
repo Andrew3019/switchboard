@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -118,6 +119,84 @@ def write_config(values: dict, cwd: Optional[Path] = None) -> Path:
     cfg.update(values)
     p.write_text(json.dumps(cfg, indent=2) + "\n")
     return p
+
+
+def switchboard_root(cwd: Optional[Path] = None) -> Optional[Path]:
+    """The resolved `.switchboard` tree for `cwd`, or None outside a worktree.
+
+    RESOLVED, always. In a forked worktree that name is a SYMLINK to the primary
+    checkout's directory, and both providers' permission systems compare the real path —
+    so a write to `.switchboard/briefs/<topic>/brief.md` lands outside the worktree even
+    though the path an agent types is inside it. Computed from the worktree TOP rather
+    than `cwd`, which may be a subdirectory; in the primary checkout the same computation
+    finds the real directory it already is.
+    """
+    try:
+        return (worktree_root(cwd) / ".switchboard").resolve()
+    except Exception:                    # noqa: BLE001 — no worktree to grant
+        return None
+
+
+def agent_roots(cwd: Optional[Path] = None) -> list[str]:
+    """The directories OUTSIDE its own worktree an agent must be allowed to write to.
+
+    Four, and no more than four. Narrow on purpose, and the test of a root is the
+    INJECTED PROTOCOL: each of these is somewhere that text tells every agent to write.
+    Both providers gate this and neither gates it the same way, so the LIST lives here
+    and each adapter delivers it in its own dialect — `codex.py` as the sandbox's
+    `writable_roots`, `hooks.py` as Claude Code's `permissions.additionalDirectories`.
+    Every entry below was found by a real agent being denied, not by reading docs.
+
+    * The shared `.git` — the whole of it, not just the `agentflow` store beneath it.
+      Two things live there and an agent needs both. The STORE (`<shared .git>/agentflow`)
+      holds the database, the prompt files and the hook settings, and an agent in a
+      worktree is not standing anywhere near it. And GIT ITSELF: a forked worktree's own
+      `.git` is a FILE pointing at `<shared .git>/worktrees/<name>/`, and objects and refs
+      are written under `<shared .git>` too — so with only the store writable, `git
+      commit` fails with exit 128 on `index.lock`, and so do `git push` and `gh pr
+      create`. The protocol's closing instruction is *commit your work, then `sb done`*;
+      without this the one thing every worker must do is the one thing it cannot.
+    * The herdr SOCKET's directory. Every `sb` verb that reaches another agent or the
+      board goes through the herdr binary, which talks to that socket; a denied write
+      there is an agent that can do its work and tell nobody. Read from the environment
+      where herdr itself put it, falling back to the documented default.
+    * The REAL `.switchboard` tree, resolved — see `switchboard_root`. That is where
+      notes and briefs live, and the protocol tells children to write both. Found live
+      twice: codex `apply_patch` on a note denied (2026-08-23), and a Claude agent asked
+      to write a child's brief met Claude Code's *always allow access to …* dialog and
+      stalled on it (2026-09-23).
+    * The switchboard USER-STATE root — `~/.local/state/switchboard` by default. Every
+      user-scope plugin keeps its data under it, `report-bug` included, and the protocol
+      tells every agent to file a bug when switchboard itself breaks. Found live:
+      `sb plugin report-bug file` died with `[Errno 1] Operation not permitted`, which is
+      an agent that cannot report the very thing stopping it.
+
+    Best-effort per entry: a root that cannot be computed is dropped rather than raising.
+    A grant that fails costs the agent one capability; an exception here costs it the
+    spawn.
+    """
+    roots: list[str] = []
+    try:
+        roots.append(str(repo_root(cwd)))
+    except Exception:                    # noqa: BLE001 — not in a repo; the CLI will say so
+        pass
+    # `codex.herdr_config_dir` by name because that is who needed it first. It is a fact
+    # about the herdr binary, not about codex, and both providers now read it; the key
+    # keeps its spelling so nobody's override stops working.
+    sock = os.environ.get("HERDR_SOCKET_PATH")
+    roots.append(str(Path(sock).expanduser().parent if sock
+                     else Path(config.setting("codex.herdr_config_dir")).expanduser()))
+    root = switchboard_root(cwd)
+    if root is not None:
+        roots.append(str(root))
+    try:
+        roots.append(str(Path(config.setting("paths.user_state", repo=cwd))
+                         .expanduser().resolve()))
+    except Exception:                    # noqa: BLE001 — no config to read is not a spawn
+        pass                             # failure; the agent loses report-bug, not its job
+    # De-duplicated, order kept: the primary checkout can make two of these the same path,
+    # and a repeated root is noise in a file a human sometimes reads.
+    return list(dict.fromkeys(roots))
 
 
 def main_checkout(cwd: Optional[Path] = None) -> Path:

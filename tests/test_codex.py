@@ -195,6 +195,51 @@ class CodexHomeTest(HomeFixture, unittest.TestCase):
                                          repo=self.repo)).expanduser().resolve()
         self.assertIn(user_state, roots, roots)
 
+    def test_the_cache_base_is_granted_because_the_sandbox_binds_tools_too(self):
+        """Codex's sandbox is a KERNEL one, so unlike Claude Code's tool-level check it
+        binds every process the agent starts. Found live 2026-09-08: a repo's own
+        `tools/remote_build.py`, a script the agent had been asked to run, died with
+        `[Errno 30] Read-only file system: '/root/.cache/lore-remote-build/last-activity'`
+        — a path nothing in switchboard has ever heard of."""
+        roots = [Path(r) for r in
+                 self.config(self.write())["sandbox_workspace_write"]["writable_roots"]]
+        self.assertIn(Path("~/.cache").expanduser().resolve(), roots, roots)
+        # Codex's alone. Claude Code checks Read/Write/Edit and never a Bash path, so the
+        # shared list must not grow a grant only the sandbox needs.
+        self.assertNotIn(str(Path("~/.cache").expanduser().resolve()),
+                         store.agent_roots(self.repo))
+
+    def test_the_grant_is_the_cache_base_and_never_a_credential(self):
+        """THE line, drawn here rather than left to the docstring, because twice now the
+        wider version passed a reading and failed a review. `$HOME` exposed
+        `~/.codex/auth.json` — the one credential every codex agent and the human's own
+        CLI share, so a single bad write logs the whole fleet out. The XDG spec's four
+        bases exposed `~/.config/gh/hosts.yml`, the gh OAuth token, and with it `gh pr
+        create` for everybody. With `approval_policy = "never"` nobody sees either write,
+        and codex has no `deny_roots` to express the exclusion (`unknown configuration
+        field` under `--strict-config`), so the allow-list IS the protection: widening it
+        back has to break a test, not just contradict a comment."""
+        roots = [Path(r) for r in
+                 self.config(self.write())["sandbox_workspace_write"]["writable_roots"]]
+        self.assertNotIn(Path.home().resolve(), roots, roots)
+        # `~/.config` as a WHOLE is the round-two finding; `~/.config/herdr`
+        # is granted by name and is a socket directory, not a credential one.
+        for kept in ("~/.codex", "~/.ssh", "~/.claude", "~/.config",
+                     "~/.local/share", "~/.local/bin"):
+            d = Path(kept).expanduser().resolve()
+            self.assertFalse(any(d == r or d.is_relative_to(r) for r in roots
+                                 if r != Path("/")),
+                             f"{kept} is writable via {roots}")
+
+    def test_a_cache_base_that_does_not_exist_is_not_granted(self):
+        """bwrap refuses to bind a writable root that is not there and takes the whole
+        spawn down with it — the same failure `write_home`'s `.switchboard` mkdir exists to
+        avoid. A cache directory this machine has never used is also one no tool on it
+        writes to, so dropping it costs nothing."""
+        missing = Path(self.tmp.name) / "no-such-cache"
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(missing)}):
+            self.assertNotIn(str(missing), codex._tool_state_roots())
+
     def test_auth_is_a_symlink_to_the_one_credential(self):
         """Decided, not incidental (Andrew, 2026-08-22): a copy would be a second
         credential per agent, stale the moment the human re-logs in. A private CODEX_HOME

@@ -786,7 +786,13 @@ class Herdr:
         # module.
         from . import hooks
 
-        agent_args += hooks.stop_hook_args()
+        # `cwd`, for the same reason `_codex_args` takes it: the settings file now
+        # carries the directory grant as well as the hooks, and a grant is computed from
+        # the checkout it is for. The paths happen to come out the same from any worktree
+        # of one repo — that is what `git rev-parse --git-common-dir` and the
+        # `.switchboard` symlink are — but that is a property of today's layout, not
+        # something the call should be leaning on unsaid.
+        agent_args += hooks.stop_hook_args(cwd)
         agent_args += list(model_args)
         if resume:
             agent_args += ["--resume", resume]

@@ -284,3 +284,45 @@ class CodexHookShapeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SettingsFileCarriesTheDirectoryGrantTest(unittest.TestCase):
+    """Reported by Andrew 2026-09-23: a spawned agent asked to write a child's brief met
+    Claude Code's *Yes, and always allow access to …* dialog and sat on it. Reproduced
+    against 2.1.281 both ways — the dialog in a pane, a flat `Write` denial under `-p` —
+    and cleared by exactly this key in exactly this file.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        os.system(f"git -C {self.repo} init -q")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def grant(self):
+        body = json.loads(Path(hooks.settings_file(self.repo)).read_text())
+        return [Path(d) for d in body["permissions"]["additionalDirectories"]]
+
+    def test_the_grant_names_the_switchboard_tree_the_symlink_really_points_at(self):
+        """THE bug. In a forked worktree `.switchboard` is a SYMLINK to the primary
+        checkout, and Claude Code checks the resolved path — so `.switchboard/briefs/
+        <topic>/brief.md`, which the protocol tells every delegating agent to write, is
+        outside the workspace however much the typed path looks inside it."""
+        real = Path(self.tmp.name) / "primary-switchboard"
+        real.mkdir()
+        (self.repo / ".switchboard").symlink_to(real)
+        self.assertIn(real.resolve(), self.grant())
+
+    def test_the_grant_is_the_same_list_the_codex_sandbox_is_given(self):
+        """One definition, two dialects. Both providers gate writes outside the workspace
+        and neither gates it the same way, so the list lives in `store.agent_roots` and
+        the adapters only deliver it — a root added for one provider must not silently be
+        missing for the other."""
+        from switchboard import codex
+        self.assertEqual(self.grant(),
+                         [Path(r) for r in store.agent_roots(self.repo)])
+        self.assertTrue(set(self.grant()).issubset(
+            {Path(r) for r in codex._writable_roots(self.repo)}))
