@@ -359,38 +359,60 @@ def _switchboard_root(cwd: Optional[Path]) -> Optional[Path]:
     return store.switchboard_root(cwd)
 
 
+def _tool_state_roots() -> list[str]:
+    """Where the TOOLS an agent runs keep their state — and nothing else in `$HOME`.
+
+    Codex's sandbox is a KERNEL one, so unlike Claude Code's tool-level check it binds
+    every process the agent starts: a build script, `gh`, `pip`, a test runner. Found live
+    2026-09-08 — a repo's own `tools/remote_build.py`, a script the agent had been asked
+    to run, died with `[Errno 30] Read-only file system:
+    '/root/.cache/lore-remote-build/last-activity'`. Nothing in switchboard has ever heard
+    of that path and nothing ever will; what it has in common with the next one is only
+    that it is under an XDG base directory.
+
+    So the grant is the XDG bases, and the whole of `$HOME` is deliberately NOT it. Under
+    `$HOME` and staying READ-ONLY: `~/.codex/auth.json` — the ONE credential every codex
+    agent on the machine and the human's own CLI share, so a single bad write logs the
+    whole fleet out at once (`_link_auth`) — and `~/.ssh`, `~/.claude`, `~/.gnupg`,
+    `~/.netrc`, the shell rc files, and `~/.local/bin`, which is where the provider CLIs
+    themselves live. `approval_policy = "never"` means no human sees the write that would
+    take any of those out. Raised in review of this change (2026-09-23); codex has no
+    deny-list to express `$HOME` minus those — `sandbox_workspace_write.deny_roots` is
+    `unknown configuration field` under `--strict-config` — so an allow-list is the only
+    narrowing there is.
+
+    What that costs: a non-XDG toolchain cache — `~/.npm`, `~/.cargo`, `~/go`, `~/.m2` —
+    is still denied, and the day one of those is in the way it gets named here beside the
+    others, with the same question asked of it.
+
+    Only directories that already EXIST are returned. bwrap refuses to bind a writable
+    root that is not there and takes the whole spawn down with it (see `write_home`), and
+    a base directory the machine has never used is one no tool on it writes to either.
+    """
+    bases = [("XDG_CACHE_HOME", "~/.cache"),
+             ("XDG_CONFIG_HOME", "~/.config"),
+             ("XDG_DATA_HOME", "~/.local/share"),
+             ("XDG_STATE_HOME", "~/.local/state")]
+    roots: list[str] = []
+    for var, default in bases:
+        try:
+            d = Path(os.environ.get(var) or default).expanduser().resolve()
+            if d.is_dir():
+                roots.append(str(d))
+        except Exception:                # noqa: BLE001 — one unreadable base is not a spawn
+            pass                         # failure; the agent loses one grant, not its job
+    return roots
+
+
 def _writable_roots(cwd: Optional[Path]) -> list[str]:
     """The directories outside its own worktree a codex agent must be able to write to.
 
     `store.agent_roots` is the shared list — the four places the injected protocol tells
-    every agent to write, whichever provider it is running on — and this adds the one
-    entry that is codex's alone.
-
-    THE HUMAN'S HOME, and here is why it belongs to this provider and not to the shared
-    list. Claude Code's permission system gates the agent's own file TOOLS: Read, Write
-    and Edit are checked against the workspace, and a `Bash` command is not checked by
-    path at all. Codex's sandbox is a kernel one, so it binds every process the agent
-    starts — a build script, `gh`, `pip`, a test runner. Those tools keep their state
-    under `$HOME` by convention and no curated list will ever name them all: found live
-    2026-09-08, when a repo's own `tools/remote_build.py` died with `[Errno 30]
-    Read-only file system: '/root/.cache/lore-remote-build/last-activity'` — a script the
-    agent was asked to run, failing on a path nothing in switchboard has ever heard of.
-
-    So this is the tooling grant, and it is the smallest thing that closes that class
-    without dropping the sandbox: writes below `$HOME` are the agent's own machine state,
-    and `/etc`, `/usr`, `/var` and any checkout outside `$HOME` stay read-only. Skipped
-    when `$HOME` is unset or resolves to `/`, where granting it would be the same as
-    turning the sandbox off by accident rather than on purpose (`codex.sandbox_mode`).
+    every agent to write, whichever provider it is running on — and `_tool_state_roots`
+    adds the ones that are codex's alone, because only codex's sandbox reaches the tools.
     """
     from . import store
-    roots = store.agent_roots(cwd)
-    try:
-        home = Path.home().resolve()
-        if str(home) != home.root:
-            roots.append(str(home))
-    except Exception:                    # noqa: BLE001 — no home is not a spawn failure
-        pass
-    return list(dict.fromkeys(roots))
+    return list(dict.fromkeys(store.agent_roots(cwd) + _tool_state_roots()))
 
 
 def _provider_settings(name: str, cwd: Optional[Path]) -> tuple[dict, dict]:
@@ -503,7 +525,9 @@ def _config_toml(worktree: Optional[str], model: Optional[str], effort: Optional
         # neither be seen nor ring anyone. Nor, once those were fixed, write the note the
         # protocol asks it for or file the bug the protocol tells it to file. See
         # `store.agent_roots` for what each of the four is and why it is not
-        # optional, and `_writable_roots` for the one grant that is codex's alone.
+        # optional, and `_tool_state_roots` for the grants that are codex's alone —
+        # the XDG bases, because this sandbox binds the agent's TOOLS and not just its
+        # own file calls.
         #
         # `network_access` — off by default in this mode, which is not what
         # `--permission-mode auto` means for a claude agent: no `git fetch`, no `git
