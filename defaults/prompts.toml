@@ -240,8 +240,9 @@ a reviewer can name one; the gaps in them are deliberate.
   metaphor), modality, paradigm, gold-plating, ratchet (as a metaphor), evacuate (for moving
   code), endgame, north star, flywheel. These read as technical and usually have a plainer
   concrete word. "Substrate" becomes "base". "Wedge in" becomes "add". "Vector" becomes "way"
-  or "method". "Gold-plating" becomes "more than the job needs". "Evacuate" becomes "move
-  out". "Endgame" becomes "the last phase". Pick the concrete word.
+  or "method". "Gold-plating" becomes "more than the job needs". "Ratchet" becomes the
+  mechanism's real name or "a limit that only tightens". "Evacuate" becomes "move out".
+  "Endgame" becomes "the last phase". Pick the concrete word.
 - 27. Say what it does, not how it feels. "the database stays close at hand", "SQL you can
   read" name a feeling. The fix names the mechanism or a number. Ask what the sentence tells
   the reader to do or know, then write that; if you cannot restate it as a concrete
@@ -266,12 +267,12 @@ a reviewer can name one; the gaps in them are deliberate.
   becomes "The parser rejects a bad date, exits with code 2, and writes nothing." Write whole
   sentences with their articles and verbs, and spell out arrows and abbreviations.
 
-Two things above this override two of those rules, and only those two. The protocol decides
-the SHAPE of anything a human reads: bullets, sections, whitespace, one idea per bullet. And
-the protocol allows clipped register on scaffolding in what a human reads, which means rule 33
-does not apply there, only within the bounds the protocol already sets. Rule 33 applies in
-full to everything else you write, a message to another agent included. Every other rule here
-applies to every word you write, whoever reads it.
+- Two things above this override two of those rules, and only those two. The protocol
+  decides the SHAPE of anything a human reads: bullets, sections, whitespace, one idea per
+  bullet. And the protocol allows clipped register on scaffolding in what a human reads,
+  which means rule 33 does not apply there, only within the bounds the protocol already
+  sets. Rule 33 applies in full to everything else you write, a message to another agent
+  included. Every other rule here applies to every word you write, whoever reads it.
 """
 
 
