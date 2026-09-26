@@ -37,7 +37,7 @@ from switchboard import plugins  # noqa: E402
 from switchboard import presets  # noqa: E402
 from switchboard import store  # noqa: E402
 from switchboard import validate  # noqa: E402
-from switchboard.herdr import section_body  # noqa: E402
+from switchboard.herdr import SECTION_PREFIX, section_body  # noqa: E402
 
 from test_workspace import FakeHerdr  # noqa: E402
 
@@ -913,6 +913,22 @@ class FragmentInjectionTest(Sandbox):
         """
         return [section_body(p) for p in self.h.started[-1]["prompts"]]
 
+    def bindings(self) -> list[str]:
+        """The spawned sections that are bindings, which is what these tests are about.
+
+        Four assertions below used `prompts()[-1]` to mean "the last binding", true only
+        while the bindings happened to be the last thing assembled. They are not: the
+        writing rules (`spawn.unslop`) are appended after them unconditionally, so the
+        proxy broke the day that landed. Dropping that section BY ITS HEADING rather than
+        by a count keeps each test on the question it was asking — where a fragment lands
+        among the `--with` entries, whether it was truncated, whether it was flattened —
+        and means another unconditional tail would not silently shift them again.
+        """
+        label = config.prompts(self.repo)["section"]["unslop"]
+        head = f"{SECTION_PREFIX}{label}\n"
+        return [section_body(p) for p in self.h.started[-1]["prompts"]
+                if not p.startswith(head)]
+
     FRAGMENT = "run `sb plugin todo list` first"
 
     def test_a_bound_fragment_reaches_the_system_prompt(self):
@@ -938,7 +954,7 @@ class FragmentInjectionTest(Sandbox):
         self.preset("p", "# p\nPPP")
         self.bind("p", "@todo")
         self.run_sb("delegate", "do a thing", "--name", "a thing", "--with", "extra")
-        tail = self.prompts()[-3:]
+        tail = self.bindings()[-3:]
         self.assertEqual(tail, ["PPP", self.FRAGMENT, "extra"])
 
     def test_as_does_not_displace_a_fragment(self):
@@ -946,7 +962,7 @@ class FragmentInjectionTest(Sandbox):
         self.bind("@todo")
         self.run_sb("delegate", "do a thing", "--name", "a thing", "--as", "you are a duck")
         self.assertIn("you are a duck", self.prompts())
-        self.assertEqual(self.prompts()[-1], self.FRAGMENT)
+        self.assertEqual(self.bindings()[-1], self.FRAGMENT)
 
     def test_no_prompt_line_contains_a_newline(self):
         """herdr refuses any agent argument containing one. The fragment is flattened by
@@ -955,7 +971,7 @@ class FragmentInjectionTest(Sandbox):
         self.enable("todo", "multi")
         self.bind("@todo", "@multi")
         self.run_sb("delegate", "do a thing", "--name", "a thing")
-        self.assertIn("a ; b", self.prompts()[-1])
+        self.assertIn("a ; b", self.bindings()[-1])
         for p in self.prompts():
             self.assertNotIn("\n", p)
 
@@ -997,7 +1013,7 @@ class FragmentInjectionTest(Sandbox):
         self.bind("@fat")
         code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing")
         self.assertEqual(code, 0, err)
-        self.assertLessEqual(len(self.prompts()[-1]), plugins.FRAGMENT_BUDGET)
+        self.assertLessEqual(len(self.bindings()[-1]), plugins.FRAGMENT_BUDGET)
         _, out, _ = self.run_sb("log", "--json")
         self.assertIn("fragment_truncated",
                       [e["kind"] for e in json.loads(out)["events"]])
