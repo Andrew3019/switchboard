@@ -5274,6 +5274,19 @@ class Broker:
             "text": self._say("spawn.researcher_direct") if direct else "",
         })
         segments.extend(self._binding_segments(role, with_, report=_report_bindings))
+        # The writing rules, LAST and unconditional. Last because nothing may read as an
+        # override of it: a role prompt or a preset that happens to be chatty about how to
+        # phrase something sits above it, not after it. Unconditional because the skill it
+        # comes from says "Must always apply" and disables its own model invocation, so
+        # there is no state to condition on and no turn to wait for — see the entry on
+        # `spawn.unslop` in defaults/prompts.toml for why it is not a preset or a guidance
+        # row.
+        unslop_source, unslop_owner = self._configured_prompt_source("spawn.unslop")
+        segments.append({
+            "kind": "unslop", "source": unslop_source,
+            "condition": "always", "ownership": unslop_owner,
+            "included": True, "text": self._say("spawn.unslop"),
+        })
 
         # The labels come FIRST because the concatenation is built out of them (INV-62,
         # `labelled_segments`). Numbering the rows after joining them was fine while the

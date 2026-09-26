@@ -865,6 +865,34 @@ class BrokerTest(unittest.TestCase):
                          "separate first user message")
         self.assertTrue(manifest["external_boundaries"])
 
+    def test_every_role_and_provider_ends_its_standing_prompt_with_the_writing_rules(self):
+        """The whole point of the `unslop` segment is "every single agent", so the guarantee
+        is tested across the axes an agent can differ on: its role, and the provider that
+        assembles its prompt. LAST is part of the guarantee too — a role prompt or a preset
+        delivered after it would read as permission to ignore it."""
+        for role in sorted(self.b.roles):
+            for model in (None, "gpt-5.6-sol"):
+                with self.subTest(role=role, model=model):
+                    manifest = self.b.effective_instructions(role=role, model=model)
+                    active = [s for s in manifest["segments"] if s["included"]]
+                    self.assertEqual(active[-1]["kind"], "unslop")
+                    self.assertEqual(active[-1]["condition"], "always")
+                    self.assertIn("HOW YOU WRITE", manifest["rendered"])
+                    self.assertIn("Cut AI tells", manifest["rendered"])
+
+    def test_a_repo_rewords_the_writing_rules_like_any_other_prompt_entry(self):
+        """It lives in `prompts.toml` rather than a file of its own so that a repo can
+        replace it by entry, and so the manifest says whose text an agent is reading. A
+        rule an agent cannot trace to a file is one it cannot argue with."""
+        sw = self.repo / ".switchboard"
+        sw.mkdir(parents=True, exist_ok=True)
+        (sw / "prompts.toml").write_text('[spawn]\nunslop = "Write plainly."\n')
+        segment = next(s for s in self.b.effective_instructions(role="worker")["segments"]
+                       if s["kind"] == "unslop")
+        self.assertEqual(segment["text"], "Write plainly.")
+        self.assertEqual(segment["ownership"], "external-to-switchboard")
+        self.assertEqual(segment["source"], str(sw / "prompts.toml"))
+
     def test_instruction_renderer_distinguishes_binding_and_caller_provenance(self):
         preset_dir = self.repo / ".switchboard" / "presets"
         preset_dir.mkdir(parents=True)
