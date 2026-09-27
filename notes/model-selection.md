@@ -5,19 +5,30 @@ this repo actually does today.
 
 Dated 2026-08-16. Opus 5 is three weeks old, so all sentiment here is fresh and unsettled.
 
+**Since superseded, 2026-09-27:** Anthropic shipped Opus 5.5, which beats Opus 5 on every
+published benchmark at roughly 40% lower cost and 30% faster. Andrew moved every Opus tier
+in `defaults/models.toml` — `default`, `strong`, `opus-5-medium` and `prose` — to
+`claude-opus-5-5` at medium effort, so all four now resolve identically. `prose` moved with
+them, and that one is a knowing override rather than a like-for-like upgrade: its 4.8 pin was
+about writing style, not capability, and Opus 5.5's prose and verbosity behaviour has not been
+independently verified. If the "Claudeslop" complaints below still apply to 5.5, `prose` is
+the tier to revisit. Everything after this paragraph describes the state on 2026-08-16.
+
 ## The models, briefly
 
 | Model | id | $/MTok in/out | ~$ per agent task | What it is for |
 |---|---|---|---|---|
 | Fable 5 | `claude-fable-5` | $10 / $50 | $1.40–4.40 | Hardest reasoning, longest autonomous runs. Slow. Runs until stopped. |
+| Opus 5.5 | `claude-opus-5-5` | ~40% under Opus 5 | — | Current flagship since 2026-09-27. Beats Opus 5 on every published benchmark, and is reported ~30% faster. Superseded Opus 5 as the pin for `default`, `strong`, `opus-5-medium` and `prose`. Exact rates not checked against the console. |
 | Opus 5 | `claude-opus-5` | $5 / $25 | $0.70–2.20 | Anthropic's default for agentic coding. Thinking on by default. Chattiest of the family. |
 | Opus 4.8 | `claude-opus-4-8` | $5 / $25 | $0.70–2.20 | Previous flagship, same price. Terser than 5. Under-reaches for subagents/search. |
 | Opus 4.7 / 4.6 | `claude-opus-4-7` / `-4-6` | $5 / $25 | $0.70–2.20 | Older. No reason to pick over 4.8 except pinning. |
 | Sonnet 5 | `claude-sonnet-5` | $2 / $10 | $0.30–0.90 | Prior-Opus-tier quality at ~2.5x less. Full effort ladder. |
 | Haiku 4.5 | `claude-haiku-4-5-20251001` | $1 / $5 | $0.15–0.45 | Cheapest. Not a like-for-like substitute; also its permission classifier stalls unattended agents. |
 
-All eight are active, none retired. All four Opus variants cost exactly the same —
-choosing between them is a behaviour choice, never a cost one.
+All of these are active, none retired. Opus 5, 4.8, 4.7 and 4.6 cost exactly the same as each
+other, so choosing among those four is a behaviour choice and never a cost one; Opus 5.5
+broke that, being both newer and cheaper.
 
 Task-cost figures assume 150k–500k input / 20k–60k output with ~80% cache reads.
 That cache ratio is our own modelling assumption, not an Anthropic number.
@@ -98,7 +109,8 @@ Reported rather than fixed — neither was in scope at the time.
    Code CLI decided its default was — which could change under you without any switchboard
    change, and meant switchboard could not answer "what model is my fleet on".
    **Since closed**: every shipped Claude tier now names a concrete id
-   (`defaults/models.toml`), `default` among them at `claude-opus-5`. `standard` is the one
+   (`defaults/models.toml`), `default` among them at `claude-opus-5-5` since 2026-09-27 and
+   at `claude-opus-5` before that. `standard` is the one
    tier left that still defers, and it defers on purpose — it is the name for that answer.
 
 ## What this costs

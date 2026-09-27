@@ -60,12 +60,17 @@ model    = "claude-sonnet-5"
 effort   = "medium"
 
 [tiers.default]
-# Pins the current flagship, and no effort — the CLI's own level. `default` is the tier a
-# role names when it has no reason to want anything else, and what that resolves to should
-# be a thing you can look up rather than whatever the `opus` alias moved to this week.
-# `standard` below is where "defer to the provider CLI" still lives.
+# Pins the current flagship at `medium`. `default` is the tier a role names when it has no
+# reason to want anything else, and what that resolves to should be a thing you can look up
+# rather than whatever the `opus` alias moved to this week. `standard` below is where
+# "defer to the provider CLI" still lives.
+#
+# It carried no effort key at all until 2026-09-27 — the CLI's own level — and took one
+# when every Opus tier in this file moved to `claude-opus-5-5` at `medium` on Andrew's
+# instruction.
 provider = "claude"
-model    = "claude-opus-5"
+model    = "claude-opus-5-5"
+effort   = "medium"
 
 [tiers.standard]
 # The older name for `default`. Still honoured so config written against it keeps working.
@@ -81,14 +86,20 @@ model    = "claude-sonnet-5"
 effort   = "high"
 
 [tiers.strong]
+# RESOLVES IDENTICALLY TO `default` since 2026-09-27: same model, same effort. It was the
+# flagship at `high` where `default` passed no effort at all, and the move of every Opus
+# tier to `claude-opus-5-5` at `medium` collapsed the difference. Kept as a name because
+# roles, docs and `--model strong` all type it, and because it is the name to re-point if
+# the escalation it used to mean is wanted again.
 provider = "claude"
-model    = "claude-opus-5"
-effort   = "high"
+model    = "claude-opus-5-5"
+effort   = "medium"
 
 [tiers.opus-5-medium]
-# The middle notch of the flagship. `default` is this model at the CLI's own effort and
-# `strong` is it at `high`; this is the level between them, named because a role wanted it.
-# Same shape as `strong`, one word different.
+# The flagship at `medium`, named because a role wanted that level spelled out. It was the
+# middle notch between `default` (no effort) and `strong` (`high`); since 2026-09-27 all
+# three resolve identically, so the name now records which level `builder` asked for rather
+# than distinguishing this tier from the other two.
 #
 # `builder` IS ON IT, and has been twice. It was that role's tier from 2026-09-01, when the
 # role's `gpt-5.6-sol` pin was retired, to 2026-09-07, when the role moved to
@@ -97,7 +108,7 @@ effort   = "high"
 # was on, kept because retiring a name people type is a separate decision from retiring the
 # pin that used it — the same argument `gpt-5.6-sol` makes for itself.
 provider = "claude"
-model    = "claude-opus-5"
+model    = "claude-opus-5-5"
 effort   = "medium"
 
 # No tier pins `xhigh`. A `deep` tier here did — opus at xhigh, for workers — and lasted a
@@ -106,19 +117,28 @@ effort   = "medium"
 # if someone has a reason, it just is not what a shipped tier hands every spawn of a kind.
 
 [tiers.prose]
-# THE ONE TIER THAT PINS AN OLDER ID. The others pin the current generation; this pins the
-# PREVIOUS flagship, and deliberately. The choice it encodes is not "the current Opus" — it
-# is *that* Opus. Leads write the prose Andrew reads, and the output style of the model
-# `strong` now names is the thing being avoided (`notes/model-selection.md`: the verbosity,
-# hedging and apology loops the community named within a week of launch). Same price as
-# `strong`, so this is a behaviour choice and never a cost one.
+# ON `claude-opus-5-5` SINCE 2026-09-27, at Andrew's explicit instruction, which overrode
+# the older pin this tier was built around. It now resolves identically to `default`,
+# `strong` and `opus-5-medium`.
 #
-# Accepting the cost of a pinned id knowingly: the day this id is retired, spawns on this
-# tier fail outright. That is the correct failure — it asks the question again rather than
-# silently sliding onto the model this tier was invented to avoid. When it happens, re-read
-# the table in `notes/model-selection.md` and pick again.
+# WHAT THE OVERRIDE GAVE UP. This was the one tier that pinned an older id: Opus 4.8, and
+# not as a cost choice — all Opus variants cost the same. Leads and the dispatcher write the
+# prose Andrew reads, and 4.8 was chosen to dodge Opus 5's output style
+# (`notes/model-selection.md`: the verbosity, hedging and apology loops the community named
+# "Claudeslop" within a week of launch). The choice it encoded was not "the current Opus" —
+# it was *that* Opus.
+#
+# Opus 5.5's prose style has not been evaluated against that complaint. Moving anyway was
+# deliberate and informed, not an oversight: Andrew was told what the pin was for and said
+# to move it. If the style complaints turn out to still apply, this is the tier to re-pin,
+# and `notes/model-selection.md` has the table to pick from.
+#
+# THE ARGUMENT FOR A PINNED ID, which the header of this file points here for and which the
+# move does not change: the day an id is retired, spawns on the tier naming it fail outright.
+# That is the correct failure — it asks the question again rather than silently sliding onto
+# whatever the alias moved to.
 provider = "claude"
-model    = "claude-opus-4-8"
+model    = "claude-opus-5-5"
 effort   = "medium"
 
 
