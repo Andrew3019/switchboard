@@ -730,7 +730,7 @@ class RolesTest(unittest.TestCase):
 
         Asserted as (provider, model, effort) and not as CLI flags, because a tier can name
         a provider whose flags are not Claude's. The flags are still checked underneath, on
-        the two tiers that differ in shape.
+        two of the tiers.
 
         NO SHIPPED ROLE IS ON CODEX, and none is on a GATED tier (`enabled_by`) either.
         `builder` was the one that was: it went `gpt-5.6-sol` -> `opus-5-medium`
@@ -743,11 +743,11 @@ class RolesTest(unittest.TestCase):
         """
         r = roles.load(self.repo)
         want = {
-            "dispatcher": ("claude", "claude-opus-4-8", "medium"),
+            "dispatcher": ("claude", "claude-opus-5-5", "medium"),
             "researcher": ("claude", "claude-sonnet-5", "medium"),
             "reviewer":   ("claude", "claude-sonnet-5", "high"),
-            "worker":     ("claude", "claude-opus-5",   None),
-            "planner":    ("claude", "claude-opus-5",   "high"),
+            "worker":     ("claude", "claude-opus-5-5", "medium"),
+            "planner":    ("claude", "claude-opus-5-5", "medium"),
         }
         self.assertEqual(sorted(want), sorted(roles.load(self.repo)))
         got = {}
@@ -759,7 +759,7 @@ class RolesTest(unittest.TestCase):
         self.assertEqual(roles.get(r, "reviewer").spec().cli_args(),
                          ["--model", "claude-sonnet-5", "--effort", "high"])
         self.assertEqual(roles.get(r, "worker").spec().cli_args(),
-                         ["--model", "claude-opus-5"])
+                         ["--model", "claude-opus-5-5", "--effort", "medium"])
 
     def test_a_gated_tier_is_refused_at_the_role_that_asked_for_it(self):
         """`Role.spec()` is where a tier and the role about to run it are both in hand.
@@ -799,7 +799,7 @@ class RolesTest(unittest.TestCase):
         """`sb delegate --model <tier>` picks another tier, not another mechanism."""
         r = roles.load(self.repo)
         spec = roles.get(r, "researcher").spec("strong")     # the role's own tier is cheap
-        self.assertEqual(spec.cli_args(), ["--model", "claude-opus-5", "--effort", "high"])
+        self.assertEqual(spec.cli_args(), ["--model", "claude-opus-5-5", "--effort", "medium"])
 
     def test_a_role_never_hands_out_a_bare_model_id(self):
         """model_id() is gone: it dropped effort, and every caller of it was a bug."""

@@ -98,8 +98,10 @@ reverted it the day it landed (2026-08-16): no shipped tier pins `xhigh`, and th
 worker gets is not a thing to decide for every worker ever spawned.
 
 The reasoning that survives is the per-call half. Which work repays a better model is a real
-fact, and `sb delegate --model strong` acts on it where the evidence for it is, instead of
-charging every worker spawn for the one that needed it.
+fact, and `sb delegate --model <tier>` acts on it where the evidence for it is, instead of
+charging every worker spawn for the one that needed it. `--model strong` was that escalation
+until 2026-09-27; it now resolves to exactly what `default` does, so an escalation above a
+worker's own tier needs a tier that actually names something stronger.
 
 THE PER-CALL HALF NOW POINTS BOTH WAYS (2026-09-01). `--model strong` was the only example
 and it only went up. `--model gpt-luna-max-effort` is the other direction — the cheap model

@@ -304,12 +304,13 @@ the form their roles need.
 The prompt is flattened to a single line at spawn, so bullets become `;` separators. Write
 sentences that survive that.
 
-TIER: `prose`, sharing it with lead — Opus 4.8 at medium effort. Not for the decision it
-makes, which is still one small one (lead or worker), but for WHO READS IT. This is the top
-agent: the only role a person types at all day, and the only one whose every word reaches
-them directly rather than through a parent's summary. `prose` is the tier that exists for
-exactly that — see its definition in `defaults/models.toml` for why it pins the older Opus
-and what output style it is avoiding.
+TIER: `prose`, sharing it with lead — Opus 5.5 at medium effort since 2026-09-27, Opus 4.8
+before that. Not for the decision it makes, which is still one small one (lead or worker),
+but for WHO READS IT. This is the top agent: the only role a person types at all day, and
+the only one whose every word reaches them directly rather than through a parent's summary.
+`prose` is the tier that exists for exactly that — see its definition in
+`defaults/models.toml` for the output style the 4.8 pin was avoiding and why Andrew
+overrode it anyway.
 
 So the cost argument that put it on `cheap` still holds on the work and loses on the
 audience. It said `cheap` from 2026-08-16, and `default` before that; both were reasoning

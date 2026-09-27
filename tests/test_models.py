@@ -68,7 +68,7 @@ class ModelsTest(unittest.TestCase):
         """
         t = self.load()
         self.assertEqual(t.resolve("cheap").model, "claude-sonnet-5")
-        self.assertEqual(t.resolve("strong").model, "claude-opus-5")
+        self.assertEqual(t.resolve("strong").model, "claude-opus-5-5")
         pinned = {n for n in t.names()
                   if (t.resolve(n).model or "").startswith("claude-")}
         self.assertEqual(pinned, {"cheap", "careful", "strong", "default", "prose",
@@ -82,7 +82,7 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(
             self.load().resolve("cheap").cli_args(), ["--model", "claude-sonnet-5", "--effort", "medium"])
         self.assertEqual(
-            self.load().resolve("strong").cli_args(), ["--model", "claude-opus-5", "--effort", "high"])
+            self.load().resolve("strong").cli_args(), ["--model", "claude-opus-5-5", "--effort", "medium"])
 
     def test_caller_never_branches_on_provider(self):
         """The spec answers 'what flags', not 'which provider' — that is the whole point."""
@@ -149,7 +149,7 @@ class ModelsTest(unittest.TestCase):
         self.write_repo('[tiers.strong]\neffort = "max"\n')
         spec = self.load().resolve("strong")
         self.assertEqual(spec.effort, "max")
-        self.assertEqual(spec.model, "claude-opus-5")
+        self.assertEqual(spec.model, "claude-opus-5-5")
 
     # -- provider ---------------------------------------------------------
 
@@ -459,15 +459,15 @@ class CliSurfaceTest(unittest.TestCase):
         d = self._models_json()
         self.assertEqual(d["tiers"]["cheap"]["cli_args"],
                          ["--model", "claude-sonnet-5", "--effort", "medium"])
-        # `default` pins a model but no effort, so it resolves to the one flag.
-        self.assertEqual(d["tiers"]["default"]["cli_args"], ["--model", "claude-opus-5"])
+        self.assertEqual(d["tiers"]["default"]["cli_args"],
+                         ["--model", "claude-opus-5-5", "--effort", "medium"])
 
     def test_models_verb_sees_repo_overrides(self):
         (self.repo / ".switchboard" / "models.toml").write_text(
             '[tiers.strong]\neffort = "max"\n')
         d = self._models_json()
         self.assertEqual(d["tiers"]["strong"]["cli_args"],
-                         ["--model", "claude-opus-5", "--effort", "max"])
+                         ["--model", "claude-opus-5-5", "--effort", "max"])
 
     def test_models_verb_reports_an_unspawnable_tier_instead_of_dying(self):
         """A provider with no backend is legal config; the listing still has to render."""

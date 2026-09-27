@@ -508,7 +508,7 @@ class BrokerTest(unittest.TestCase):
         """`--model strong` must be resolved, not handed to the CLI as a model id."""
         self.b.delegate("t", topic="t", role="worker", model="strong", me="orch")
         self.assertEqual(self.h.started[0]["model_args"],
-                         ["--model", "claude-opus-5", "--effort", "high"])
+                         ["--model", "claude-opus-5-5", "--effort", "medium"])
 
     def test_a_codex_tier_is_inherited_by_a_child_that_names_none(self):
         """A DeepSeek agent's whole subtree runs on DeepSeek, without anyone retyping it.
@@ -551,7 +551,7 @@ class BrokerTest(unittest.TestCase):
                            cwd=str(self.repo))
         name = self.b.delegate("t", topic="t", role="worker", model="strong", me="ds")
         self.assertEqual(self.h.started[0]["model_args"],
-                         ["--model", "claude-opus-5", "--effort", "high"])
+                         ["--model", "claude-opus-5-5", "--effort", "medium"])
         self.assertEqual(store.get_agent(self.db, name)["tier"], "strong")
 
     def test_a_spawn_names_its_agent_in_its_pane_s_environment(self):
@@ -4038,7 +4038,7 @@ class BrokerTest(unittest.TestCase):
         self.h.started.clear()
         self.b.restore(name)
         self.assertEqual(self.h.started[-1]["model_args"],
-                         ["--model", "claude-opus-5", "--effort", "high"])   # not researcher's
+                         ["--model", "claude-opus-5-5", "--effort", "medium"])   # not researcher's
 
     def test_restore_accepts_a_legacy_stored_raw_model_id(self):
         store.create_agent(self.db, name="kid", role="worker", session_id="sess-kid",
@@ -4052,7 +4052,8 @@ class BrokerTest(unittest.TestCase):
                            cwd=str(self.repo), workspace="ws", branch="ws")
         self.b.delegate("t", topic="t", role="worker", me="old")
         # The child comes up on worker's own tier, not the parent's stale raw id.
-        self.assertEqual(self.h.started[-1]["model_args"], ["--model", "claude-opus-5"])
+        self.assertEqual(self.h.started[-1]["model_args"],
+                         ["--model", "claude-opus-5-5", "--effort", "medium"])
 
     def test_a_row_with_no_recorded_tier_restores_on_its_roles_tier(self):
         """NULL means no override was given — which is what every row written before the
