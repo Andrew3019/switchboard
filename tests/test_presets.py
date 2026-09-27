@@ -108,6 +108,36 @@ class BindingTest(unittest.TestCase):
         self.write('all = ["!reset", "own-files"]\n')
         self.assertEqual(presets.for_role(self.repo, "worker"), ["own-files"])
 
+class ShippedCodeStyleTest(unittest.TestCase):
+    """The one shipped preset FILE bound to every agent.
+
+    Separate from `BindingTest`, which is about layering and reads the baseline rather than
+    naming what is in it. This test is the opposite: it pins that `code-style` is IN the
+    baseline, because the whole design is that no role and no repo has to opt in. Losing
+    the binding would cost nothing visible in any single spawn.
+    """
+
+    repo = Path("/nonexistent-repo")
+
+    def test_it_is_bound_to_every_agent_and_read_last(self):
+        every, per_role = presets.bindings(self.repo)
+        self.assertEqual(every[-1], "code-style")
+        self.assertEqual(presets.for_role(self.repo, "worker")[-1], "code-style")
+        self.assertEqual(presets.for_role(self.repo, "qa")[:len(every)], list(every))
+        for role in per_role:
+            self.assertIn("code-style", presets.for_role(self.repo, role))
+
+    def test_it_resolves_to_one_line_of_the_shipped_rules(self):
+        """Bound names are resolved into what becomes an agent ARGUMENT, and herdr refuses
+        a newline in one. A preset that stopped flattening would fail every spawn."""
+        line, = presets.resolve(["code-style"], self.repo)
+        self.assertNotIn("\n", line)
+        self.assertNotIn("<!--", line)
+        self.assertIn("Inline comments are forbidden by default.", line)
+        self.assertIn("Add or change a test only when it protects changed observable "
+                      "behavior", line)
+
+
 class PreRenameSpellingTest(unittest.TestCase):
     """`.switchboard/plugins/` and `plugins.toml` are what every repo had before the split.
 

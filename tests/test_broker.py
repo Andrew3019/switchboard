@@ -880,6 +880,26 @@ class BrokerTest(unittest.TestCase):
                     self.assertIn("HOW YOU WRITE", manifest["rendered"])
                     self.assertIn("Cut AI tells", manifest["rendered"])
 
+    def test_every_role_and_provider_carries_the_code_style_rules(self):
+        """`code-style` is bound to `all`, so the guarantee is the same one `unslop` has and
+        is tested on the same two axes: the role, and the provider that assembles the
+        prompt. It is a global binding rather than a standing segment because it is prompt
+        text a repo can replace by file, and it lands before `unslop` because prose rules
+        are the ones that must read last."""
+        for role in sorted(self.b.roles):
+            for model in (None, "gpt-5.6-sol"):
+                with self.subTest(role=role, model=model):
+                    manifest = self.b.effective_instructions(role=role, model=model)
+                    active = [s for s in manifest["segments"] if s["included"]]
+                    seg = next(s for s in active if s.get("binding") == "code-style")
+                    self.assertEqual(seg["condition"], "global binding")
+                    self.assertEqual(seg["ownership"], "switchboard-owned")
+                    self.assertIn("do not use surrounding code as a quality standard",
+                                  manifest["rendered"])
+                    self.assertLess(active.index(seg),
+                                    next(i for i, s in enumerate(active)
+                                         if s["kind"] == "unslop"))
+
     def test_a_repo_rewords_the_writing_rules_like_any_other_prompt_entry(self):
         """It lives in `prompts.toml` rather than a file of its own so that a repo can
         replace it by entry, and so the manifest says whose text an agent is reading. A

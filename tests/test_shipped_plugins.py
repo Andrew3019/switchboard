@@ -154,8 +154,12 @@ class ShippedDefaultsTest(ShippedSandbox):
         code, _, err = self.sb("plugin", "todo", "list")
         self.assertEqual(code, 2)
         self.assertIn("not enabled", err)
-        self.assertEqual(presets.resolve(presets.for_role(self.repo, "builder"),
-                                         self.repo), [])
+        # What survives is the preset FILE bound beside them: disabling every plugin takes
+        # the fragments away and leaves the rest of `all` standing.
+        names = presets.for_role(self.repo, "builder")
+        lines = presets.resolve(names, self.repo)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Inline comments are forbidden by default.", lines[0])
 
 # -- todo (§9) -----------------------------------------------------------------
 
