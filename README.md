@@ -6,6 +6,11 @@ back, or stops and asks a human — and everything it says leaves through that c
 the coordination is something you can see, log and reason about rather than something
 buried in a model's context.
 
+## Preview
+
+<img width="1440" height="872" alt="Screenshot 2026-09-26 at 20 23 34" src="https://github.com/user-attachments/assets/7e7631c5-7453-49a7-b2e2-2810cb6a4204" />
+
+
 ## The problem
 
 One agent working alone on a real repository runs out of room. The obvious fix is more
