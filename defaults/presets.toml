@@ -80,7 +80,14 @@
 # and is read when a job comes up, so what is paid on every spawn forever is the trigger
 # alone. Unbinding it here is exactly "no agent is told", which is how this design is
 # turned off — and deleting the plugin folder does the same thing with a warning.
-all = ["@report-bug", "@suggestions", "@plans"]
+#
+# `code-style` is the one preset FILE in this list, and it is here on the same bar. The four
+# decisions it settles come up in every code task on every model: when a comment earns its
+# place, what gets a defensive branch, when a test is worth adding, which verification
+# command to run. Nothing else in an agent's standing prompt settles any of them.
+# `spawn.unslop` governs the prose an agent writes; this governs the code. It is bound last
+# so it sits closest to that segment. The file's own editor notes carry the research.
+all = ["@report-bug", "@suggestions", "@plans", "code-style"]
 
 # Per-role additions, appended to `all`.
 #
