@@ -7602,8 +7602,8 @@ class Broker:
 
     def _open_work(self, who: str, duties) -> list[str]:
         """What holds an agent back from cleanup (#331): incomplete Steps it owns, Questions it asked."""
-        work = [f"step {s['plan']}/{s['step']} ({s['state']})" for s in duties.owned_by(who)
-                if s.get("state") != "complete"]
+        work = [f"step {s.get('plan')}/{s.get('step')} ({s.get('state')})"
+                for s in duties.owned_by(who) if s.get("state") != "complete"]
         return work + [f"question {q['id']}" for q in store.open_questions(self.db, asker=who)]
 
     def _drop_questions(self, who: str, *, by: str) -> None:
