@@ -437,10 +437,10 @@ inline_mail = 8000
 
 # `sb ask human "<question>"`. NOT a runaway guard and not style advice — the only cap here
 # that is load-bearing, because the question line is the one field whose SIZE tells the
-# agent it is using the verb wrong. The human never reads it (he reads the agent's own
-# chat, via `sb inspect`); it is bookkeeping on a board row. An orchestrator wrote its
-# entire answer to him into the old `sb block` reason — several paragraphs, findings and
-# questions — left its own chat empty, and when the newline check refused it, flattened the
+# agent it is using the verb wrong. It is the one-line headline of the question's card on
+# `sb web` and a board row; the detail goes in the ask's parts and the agent's own chat.
+# An orchestrator wrote its entire answer to him into the old `sb block` reason — several
+# paragraphs, findings and questions — left its own chat empty, and when the newline check refused it, flattened the
 # whole thing into one run-on line and got through. 200 characters is roomy for the one
 # line this is meant to be and has no room at all for a report, which is the only way to
 # make the flattening trick fail too. Raising it re-opens that hole; the capability it

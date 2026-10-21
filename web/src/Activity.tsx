@@ -51,7 +51,7 @@ function CloseConfirm({ repo, tree, onCancel }: { repo: string; tree: Tree; onCa
       <ul>
         {preview.questions.length > 0 && (
           <li>
-            Withdraws {preview.questions.length} open question{preview.questions.length > 1 ? "s" : ""}:{" "}
+            Ends {preview.questions.length} open question{preview.questions.length > 1 ? "s" : ""} asked by or of these agents:{" "}
             {preview.questions.map((q) => `"${q.body}"`).join(", ")}
           </li>
         )}

@@ -8,6 +8,7 @@ from `sb status --json` run in each repo, so no repo's plugin code is loaded in 
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import mimetypes
@@ -118,10 +119,10 @@ class Discovery:
                 if g in known:
                     out[known[g].id] = known[g]
                     continue
-                base = validate.slug_name(found[g].name) or "repo"
-                rid, n = base, 2
-                while rid in out or rid in self.repos:
-                    rid, n = f"{base}-{n}", n + 1
+                rid = validate.slug_name(found[g].name) or "repo"
+                if rid in out or rid in self.repos or \
+                        sum(c.name == found[g].name for c in found.values()) > 1:
+                    rid = f"{rid}-{hashlib.sha256(str(g).encode()).hexdigest()[:6]}"
                 out[rid] = Repo(rid, g, found[g])
             self.repos = out
             return dict(out)
@@ -149,7 +150,7 @@ def run_sb(repo: Repo, argv: list[str], *, timeout: float = SB_TIMEOUT,
 def _git(cwd: str, *args: str) -> Optional[str]:
     try:
         p = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True,
-                           timeout=15)
+                           env=child_env(), timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return p.stdout if p.returncode == 0 else None
@@ -170,6 +171,9 @@ def _summary(payload: Optional[str]) -> Optional[str]:
     p = _json(payload) or {}
     text = p.get("text") or p.get("summary")
     return text.split(" | verified: ")[0] if text else None
+
+
+FINISHED_STEPS = ("done", "skipped")
 
 
 def _plans(repo: Repo) -> list[dict]:
@@ -241,7 +245,8 @@ class Cache:
         except (OSError, subprocess.TimeoutExpired) as e:
             self.pr_error[repo.id] = str(e)
             return
-        if p.returncode != 0 and "none of the git remotes" in p.stderr:
+        if p.returncode != 0 and ("none of the git remotes" in p.stderr
+                                  or "no git remotes found" in p.stderr):
             self.prs[repo.id] = []
             self.pr_error.pop(repo.id, None)
             return
@@ -319,8 +324,8 @@ def _read_repo(repo: Repo, cache: Cache) -> dict:
         open_by_asker.setdefault(q["asker"], []).append(q)
 
     prs = cache.prs.get(repo.id, [])
-    merge_branches = {p.get("branch") for p in _plans(repo)
-                      if any(s.get("kind") == "merge" and s.get("progress") != "complete"
+    merge_branches = {p.get("branch") or p.get("workspace") for p in _plans(repo)
+                      if any(s.get("kind") == "merge" and s.get("progress") not in FINISHED_STEPS
                              for s in p.get("steps", []))}
     for pr in prs:
         pr["waiting_merge"] = (pr["branch"] in merge_branches and not pr["draft"]) or \
@@ -329,7 +334,7 @@ def _read_repo(repo: Repo, cache: Cache) -> dict:
     def node(name: str, depth: int) -> dict:
         a = agents[name]
         s = a["status"] or {}
-        asks = open_by_asker.get(name, [])
+        asks = sorted(open_by_asker.get(name, []), key=lambda q: q["target"] == HUMAN)
         return {
             "name": name, "parent": a["parent"], "depth": depth, "role": a["role"],
             "visible": a["visible"], "state": a["state"],
@@ -456,7 +461,7 @@ def close_preview(repo: Repo, name: str, cache: Cache) -> dict:
     steps = [{"plan": p.get("id"), "step": s.get("id"), "owner": s.get("owner"),
               "progress": s.get("progress"), "title": s.get("display") or s.get("name")}
              for p in _plans(repo) for s in p.get("steps", [])
-             if s.get("owner") in names and s.get("progress") != "complete"]
+             if s.get("owner") in names and s.get("progress") not in FINISHED_STEPS]
     branches = {r["branch"] or r["workspace"] for r in members}
     prs = [p for p in cache.prs.get(repo.id, []) if p["branch"] in branches]
     closing = (dry["result"] or {}).get("closed", []) if isinstance(dry["result"], dict) else []
@@ -646,7 +651,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, f.read_bytes(), ctype, {
             "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline' "
             "https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
-            "img-src 'self' data:; frame-ancestors 'none'"})
+            "img-src 'self' data:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"})
 
     def do_POST(self):
         if not self._guard():
@@ -655,13 +660,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, b"Origin required", "text/plain")
         if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
             return self._json(415, {"error": "JSON only"})
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > MAX_BODY:
-            return self._json(413, {"error": "too large"})
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if not 0 <= n <= MAX_BODY:
+            return self._json(413, {"error": "bad or oversized body"})
         try:
             body = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
-            return self._json(400, {"error": "bad JSON"})
+            body = None
+        if not isinstance(body, dict):
+            return self._json(400, {"error": "expected a JSON object"})
         parts = [urllib.parse.unquote(p) for p in
                  urllib.parse.urlsplit(self.path).path.strip("/").split("/")]
         if len(parts) != 5 or parts[0] != "api":

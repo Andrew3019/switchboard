@@ -109,5 +109,21 @@ class MarkdownReader(WebTest):
         self.assertEqual(web.read_markdown(self.repo, str(conf))[0], 403)
 
 
+class ClosePreview(WebTest):
+    def test_lists_only_unfinished_plan_steps_the_tree_owns(self):
+        """The plans plugin stores `done`/`skipped`; a finished step listed as stranded buries the real one."""
+        store.create_agent(self.db, name="lead-x", role="lead")
+        plans = self.repo.git_dir / "agentflow" / "plugins" / "plans"
+        plans.mkdir(parents=True)
+        steps = [{"id": f"step-{i}", "owner": "lead-x", "progress": p}
+                 for i, p in enumerate(["done", "skipped", "open"], 1)]
+        (plans / "p-1.json").write_text(json.dumps({"id": "p-1", "steps": steps}))
+        cache = web.Cache(web.Discovery([]))
+        with mock.patch.object(web, "run_sb", return_value={"ok": True, "result": {"closed": []},
+                                                             "error": None}):
+            preview = web.close_preview(self.repo, "lead-x", cache)
+        self.assertEqual([s["step"] for s in preview["steps"]], ["step-3"])
+
+
 if __name__ == "__main__":
     unittest.main()

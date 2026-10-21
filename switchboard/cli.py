@@ -1959,7 +1959,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         others = [] if args.name else b.running_tops()
         name = b.start(name=args.name, task=args.task, model=args.model, about=args.about)
         also = (f"\n  still running: {', '.join(others)}"
-                f" — back to one with: sb start --name {others[-1]}") if others else ""
+                f" — back to one with: sb start --name {others[-1]} --about \"<the job>\"") if others else ""
         _emit(args, f"dispatcher '{name}' ready in its own workspace — switch to it, "
                     f"or: sb tell {name} \"...\"{also}",
               {"name": name, "running": others})

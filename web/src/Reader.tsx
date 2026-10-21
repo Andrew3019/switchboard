@@ -47,7 +47,10 @@ export function Reader({ repo, path, back, now }: { repo: string; path: string; 
 
   const html = useMemo(() => {
     if (!file) return "";
-    const clean = DOMPurify.sanitize(marked.parse(file.text, { async: false }) as string);
+    const clean = DOMPurify.sanitize(marked.parse(file.text, { async: false }) as string, {
+      FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select"],
+      FORBID_ATTR: ["style", "class", "id"],
+    });
     const doc = new DOMParser().parseFromString(clean, "text/html");
     doc.querySelectorAll("a[href$='.md']").forEach((a) => {
       const href = a.getAttribute("href") || "";

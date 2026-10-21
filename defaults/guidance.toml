@@ -264,7 +264,7 @@ id = "spawn-idle-when-the-task-is-still-coming"
 command = "delegate"
 holds = ["spawn"]
 repeat = "once"
-text = "`sb delegate` takes the task as an argument, and that is right whenever you have the task. When you do NOT — somebody said they would give this agent its context themselves, or you are spawning ahead of a brief you are still waiting on — omit the argument entirely: `sb delegate --role worker --name <topic>` spawns the child holding an instruction to wait, and it stays out of STALLED until your first `sb tell` reaches it. Never pass a bare topic label as the task; a child reads whatever you pass as the whole of its instruction and starts on it."
+text = "`sb delegate` takes the task as an argument, and that is right whenever you have the task. When you do NOT — somebody said they would give this agent its context themselves, or you are spawning ahead of a brief you are still waiting on — omit the argument entirely: `sb delegate --role worker --name <topic> --about \"<the job>\"` spawns the child holding an instruction to wait, and it stays out of STALLED until your first `sb tell` reaches it. Never pass a bare topic label as the task; a child reads whatever you pass as the whole of its instruction and starts on it."
 
 
 # REMOVED: `direct-path-tier-at-the-spawn` (Andrew, 2026-09-10). A `command = "delegate"`,
