@@ -289,12 +289,14 @@ class CliBoundaryTest(unittest.TestCase):
                           {"title": None, "target": "https://example.com/pr/1",
                            "kind": "url"}])
 
-    def test_an_answer_may_be_several_lines_and_a_spawn_needs_about(self):
+    def test_an_answer_may_be_several_lines_and_a_delegate_needs_about(self):
         args = parse(["answer", "1", "yes\nand use main"])
         _validate(args)
         self.assertIn("\n", args.answer)
         self.bad(["delegate", "do it", "--name", "x"])
-        self.bad(["start"])
+        # Not `sb start`: only a human runs it, and they are who `--about` is written for.
+        _validate(parse(["start", "--name", "lore2"]))
+        self.bad(["start", "--about", "two\nlines"])
         self.bad(["delegate", "do it", "--name", "x", "--about", "two\nlines"])
 
     def test_a_question_to_an_agent_is_capped_like_a_message(self):
@@ -362,7 +364,7 @@ class CliBoundaryTest(unittest.TestCase):
 
     def test_verbs_with_nothing_to_check_are_untouched(self):
         for argv in (["status"], ["inbox"], ["doctor"], ["init"], ["presets"],
-                     ["cleanup"], ["start", "--about", "a job"]):
+                     ["cleanup"], ["start", "--about", "a job"], ["start"]):
             _validate(parse(argv))           # must not raise
 
 
