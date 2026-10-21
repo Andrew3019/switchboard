@@ -28,6 +28,12 @@ rather than something done to it, and the text says so. And answering is its own
 plain `sb tell`, the human's included, resolves nothing, so the text names `sb answer`,
 `sb withdraw` and `sb escalate` where the old one had only "they answer with `sb tell`".
 
+2026-10-21, sb web — `sb ask human` takes structured parts (`--about`, `--catch-up`,
+`--blocked`, `--recommend`, `--option`, `--link`) that the human reads on the `sb web`
+page, so the positional line is no longer "bookkeeping that reaches nobody": it is the
+one-line decision, the card's headline. The chat rule stands; the parts sit beside it.
+The parts are described, never given as a call to copy (DESIGN-TRUTH 2026-08-14).
+
 To change it for one repo, write `<repo>/.switchboard/protocol.md`. That file REPLACES
 this one rather than merging into it — a protocol assembled from two halves is a protocol
 nobody can read.
@@ -372,8 +378,8 @@ parent to grant it. While a PR waits on that merge, a main that has moved below 
 not yours to chase or keep reporting: the landing compares heads at merge time and catches a
 real divergence there, so re-verify only when your own edit changed the inputs — never
 because main moved or a review happened.
-To delegate: `sb delegate "<task>" --role <role> --name <topic>` spawns a child that
-runs independently. End your turn rather than polling: `sb waiting --all` wakes once
+To delegate: `sb delegate "<task>" --role <role> --name <topic> --about "<the job>"`
+spawns a child that runs independently. End your turn rather than polling: `sb waiting --all` wakes once
 the current live-child cohort has finished, and `--any` wakes on its first result; name
 a subset after either flag when that is the cohort you mean. Plain `sb waiting` records
 that provider-native or other background work is still running, with no Switchboard
@@ -381,7 +387,9 @@ cohort to watch. `--name` is two or three words for the SUBJECT — the agent is
 `<role>-<topic>` from it, so leave the role out, and that name is also its workspace
 and its git branch, which makes it what everyone reads this piece of work by. Name what
 the job is about, never how you want it approached: a spawn with no `--name` is refused,
-because `worker-7` on the board tells the person watching nothing at all.
+because `worker-7` on the board tells the person watching nothing at all. `--about` is
+required too: one plain line on what the job is, written for the human, because it is
+the title they read on that agent's card.
 `Agent` always means a switchboard agent, spawned with `sb delegate` — one that lives in
 its own pane, reports through `sb`, and is visible on the board. It never means your own
 built-in subagent or task tool: nobody can see those, message them, or resume them, and a
@@ -407,12 +415,18 @@ with you and this is the next turn of it; or if the work is finished and needs
 Andrew's input or approval to land — an open pull request waiting on a merge only he
 can authorise is exactly that case. Never work around a broken tool, and never do work you were told
 to delegate: get a human instead.
-`sb ask human "<question>"` is the ONLY way to reach a human — they have no inbox,
-and you never wait on one. Two steps, in order: write the whole thing as the last
-message in your own chat, because THAT is what they read, then `sb ask human` with ONE
-short line naming what you are waiting for. That line is bookkeeping for the board and
-reaches nobody; a question long enough to be the message is refused, and shortening it
-is not the fix. End that chat message with a section headed "Where we are now" and one
+`sb ask human "<decision>"` is the ONLY way to reach a human — they have no inbox,
+and you never wait on one. They read two things: the last message in your own chat,
+and the question's parts on their `sb web` page. Two steps, in order: write the whole
+thing as the last message in your own chat, then `sb ask human`. Its line is the
+decision you are waiting for, in ONE short line; a question long enough to be the
+message is refused, and shortening it is not the fix. Its flags carry the parts, each
+in plain words for someone who has not followed your work: `--about` what the work is,
+`--catch-up` what happened since they last replied to you, `--blocked` what waits on
+the answer, `--recommend` the option you would pick and `--option` each other one, and
+`--link` any URL or file worth opening. The parts and the chat say the same thing; the
+chat may say more. Before asking, run `sb questions --mine` and `sb withdraw` any open
+question the new one replaces. End that chat message with a section headed "Where we are now" and one
 line under it, twenty words at most and the header not counted: what the whole task or
 topic is, and what stage it has reached — investigating, designing, waiting on a
 decision, implementing, verifying. It goes last, immediately before you ask, and it
@@ -441,8 +455,8 @@ more on work already reported — a follow-up question, a push for detail, anyth
 needing the child's own reasoning rather than a line you could quote — is where
 staying in the middle is the wrong shape.
 Who reads it decides this, not the command or the moment: anything a human will read —
-that message, a reply to what they typed, a write-up or update they asked for, a
-summary when your parent is the human — is written to be skimmed. It passes if
+that message, the parts of a question, a reply to what they typed, a write-up or update
+they asked for, a summary when your parent is the human — is written to be skimmed. It passes if
 skimming gives the right idea, fails if they must reread word by word. That is the
 test; the rest serve it.
 Prefer bullets, lists, nested lists, diagrams; break into sections where that helps.
@@ -453,7 +467,10 @@ about twenty, never a paragraph wearing a bullet. One idea per bullet: a second
 independent point is a second bullet, not the same one stretched with a dash or
 semicolon. And when several short items sit side by side — PRs, files, names — don't
 run them together on one line; give each its own line, or a table if they share the
-same fields. Length you cannot cut you can still break up. Open with one line
+same fields. Length you cannot cut you can still break up. Never refer to something by
+its number alone, here or in an `--about` line or an `sb done` summary, which they also
+read on their page: they keep no map of issue, PR or plan numbers, so say "the browser
+page issue", not "#366"; a number may follow the words. Open with one line
 restating what you were asked, always — what the job is, not where it stands.
 Past that, keep something only if cutting it would change what they do next — no set
 of parts to fill in. Options must be comparable without rereading, and the seam

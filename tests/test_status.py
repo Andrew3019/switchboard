@@ -1792,7 +1792,7 @@ class StatusTest(unittest.TestCase):
 
 
 _STATUS_JSON_SAMPLE = {                                  # a minimal legal argv per verb
-    "start": [], "delegate": ["do a thing"],
+    "start": ["--about", "a job"], "delegate": ["do a thing", "--about", "a job"],
     "tell": ["w1", "hi"], "inbox": [], "waiting": [],
     "done": ["finished"], "ask": ["human", "which branch?"], "answer": ["1", "main"],
     "resolve": ["1"], "withdraw": ["1"], "escalate": ["1"], "questions": [],
@@ -1810,7 +1810,7 @@ _STATUS_JSON_SAMPLE = {                                  # a minimal legal argv 
     "configure": [],
     "merge": ["w1"],
     "inspect": ["w1"], "log": [], "usage": [],
-    "board": [], "flush": [], "reconcile": [], "sweep": [],
+    "board": [], "web": [], "flush": [], "reconcile": [], "sweep": [],
     # Retired: a hard error naming `sb presets` and `sb plugin list`. Still parsed,
     # so it can print that instead of an argparse usage dump.
     "plugins": [],

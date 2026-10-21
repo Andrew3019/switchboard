@@ -2106,7 +2106,7 @@ class Broker:
         return self.repo
 
     def start(self, *, name: Optional[str] = None, task: Optional[str] = None,
-              model: Optional[str] = None) -> str:
+              model: Optional[str] = None, about: Optional[str] = None) -> str:
         """The one command worth remembering. Everything else, an agent does for you.
 
         Always a NEW orchestrator, in a new workspace of its own — a bare one, laid over
@@ -2135,8 +2135,8 @@ class Broker:
         """
         self._refuse_outside_main_checkout()
         if name:
-            return self._top(name, task, model=model)
-        return self._top(self._next_top_name(), task, model=model)
+            return self._top(name, task, model=model, about=about)
+        return self._top(self._next_top_name(), task, model=model, about=about)
 
     def _reopen_name(self, name: str) -> None:
         """Retire the row standing under a top-level name so the name can be spawned into.
@@ -2233,7 +2233,8 @@ class Broker:
         known = self._agent_states()
         return tops if known is None else [n for n in tops if n in known]
 
-    def _top(self, name: str, task: Optional[str], *, model: Optional[str] = None) -> str:
+    def _top(self, name: str, task: Optional[str], *, model: Optional[str] = None,
+             about: Optional[str] = None) -> str:
         """Each top-level orchestrator gets its OWN herdr workspace.
 
         Not a worktree, and not the repo's main workspace: a top-level orchestrator does
@@ -2273,7 +2274,7 @@ class Broker:
                 # DELETED its row: the session id went with it, so `restore` had nothing
                 # to restore, and `whoami` resolved the still-running agent to HUMAN.
                 store.drop_agent(self.db, name)
-                return self._top(name, task, model=model)
+                return self._top(name, task, model=model, about=about)
             if a["session_id"] and not self._alive_or_unknown(name):
                 # The name is free again. A top-level name is a PLACE a human comes back
                 # to — `general`, `triage` — and the session that last stood there has
@@ -2288,7 +2289,7 @@ class Broker:
                 # wrong "dead" no longer costs a second pane on the same session, it costs
                 # the row itself, and nothing brings that back.
                 self._reopen_name(name)
-                return self._top(name, task, model=model)
+                return self._top(name, task, model=model, about=about)
             elif task:
                 # Alive, or a pane we cannot see an agent in yet — a claim somebody made
                 # moments ago and is still spawning into. Either way the name is somebody
@@ -2327,7 +2328,7 @@ class Broker:
         # never sets it, which is what keeps "only `sb start` creates a top" a fact of the
         # code rather than a convention. Everything downstream (the fork rule, the tree
         # boundary) reads the stamp, so a second writer would be a second definition.
-        self.delegate(first, role=MAIN, name=name, model=model,
+        self.delegate(first, role=MAIN, name=name, model=model, about=about,
                       me=HUMAN, pane=pane,
                       workspace=name, workspace_id=wsid, cwd=str(self.repo),
                       awaiting_task=awaiting, is_top=True)
@@ -5530,6 +5531,7 @@ class Broker:
         emit_guidance: bool = True,             # prose output; false for JSON callers
         awaiting_task: bool = False,    # `task` is a placeholder; nobody has asked yet
         is_top: bool = False,           # `sb start` only — see `_top`
+        about: Optional[str] = None,    # `--about`: the job in one line, for `sb web`
     ) -> str:
         me = me or self.whoami()
         self.require_capability(me, CAP_SPAWN)
@@ -5739,6 +5741,7 @@ class Broker:
             # second life. NULL when no `--model` was given, which is the row saying "no
             # override" rather than saying nothing.
             tier=model,
+            about=about,
         )
         claimed = store.claim_agent(self.db, **claim)
         if not claimed and self._spawn_husk(name):
@@ -7395,7 +7398,8 @@ class Broker:
 
     # -- questions --------------------------------------------------------
 
-    def ask(self, target: str, body: str, *, me: Optional[str] = None) -> dict:
+    def ask(self, target: str, body: str, *, parts: Optional[dict] = None,
+            me: Optional[str] = None) -> dict:
         """Record a durable Question and return. -> `{"id", "asker", "target"}`.
 
         THE VERB THAT REPLACED `sb block`. The fault of block was never the stopping —
@@ -7455,8 +7459,9 @@ class Broker:
             # a non-root agent's `parent` resolves to a real agent above and keeps the long
             # cap. Idempotent on the literal-`human` path (already reason-checked in the CLI).
             body = validate.reason(body, "question")
+            validate.human_question(parts)
         qid = store.create_question(self.db, asker=me, target=who, body=body,
-                                    target_literal=target)
+                                    target_literal=target, parts=parts)
         store.log_event(self.db, kind="question_asked", agent=me, question=qid,
                         target=who, why=body[:EVENT_CLIP], text=body)
         if who == HUMAN:

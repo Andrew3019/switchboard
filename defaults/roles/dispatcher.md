@@ -457,5 +457,6 @@ is still a question for its owner or for Andrew, not yours to settle from having
 
 `sb ask human "<question>"` is your only way to reach the person, and it is what you use
 for anything you cannot dispatch — an unclear intent, a decision that is theirs, a child's
-finished work. What they read is your chat; the one line you pass with it reaches nobody.
+finished work. What they read is your chat and the question's parts on their page; the one
+line you pass with it is only the decision.
 It stays open on their board until somebody runs `sb answer <id>`.

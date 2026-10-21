@@ -29,3 +29,6 @@ __pycache__/
 /.resume-review/
 /recruiting/
 /.log
+
+# sb web front end: node_modules is local; the built bundle in switchboard/web_dist/ is committed.
+/web/node_modules/

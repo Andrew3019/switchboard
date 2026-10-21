@@ -4744,7 +4744,7 @@ class TriggerTest(PlansSandbox):
 
     def spawn(self, *argv) -> tuple[int, str, str]:
         with mock.patch.object(cli, "Herdr", lambda **kw: self.h):
-            return self.sb("delegate", *argv, "--name", "a thing")
+            return self.sb("delegate", *argv, "--name", "a thing", "--about", "a job")
 
     def prompts(self) -> list[str]:
         """The spawned sections WITHOUT their `## <label>` headings (INV-62).

@@ -365,6 +365,9 @@ CREATE TABLE agents (
                                       -- already exists, so it is load-bearing and not
                                       -- tidiness. "" is NOT NULL: it is an agent seeded
                                       -- with nothing, which is what a worker gets.
+    about         TEXT,               -- `--about` on spawn: one line naming the job, the
+                                      -- card title on `sb web`. NULL for internal spawns
+                                      -- and for rows that predate the column.
     created_at    INTEGER NOT NULL,
     ended_at      INTEGER
 );
@@ -450,9 +453,12 @@ CREATE TABLE questions (
     resolved_at   INTEGER,
     resolved_by   TEXT,               -- who ended it — the answerer, or the asker itself
                                       -- on a withdrawal.
-    escalated_at  INTEGER             -- when `sb escalate` repointed this at the human.
+    escalated_at  INTEGER,            -- when `sb escalate` repointed this at the human.
                                       -- NULL is every question nobody escalated, which is
                                       -- what rows predating the column read as too.
+    parts         TEXT                -- JSON: about, catch_up, blocked, options, links
+                                      -- (`validate.question_parts`), read by `sb web`.
+                                      -- NULL when the asker passed none of those flags.
 );
 CREATE INDEX idx_questions_target ON questions(target, state);
 CREATE INDEX idx_questions_asker ON questions(asker, state);
@@ -1477,18 +1483,18 @@ def mutation(db: sqlite3.Connection):
 # the removal keep the value they were given.
 _INSERT_AGENT = """INSERT {or_ignore} INTO agents
        (name, parent, role, tier, task, state, session_id, cwd, workspace, branch,
-        workspace_id, terminal_id, pane_id, awaiting_task, is_top, created_at)
-       VALUES (?,?,?,?,?,'working',?,?,?,?,?,?,?,?,?,?)"""
+        workspace_id, terminal_id, pane_id, awaiting_task, is_top, about, created_at)
+       VALUES (?,?,?,?,?,'working',?,?,?,?,?,?,?,?,?,?,?)"""
 
 
 def _agent_values(
     name: str, role: str, parent, task, session_id, cwd, workspace, branch, workspace_id,
-    terminal_id, pane_id, awaiting_task, is_top, tier,
+    terminal_id, pane_id, awaiting_task, is_top, tier, about,
 ) -> tuple:
     # `tier or None` rather than `tier`: an unset `--model` arrives as "" from the CLI just
     # as often as it arrives as None, and only NULL reads back as "no override was given".
     return (name, parent, role, tier or None, task, session_id, cwd, workspace, branch,
-            workspace_id, terminal_id, pane_id, int(awaiting_task), int(is_top), now())
+            workspace_id, terminal_id, pane_id, int(awaiting_task), int(is_top), about, now())
 
 
 def create_agent(
@@ -1508,6 +1514,7 @@ def create_agent(
     awaiting_task: bool = False,
     is_top: bool = False,
     tier: Optional[str] = None,
+    about: Optional[str] = None,
 ) -> sqlite3.Row:
     """Insert an agent row. Raises `sqlite3.IntegrityError` if the name is taken.
 
@@ -1517,7 +1524,7 @@ def create_agent(
     db.execute(
         _INSERT_AGENT.format(or_ignore=""),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, awaiting_task, is_top, tier),
+                      workspace_id, terminal_id, pane_id, awaiting_task, is_top, tier, about),
     )
     db.commit()
     return get_agent(db, name)
@@ -1540,6 +1547,7 @@ def claim_agent(
     awaiting_task: bool = False,
     is_top: bool = False,
     tier: Optional[str] = None,
+    about: Optional[str] = None,
 ) -> bool:
     """Take the name, or find out somebody else already has it. -> did we get it?
 
@@ -1555,7 +1563,7 @@ def claim_agent(
     cur = db.execute(
         _INSERT_AGENT.format(or_ignore="OR IGNORE"),
         _agent_values(name, role, parent, task, session_id, cwd, workspace, branch,
-                      workspace_id, terminal_id, pane_id, awaiting_task, is_top, tier),
+                      workspace_id, terminal_id, pane_id, awaiting_task, is_top, tier, about),
     )
     db.commit()
     return cur.rowcount == 1
@@ -2942,16 +2950,18 @@ Q_HUMAN = "human"
 
 
 def create_question(db: sqlite3.Connection, *, asker: str, target: str,
-                    body: str, target_literal: Optional[str] = None) -> int:
+                    body: str, target_literal: Optional[str] = None,
+                    parts: Optional[dict] = None) -> int:
     """Record an open Question. -> its id.
 
     `target` is already RESOLVED — `human`, or an agent name — because resolving `parent`
     is the broker's job and the column is an address (see the schema note).
     """
     cur = db.execute(
-        "INSERT INTO questions (asker, target, target_literal, body, state, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (asker, target, target_literal or target, body, Q_OPEN, now()))
+        "INSERT INTO questions (asker, target, target_literal, body, state, created_at, "
+        "parts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (asker, target, target_literal or target, body, Q_OPEN, now(),
+         None if parts is None else json.dumps(parts)))
     db.commit()
     return int(cur.lastrowid)
 

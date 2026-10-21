@@ -448,6 +448,16 @@ inline_mail = 8000
 # reads it.
 question_line = 200
 
+# One structured part of a question (`sb ask --about`, `--catch-up`, `--blocked`, an
+# option's detail). These never reach herdr, so they may be multi-line, and the human reads
+# them on the `sb web` page. A part is a few sentences; a cap ten times that is a runaway
+# guard, not style advice.
+question_part = 4000
+
+# `sb delegate --about` and `sb start --about`: one plain line naming the job, shown as the
+# agent's card title on the `sb web` page. A title, so the question line's size.
+about = 200
+
 # Authored prompt text (`--as`, and preset files after flattening). Config rather than
 # traffic: a preset is allowed to be a substantial briefing, and the orchestrator role is
 # already ~4.7k on its own. Kept strictly ABOVE `text` — authored config should never be

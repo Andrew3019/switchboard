@@ -11,6 +11,7 @@ import inspect
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -176,7 +177,7 @@ class CliBoundaryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "brief.md"
             path.write_text("step one\nstep two\n", encoding="utf-8")
-            args = parse(["delegate", "--task-file", str(path)])
+            args = parse(["delegate", "--task-file", str(path), "--about", "a job"])
             _validate(args)
             resolved = path.resolve()
             self.assertEqual(args.task_file, str(resolved))
@@ -192,7 +193,7 @@ class CliBoundaryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "brief.md"
             path.write_text("the full file task", encoding="utf-8")
-            args = parse(["delegate", "inline summary", "--task-file", str(path)])
+            args = parse(["delegate", "inline summary", "--task-file", str(path), "--about", "a job"])
             _validate(args)
             self.assertEqual(args.task,
                              f"inline summary — full brief: {path.resolve()}")
@@ -210,7 +211,7 @@ class CliBoundaryTest(unittest.TestCase):
         """`--name` is the SUBJECT, not the name — `Broker._compose_name` puts the role in
         front of it and slugs the pair, so spaces and capitals are its job and not this
         boundary's. What is still refused here is what herdr refuses in any argument."""
-        args = parse(["delegate", "do it", "--name", "  QA Bot  "])
+        args = parse(["delegate", "do it", "--name", "  QA Bot  ", "--about", "a job"])
         _validate(args)
         self.assertEqual(args.name, "QA Bot")
         self.bad(["delegate", "do it", "--name", "two\nlines"])
@@ -220,7 +221,7 @@ class CliBoundaryTest(unittest.TestCase):
         self.bad(["delegate", "do it", "--with", "be terse\nand fast"])
 
     def test_delegate_normalises_what_it_accepts(self):
-        args = parse(["delegate", "  do it  ", "--with", " be terse "])
+        args = parse(["delegate", "  do it  ", "--with", " be terse ", "--about", "a job"])
         _validate(args)
         self.assertEqual(args.task, "do it")
         self.assertEqual(args.with_, ["be terse"])
@@ -257,9 +258,44 @@ class CliBoundaryTest(unittest.TestCase):
         args = parse(["done", long, "--verified", "not verified", "--not-done", "nothing outstanding"])
         _validate(args)                              # `done` is a report and may be long
         self.assertTrue(args.summary.startswith(long.strip() + " | verified: "))
-        args = parse(["ask", "human", "  need a decision on the auth split  "])
+        args = parse(["ask", "human", "  need a decision on the auth split  ",
+                      "--about", "a", "--blocked", "b", "--catch-up", "c", "--recommend", "d"])
         _validate(args)
         self.assertEqual(args.question, "need a decision on the auth split")
+
+    def test_a_question_to_a_person_carries_its_parts(self):
+        """`questions.parts` is what the `sb web` page reads, so its shape is pinned: the
+        recommended option first, a file link stored absolute, anything else refused."""
+        self.bad(["ask", "human", "which branch?", "--about", "a", "--blocked", "b",
+                  "--catch-up", "c"])                                # no --recommend
+        with tempfile.TemporaryDirectory() as directory:
+            note = Path(directory) / "note.md"
+            note.write_text("x", encoding="utf-8")
+            argv = ["ask", "human", "which branch?", "--about", "the auth\nsplit",
+                    "--blocked", "b", "--catch-up", "c", "--option", "B",
+                    "--recommend", "A | because", "--link", "Note | note.md",
+                    "--link", "https://example.com/pr/1"]
+            with mock.patch("os.getcwd", return_value=directory):
+                args = parse(argv)
+                _validate(args)
+                for bad in ("javascript:alert(1)", "missing.md"):
+                    self.bad(argv[:-1] + [bad])
+        self.assertEqual(args.parts["about"], "the auth\nsplit")
+        self.assertEqual(args.parts["options"],
+                         [{"label": "A", "detail": "because", "recommended": True},
+                          {"label": "B", "detail": None, "recommended": False}])
+        self.assertEqual(args.parts["links"],
+                         [{"title": "Note", "target": str(note), "kind": "file"},
+                          {"title": None, "target": "https://example.com/pr/1",
+                           "kind": "url"}])
+
+    def test_an_answer_may_be_several_lines_and_a_spawn_needs_about(self):
+        args = parse(["answer", "1", "yes\nand use main"])
+        _validate(args)
+        self.assertIn("\n", args.answer)
+        self.bad(["delegate", "do it", "--name", "x"])
+        self.bad(["start"])
+        self.bad(["delegate", "do it", "--name", "x", "--about", "two\nlines"])
 
     def test_a_question_to_an_agent_is_capped_like_a_message(self):
         """The short cap is about what a PERSON reads off a board row. An agent-targeted
@@ -314,7 +350,7 @@ class CliBoundaryTest(unittest.TestCase):
         from switchboard import broker as broker_mod
         sig = inspect.signature(broker_mod.Broker.ask)
         self.assertEqual([p for p in sig.parameters if p != "self"],
-                         ["target", "body", "me"])
+                         ["target", "body", "parts", "me"])
         self.assertNotIn("timeout", sig.parameters)
 
     def test_agent_lookups_are_checked_too(self):
@@ -326,7 +362,7 @@ class CliBoundaryTest(unittest.TestCase):
 
     def test_verbs_with_nothing_to_check_are_untouched(self):
         for argv in (["status"], ["inbox"], ["doctor"], ["init"], ["presets"],
-                     ["cleanup"], ["start"]):
+                     ["cleanup"], ["start", "--about", "a job"]):
             _validate(parse(argv))           # must not raise
 
 
