@@ -1978,9 +1978,33 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual((row["state"], row["answer"], row["resolved_by"]),
                          (store.Q_RESOLVED, "use main", HUMAN))
         self.assertEqual([n for n, _ in self.h.prompts], ["kid"])      # woken for it
-        self.assertIn("use main",
-                      [m["body"] for m in store.unread_for(self.db, "kid", mark=False)])
+        self.assertIn("use main", store.unread_for(self.db, "kid", mark=False)[-1]["body"])
         self.assertIsNone(status.collect(self.db, self.h).agents[0].blocked_why)
+
+    def test_each_delivered_answer_names_the_question_it_resolves(self):
+        """#356: with two questions open, a bare answer text could belong to either."""
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        a = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
+        b = self.b.ask(HUMAN, "which port?", me="kid")["id"]
+        self.b.answer(b, "8080", me=HUMAN)
+        self.b.answer(a, "main", me=HUMAN)
+        self.assertEqual(
+            [m["body"] for m in store.unread_for(self.db, "kid", mark=False)],
+            [f'answer to question {b} ("which port?"): 8080',
+             f'answer to question {a} ("which branch?"): main'])
+
+    def test_the_question_in_a_delivered_answer_is_one_clipped_line(self):
+        """The body may travel inline in a herdr prompt, which refuses newlines."""
+        store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
+        store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
+        q = self.b.ask("orch", "first line\nsecond line " + "x" * 500, me="kid")["id"]
+        self.b.answer(q, "yes", me="orch")
+        [m] = store.unread_for(self.db, "kid", mark=False)
+        self.assertNotIn("\n", m["body"])
+        self.assertTrue(m["body"].startswith(
+            f'answer to question {q} ("first line second line x'))
+        self.assertTrue(m["body"].endswith('"): yes'))
+        self.assertLess(len(m["body"]), 300)
 
     def test_resolve_and_withdraw_are_the_two_other_ends(self):
         """`resolved` says somebody dealt with it; `withdrawn` says the asker took it back.

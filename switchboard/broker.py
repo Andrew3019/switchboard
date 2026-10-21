@@ -7511,7 +7511,8 @@ class Broker:
         store.end_question(self.db, qid, state=store.Q_RESOLVED, answer=text, by=me)
         store.log_event(self.db, kind="question_answered", agent=q["asker"], question=qid,
                         by=me, text=text)
-        self._deliver_answer(q, text, by=me)
+        asked = " ".join(q["body"].split())[:EVENT_CLIP]
+        self._deliver_answer(q, f'answer to question {qid} ("{asked}"): {text}', by=me)
         return {"id": qid, "asker": q["asker"], "answered_by": me}
 
     def resolve_question(self, qid: int, *, me: Optional[str] = None) -> dict:
