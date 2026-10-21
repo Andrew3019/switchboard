@@ -85,14 +85,14 @@ class DegradedStoreTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
     def test_spawning_is_refused_and_says_what_still_works(self):
-        code, out, err = self._run("delegate", "do a thing")
+        code, out, err = self._run("delegate", "do a thing", "--about", "a job")
         self.assertEqual(code, 1)                            # not 0, and not 2: the input
         self.assertIn("checkout", err)                       # was fine, the store is not
         self.assertIn("done", err)                           # what an agent can still do
         self.assertIn("--reset-store --force", err)          # and the way out, by name
 
     def test_refusing_a_spawn_writes_nothing(self):
-        self._run("delegate", "do a thing")
+        self._run("delegate", "do a thing", "--about", "a job")
         db = store.connect(self.repo)
         self.assertEqual([r["name"] for r in db.execute("SELECT name FROM agents")], ["w"])
         db.close()

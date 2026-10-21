@@ -111,7 +111,7 @@ class OnlyAHumanStartsATopTest(Fixture, unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli._dispatch(argparse.Namespace(cmd="start", name=None, task=None,
-                                                    model=None, json=False),
+                                                    model=None, about=None, json=False),
                                  self.b, self.db, self.h)
         return code, out.getvalue() + err.getvalue()
 

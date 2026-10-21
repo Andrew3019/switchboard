@@ -32,6 +32,7 @@ handling of it is already correct.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Iterable, Optional
 
@@ -44,6 +45,8 @@ from . import config
 MAX_AGENT_NAME = config.setting("limits.agent_name")
 MAX_TEXT = config.setting("limits.text")
 MAX_QUESTION_LINE = config.setting("limits.question_line")
+MAX_QUESTION_PART = config.setting("limits.question_part")
+MAX_ABOUT = config.setting("limits.about")
 MAX_PROMPT = config.setting("limits.prompt")
 MAX_REF = config.setting("limits.ref")
 MAX_TOKEN = config.setting("limits.token")
@@ -73,6 +76,13 @@ _NOT_IN_NAME = re.compile(r"[^a-z0-9_-]+")
 # git check-ref-format, the parts expressible as a character class: no control chars, no
 # space, and none of ~ ^ : ? * [ \
 _BAD_IN_REF = re.compile(r"[\x00-\x20~^:?*\[\\\x7f]")
+
+_URL = re.compile(r"https?://\S+\Z", re.I)
+_SCHEME = re.compile(r"[a-z][a-z0-9+.-]*:", re.I)
+
+# The parts a question to a person must carry, as (key in `parts`, the flag that sets it).
+HUMAN_QUESTION_PARTS = (("about", "--about"), ("blocked", "--blocked"),
+                        ("catch_up", "--catch-up"), ("options", "--recommend"))
 
 
 class Invalid(ValueError):
@@ -156,13 +166,80 @@ def reason(value: Optional[str], field: str = "reason") -> str:
         problem = (f"is {len(v)} characters, over the {MAX_QUESTION_LINE} a question line "
                    f"may carry" if len(v) > MAX_QUESTION_LINE else "must be a single line")
         raise Invalid(
-            f"{field} {problem}. It is bookkeeping on a board row, NOT the message the "
-            f"human reads — they read your own chat, and nothing you put here. So do not "
-            f"shorten or flatten your message to fit: leave it whole, as the last thing "
-            f"in your chat, where they will read it, and keep this field to one line "
-            f"naming what you are waiting for."
+            f"{field} {problem}. It is the one-line decision, a headline, NOT the "
+            f"message the human reads — they read your own chat, and the parts you pass "
+            f"with the other flags. So do not shorten or "
+            f"flatten your message to fit: leave it whole, as the last thing in your "
+            f"chat, where they will read it, and keep this field to one line naming the "
+            f"decision you are waiting for."
         )
     return v
+
+
+def question_parts(*, about: Optional[str] = None, catch_up: Optional[str] = None,
+                   blocked: Optional[str] = None, recommend: Optional[str] = None,
+                   options: Iterable[str] = (), links: Iterable[str] = (),
+                   cwd: str) -> Optional[dict]:
+    """The structured parts of `sb ask`, as stored in `questions.parts`. None if none given.
+
+    The text parts never reach herdr, so they may be multi-line. A file link is resolved
+    against `cwd` and stored absolute, because whoever reads it later stands somewhere else.
+    """
+    options = list(options)
+    links = list(links)
+    if options and recommend is None:
+        raise Invalid("--option needs a --recommend beside it: one option is the one you "
+                      "recommend, and it goes first")
+    if all(v is None for v in (about, catch_up, blocked, recommend)) and not links:
+        return None
+    opts = [] if recommend is None else [dict(_option(recommend, "--recommend"),
+                                              recommended=True)]
+    opts += [dict(_option(o, "--option"), recommended=False) for o in options]
+    return {
+        "about": None if about is None else text(about, "--about", max_len=MAX_QUESTION_PART),
+        "catch_up": (None if catch_up is None
+                     else text(catch_up, "--catch-up", max_len=MAX_QUESTION_PART)),
+        "blocked": (None if blocked is None
+                    else text(blocked, "--blocked", max_len=MAX_QUESTION_PART)),
+        "options": opts,
+        "links": [_link(v, cwd) for v in links],
+    }
+
+
+def human_question(parts: Optional[dict]) -> None:
+    """Refuse a question to a person that is missing a part the page needs to show it."""
+    missing = [flag for key, flag in HUMAN_QUESTION_PARTS if not (parts or {}).get(key)]
+    if missing:
+        raise Invalid(
+            f"a question to the human needs {', '.join(missing)}: what the work is about, "
+            f"what is blocked until they answer, what happened since they last replied to "
+            f"you, and the option you recommend. They read these on their page beside "
+            f"the one-line decision.")
+
+
+def _option(value: str, field: str) -> dict:
+    label, sep, detail = _require_str(value, field).partition(" | ")
+    return {"label": line(label, f"{field} label", max_len=MAX_QUESTION_LINE),
+            "detail": text(detail, f"{field} detail", max_len=MAX_QUESTION_PART)
+            if sep else None}
+
+
+def _link(value: str, cwd: str) -> dict:
+    v = _require_str(value, "--link")
+    title, sep, target_ = v.partition(" | ")
+    if not sep:
+        title, target_ = None, v
+    else:
+        title = line(title, "--link title", max_len=MAX_QUESTION_LINE)
+    target_ = line(target_, "--link target")
+    if _URL.match(target_):
+        return {"title": title, "target": target_, "kind": "url"}
+    if _SCHEME.match(target_):
+        raise Invalid(f"--link {target_!r}: a link is an http(s) URL or a file path")
+    path = os.path.abspath(os.path.join(cwd, os.path.expanduser(target_)))
+    if not os.path.exists(path):
+        raise Invalid(f"--link {target_!r}: no such file ({path})")
+    return {"title": title, "target": path, "kind": "file"}
 
 
 def token(value: Optional[str], field: str, *, max_len: int = MAX_TOKEN) -> str:

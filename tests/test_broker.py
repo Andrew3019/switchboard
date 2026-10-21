@@ -34,6 +34,10 @@ from switchboard.broker import (  # noqa: E402
 )
 from switchboard.herdr import Agent, HerdrError, section_body  # noqa: E402
 
+# The parts `sb ask` requires of a question that reaches the human (`validate.human_question`).
+HUMAN_PARTS = {"about": "the auth split", "blocked": "the merge", "catch_up": "nothing new",
+               "options": [{"label": "A", "detail": None, "recommended": True}], "links": []}
+
 
 def bodies(prompts) -> list[str]:
     """The spawned fragments without their `## <label>` headings (INV-62).
@@ -1468,7 +1472,7 @@ class BrokerTest(unittest.TestCase):
                            pane_id="w1:p9")
         store.create_agent(self.db, name="asker", role="worker", parent="lead",
                            pane_id="w1:p8")
-        asked = self.b.ask(HUMAN, "which branch?", me="kid")["id"]     # kid -> human
+        asked = self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")["id"]     # kid -> human
         of_kid = self.b.ask("kid", "which branch?", me="asker")["id"]  # asker -> kid
         store.unread_for(self.db, "asker", mark=True)                  # drain spawn mail
         r = self.b.self_close("shipped it", me="kid")
@@ -1888,7 +1892,7 @@ class BrokerTest(unittest.TestCase):
         that the agent's own row is untouched: asking is not a state.
         """
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
-        self.b.ask(HUMAN, "need a decision", me="w")
+        self.b.ask(HUMAN, "need a decision", parts=HUMAN_PARTS, me="w")
         self.assertEqual(store.get_agent(self.db, "w")["state"], "working")
         self.assertEqual(self.h.states, [])                                  # still named
         self.assertTrue(self.h.notifications)                                # you hear it
@@ -1906,7 +1910,7 @@ class BrokerTest(unittest.TestCase):
         self.b = Broker(self.db, self.h, repo=self.repo)
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "idle"}
-        q = self.b.ask(HUMAN, "which branch?", me="w")
+        q = self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="w")
 
         self.b.answer(q["id"], "use main", me=HUMAN)
 
@@ -1917,7 +1921,7 @@ class BrokerTest(unittest.TestCase):
     def test_a_question_to_a_person_goes_to_the_human_not_the_parent(self):
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        self.b.ask(HUMAN, "need a decision", me="kid")
+        self.b.ask(HUMAN, "need a decision", parts=HUMAN_PARTS, me="kid")
         self.assertTrue(self.h.notifications)
         self.assertEqual(store.unread_for(self.db, "orch"), [])   # parent context untouched
 
@@ -1931,8 +1935,8 @@ class BrokerTest(unittest.TestCase):
         """
         store.create_agent(self.db, name="orch", role="lead", pane_id="w1:p0")
         store.create_agent(self.db, name="kid", role="worker", parent="orch", pane_id="w1:p1")
-        a = self.b.ask(HUMAN, "which branch?", me="kid")
-        b = self.b.ask(HUMAN, "and a different question", me="orch")
+        a = self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")
+        b = self.b.ask(HUMAN, "and a different question", parts=HUMAN_PARTS, me="orch")
         self.assertNotEqual(a["id"], b["id"])
         waiting = {x.name: x.blocked_why
                    for x in status.collect(self.db, self.h, needs_me=True).agents}
@@ -1948,7 +1952,7 @@ class BrokerTest(unittest.TestCase):
         record now — durable, with an id — and it is what `sb status --needs-me` reads.
         """
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        q = self.b.ask(HUMAN, "which branch?", me="kid")
+        q = self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")
         self.assertEqual(
             self.db.execute("SELECT COUNT(*) c FROM messages WHERE to_agent=?",
                             (HUMAN,)).fetchone()["c"], 0)
@@ -1967,7 +1971,7 @@ class BrokerTest(unittest.TestCase):
         reaches the agent and leaves the question exactly where it was.
         """
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        q = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
+        q = self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")["id"]
 
         self.b.tell(["kid"], "unrelated news", me=HUMAN)
         self.assertEqual(store.get_question(self.db, q)["state"], store.Q_OPEN)
@@ -1984,8 +1988,8 @@ class BrokerTest(unittest.TestCase):
     def test_each_delivered_answer_names_the_question_it_resolves(self):
         """#356: with two questions open, a bare answer text could belong to either."""
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        a = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
-        b = self.b.ask(HUMAN, "which port?", me="kid")["id"]
+        a = self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")["id"]
+        b = self.b.ask(HUMAN, "which port?", parts=HUMAN_PARTS, me="kid")["id"]
         self.b.answer(b, "8080", me=HUMAN)
         self.b.answer(a, "main", me=HUMAN)
         self.assertEqual(
@@ -2010,12 +2014,12 @@ class BrokerTest(unittest.TestCase):
         """`resolved` says somebody dealt with it; `withdrawn` says the asker took it back.
         A readout that could not tell them apart would be counting answers nobody gave."""
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        a = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
+        a = self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")["id"]
         self.b.resolve_question(a, me=HUMAN)
         row = store.get_question(self.db, a)
         self.assertEqual((row["state"], row["answer"]), (store.Q_RESOLVED, None))
 
-        b = self.b.ask(HUMAN, "and another", me="kid")["id"]
+        b = self.b.ask(HUMAN, "and another", parts=HUMAN_PARTS, me="kid")["id"]
         self.b.withdraw(b, me="kid")
         self.assertEqual(store.get_question(self.db, b)["state"], store.Q_WITHDRAWN)
         with self.assertRaises(ValueError):
@@ -2066,11 +2070,25 @@ class BrokerTest(unittest.TestCase):
         q = self.b.ask("parent", long, me="kid")           # a real agent above — allowed
         self.assertEqual(q["target"], "root")
 
+    def test_a_root_agents_parent_question_needs_the_human_parts(self):
+        """The page reads about, blocked, catch-up and the options off the row, so a question
+        that RESOLVES to the human is refused without them, whatever word was typed. A
+        question to an agent stores whatever parts it was given and needs none."""
+        store.create_agent(self.db, name="root", role="lead", pane_id="w1:p0")
+        store.create_agent(self.db, name="kid", role="worker", parent="root", pane_id="w1:p1")
+        with self.assertRaises(broker_mod.validate.Invalid):
+            self.b.ask("parent", "which branch?", me="root")
+        self.assertEqual(store.open_questions(self.db, asker="root"), [])
+        q = self.b.ask("parent", "which branch?", parts=HUMAN_PARTS, me="root")["id"]
+        self.assertEqual(json.loads(store.get_question(self.db, q)["parts"]), HUMAN_PARTS)
+        q = self.b.ask("parent", "which branch?", me="kid")["id"]
+        self.assertIsNone(store.get_question(self.db, q)["parts"])
+
     def test_a_question_whose_asker_is_gone_is_dropped(self):
         """#325 in as many words: "if its asker is gone, it's dropped". No timer and no
         auto-clear — the row stays open and simply stops summoning anybody."""
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        q = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
+        q = self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")["id"]
         store.set_state(self.db, "kid", "done")   # it reported; its row has ended
         self.assertEqual(store.get_question(self.db, q)["state"], store.Q_OPEN)
         self.assertEqual([a.name for a in status.collect(self.db, self.h).agents
@@ -2165,7 +2183,7 @@ class BrokerTest(unittest.TestCase):
                 cmd="delegate", task="do the thing", role="worker", as_prompt=None,
                 with_=[], name="levels", workspace=None, isolation="shared", model=None,
                 handoff=None, assign_step=None, own_plan=None, steal=False,
-                json=False, full=full)
+                about=None, json=False, full=full)
             buf = io.StringIO()
             with mock.patch.object(self.b, "whoami", return_value="orch"), \
                     mock.patch.object(self.b, "delegate", side_effect=fake_delegate), \
@@ -2309,7 +2327,7 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual([n for n, _ in self.h.prompts], ["lead"])  # straight through
 
         self.b.done("k2 shipped", me=kids[1])                      # hold still open
-        self.b.ask(HUMAN, "which branch?", me="lead")
+        self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="lead")
         self.assertTrue(any("which branch?" in n for n in self.h.notifications))
 
     def test_one_child_reporting_to_an_idle_parent_still_rings_at_once(self):
@@ -3155,7 +3173,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
-        q = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
+        q = self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")["id"]
         self.assertEqual(self.b.cleanup(["kid"], me="orch", force=True), ["kid"])
         self.assertEqual(store.get_question(self.db, q)["state"], store.Q_WITHDRAWN)
 
@@ -3182,7 +3200,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
-        q = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
+        q = self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")["id"]
         store.set_state(self.db, "kid", "done")
         self.h.states_by_name = {"kid": "idle"}
         self.assertEqual(self.b.cleanup(me="orch"), [])
@@ -3519,7 +3537,7 @@ class BrokerTest(unittest.TestCase):
         import argparse, contextlib, io
         from switchboard import cli
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        self.b.ask(HUMAN, "which branch?", me="kid")
+        self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")
         args = argparse.Namespace(cmd="inbox", json=False, peek=False)
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {}, clear=True), \
@@ -3583,7 +3601,7 @@ class BrokerTest(unittest.TestCase):
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1")
-        self.b.ask(HUMAN, "which branch?", me="kid")
+        self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")
         r = self.b.cleanup(["kid"], me="orch")
         self.assertEqual(r, [])
         self.assertEqual([n for n, _ in r.refused], ["kid"])
@@ -3804,7 +3822,7 @@ class BrokerTest(unittest.TestCase):
         import argparse, contextlib, io
         from switchboard import cli
         store.create_agent(self.db, name="kid", role="worker", pane_id="w1:p1")
-        self.b.ask(HUMAN, "which branch?", me="kid")
+        self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="kid")
         args = argparse.Namespace(cmd="cleanup", name=["kid"], force=False,
                                   dry_run=False, json=False)
         buf = io.StringIO()
@@ -3829,7 +3847,7 @@ class BrokerTest(unittest.TestCase):
             store.create_agent(self.db, name=n, role="worker", parent="orch",
                                pane_id=f"w1:{n}", session_id=f"s-{n}")
         store.set_state(self.db, "done1", "done")
-        self.b.ask(HUMAN, "which branch?", me="blocked1")
+        self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="blocked1")
         store.set_state(self.db, "gone1", "done")          # closed before this sweep ran
         store.update_agent(self.db, "gone1", pane_id=None)
         self.h.states_by_name = {"done1": "idle", "blocked1": "idle", "busy1": "working"}
@@ -3938,7 +3956,7 @@ class BrokerTest(unittest.TestCase):
             store.create_agent(self.db, name=n, role="worker", parent="orch",
                                pane_id=f"w1:{n}", session_id=f"s-{n}")
         store.set_state(self.db, "done1", "done")
-        self.b.ask(HUMAN, "which branch?", me="blocked1")
+        self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me="blocked1")
         self.h.states_by_name = {"done1": "idle", "blocked1": "idle", "busy1": "working"}
 
         def run(as_json):
@@ -3971,7 +3989,7 @@ class BrokerTest(unittest.TestCase):
         for i in range(8):
             store.create_agent(self.db, name=f"b{i}", role="worker", parent="orch",
                                pane_id=f"w1:b{i}", session_id=f"s-b{i}")
-            self.b.ask(HUMAN, "which branch?", me=f"b{i}")
+            self.b.ask(HUMAN, "which branch?", parts=HUMAN_PARTS, me=f"b{i}")
         from switchboard import cli
         r = self.b.cleanup(me="orch")
         text = cli._sweep_refusals(r.notable)
@@ -4428,7 +4446,7 @@ class BrokerTest(unittest.TestCase):
         without both, the mechanism above is unreachable from the command an agent types.
         """
         from switchboard.cli import build_parser, _validate
-        args = build_parser().parse_args(["delegate", "--role", "lead", "--name", "x"])
+        args = build_parser().parse_args(["delegate", "--role", "lead", "--name", "x", "--about", "a job"])
         self.assertIsNone(args.task)
         _validate(args)
         self.assertIsNone(args.task)

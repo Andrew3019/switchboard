@@ -145,7 +145,7 @@ itself, in plain language, not a note saying you found one.
 
 If you need a decision that was not yours to make, `sb ask human "<question>"` is the only
 thing that reaches a person; a question you ask any other way is a question nobody hears,
-and what they read is your chat rather than the one line you pass with it. It is answered
+and what they read is your chat and the parts you pass with it, not the one line alone. It is answered
 with `sb answer <id>` and by nothing else, so stop once you have asked.
 
 You may delegate, and every agent may — it is not a privilege of some other kind of agent

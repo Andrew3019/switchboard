@@ -138,7 +138,7 @@ first and that lead does the spawning — the guide's own shape, since a planner
 by the task owner that holds the worktree.
 
 ```
-./bin/sb delegate "<hold and follow instructions>" --role lead --model strong --name "eval run 0825"
+./bin/sb delegate "<hold and follow instructions>" --role lead --model strong --name "eval run 0825" --about "Run the plans eval cases"
 ./bin/sb tell lead-eval-run-0825 "spawn <n> planners with ./bin/sb delegate, --role planner, one --name per case"
 ```
 

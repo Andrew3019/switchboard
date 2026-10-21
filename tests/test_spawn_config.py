@@ -56,12 +56,12 @@ class SpawnConfigSandbox(PlansSandbox):
 
     def spawn(self, *argv) -> tuple[int, str, str]:
         with mock.patch.object(cli, "Herdr", lambda **kw: self.h):
-            return self.sb("delegate", *argv)
+            return self.sb("delegate", *argv, "--about", "a job")
 
     def spawned(self, *argv) -> dict:
         """One spawn that must succeed, as its `--json` receipt."""
         with mock.patch.object(cli, "Herdr", lambda **kw: self.h):
-            code, out, err = self.sb("delegate", *argv, "--json")
+            code, out, err = self.sb("delegate", *argv, "--about", "a job", "--json")
         self.assertEqual(code, 0, err)
         return json.loads(out)
 

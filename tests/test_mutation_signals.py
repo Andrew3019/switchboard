@@ -35,6 +35,10 @@ from switchboard.broker import (  # noqa: E402
 
 from test_grants import Fixture  # noqa: E402
 
+# The parts `sb ask` requires of a question that reaches the human (`validate.human_question`).
+HUMAN_PARTS = {"about": "the auth split", "blocked": "the merge", "catch_up": "nothing new",
+               "options": [{"label": "A", "detail": None, "recommended": True}], "links": []}
+
 
 class SignalFixture(Fixture):
     def setUp(self):
@@ -193,7 +197,7 @@ class TheCarveOutsStandTest(SignalFixture, unittest.TestCase):
     def test_a_question_to_a_person_is_not_held_by_a_signal(self):
         self.b.grant(self.w1, CAP_SPAWN, me=self.lead)
         self.assertTrue(self.b._holdback_open(self.w1))
-        self.b.ask(HUMAN, "need a person", me=self.w1)
+        self.b.ask(HUMAN, "need a person", parts=HUMAN_PARTS, me=self.w1)
         # It writes no message row at all — it reaches a person through `_surface`.
         self.assertEqual([m["kind"] for m in self.mail(self.w1)], [SIGNAL])
         self.assertTrue(any(e["kind"] == "question_asked"

@@ -152,6 +152,9 @@ def build_parser() -> argparse.ArgumentParser:
                                    "running, hand the task to that one instead of "
                                    "starting another")
     st.add_argument("--model", help=_tier_help())
+    st.add_argument("--about", metavar="LINE",
+                    help="one plain line on what the job is: the title the human reads "
+                         "on its card. Required")
 
     # Hidden on purpose. The board is a human's screen, and `sb` is the vocabulary
     # agents are handed — see the refusal in main(). SUPPRESS keeps it out of
@@ -159,6 +162,13 @@ def build_parser() -> argparse.ArgumentParser:
     # agent actually learns what `sb` can do. `python3 -m switchboard.board` stays
     # the equivalent, unhidden way in.
     cmd("board", hidden=True)
+
+    # Hidden like `board`: the browser page is the human's, and agents use `sb` verbs.
+    # Handled in `_main` before any store opens (see there).
+    web = cmd("web", hidden=True)
+    web.add_argument("--port", type=int, default=8417)
+    web.add_argument("--repo", action="append", default=[], metavar="PATH",
+                     help="add a repo the usage log does not list (repeatable)")
 
     # Hidden for the same reason: it is machinery, not vocabulary. Every `sb` command
     # already flushes the doorbell before it dispatches (see main), so this one is that
@@ -217,6 +227,9 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--handoff", metavar="TEXT",
                    help="context the child needs that the task does not carry — delivered "
                         "with the task as its first message, not as standing instructions")
+    d.add_argument("--about", metavar="LINE",
+                   help="one plain line on what the job is, written for the human: it is "
+                        "the title they read on the agent's card. Required")
     d.add_argument("--name", metavar="TOPIC",
                    help="two or three words for the subject, passed as ONE quoted argument "
                         '(e.g. --name "api client") — the agent is named '
@@ -429,14 +442,30 @@ def build_parser() -> argparse.ArgumentParser:
     # comes here. Enforced in validate.reason for a human target — this only stops the
     # enforcement being a surprise.
     ak.add_argument("question",
-                    help="ONE short line for a human target; write the full question in "
-                         "your own chat, which is what they read")
+                    help="ONE short line for a human target: the decision you need. The "
+                         "flags below carry the rest, and your chat still holds the whole "
+                         "message")
+    ak.add_argument("--about", metavar="TEXT",
+                    help="what the work is about, in plain words. Required for the human")
+    ak.add_argument("--catch-up", metavar="TEXT",
+                    help="what happened since the human last replied to you. Required for "
+                         "the human")
+    ak.add_argument("--blocked", metavar="TEXT",
+                    help="what is blocked until the answer comes. Required for the human")
+    ak.add_argument("--recommend", metavar="'LABEL | detail'",
+                    help="the option you recommend; ' | detail' is optional. Required for "
+                         "the human")
+    ak.add_argument("--option", action="append", default=[], metavar="'LABEL | detail'",
+                    help="another option (repeatable)")
+    ak.add_argument("--link", action="append", default=[], metavar="'TITLE | TARGET'",
+                    help="an http(s) URL or an existing file path, optionally titled "
+                         "(repeatable)")
 
     an = cmd("answer", help="answer somebody's question and wake them",
              description="Records the answer against the question, resolves it, and rings "
                          "the asker's doorbell with it.")
     an.add_argument("id", type=int, metavar="ID")
-    an.add_argument("answer")
+    an.add_argument("answer", help="the answer; may be several lines")
 
     rq = cmd("resolve", help="close a question with no answer text",
              description="For a question that was answered somewhere else, or that stopped "
@@ -722,6 +751,7 @@ def _validate(args) -> None:
             args.name = validate.agent_name(args.name, "--name")
         if args.task is not None:
             args.task = validate.line(args.task, "task")
+        args.about = _about(args.about)
         # Same rule as `delegate --model`, and deliberately the same call: both take a
         # TIER name out of the same open vocabulary, so a value one accepts and the other
         # rejects would be two answers to one question.
@@ -803,6 +833,7 @@ def _validate(args) -> None:
             args.task = validate.line(args.task, "task")
         elif args.task is not None:
             args.task = validate.line(args.task, "task")
+        args.about = _about(args.about)
         # Not slugified here: the role is a user-facing lookup key. The resolver accepts
         # unique case/punctuation variants and refuses unknown or ambiguous values.
         args.role = validate.line(args.role, "--role", max_len=validate.MAX_TOKEN)
@@ -936,9 +967,15 @@ def _validate(args) -> None:
             args.question = validate.reason(args.question, "question")
         else:
             args.question = validate.line(args.question, "question")
+        args.parts = validate.question_parts(
+            about=args.about, catch_up=args.catch_up, blocked=args.blocked,
+            recommend=args.recommend, options=args.option, links=args.link,
+            cwd=os.getcwd())
+        if args.target == broker_mod.HUMAN:
+            validate.human_question(args.parts)
 
     elif cmd == "answer":
-        args.answer = validate.line(args.answer, "answer")
+        args.answer = validate.text(args.answer, "answer")
 
     elif cmd == "workspace":
         # `list` takes no arguments at all and `close` takes only a name, so each one is
@@ -982,6 +1019,15 @@ def _validate(args) -> None:
 
     elif cmd == "plugin":
         _validate_plugin(args)
+
+def _about(value: Optional[str]) -> str:
+    """`--about` on a spawn typed at the CLI. Required here and only here (`Broker.delegate`)."""
+    if value is None:
+        raise validate.Invalid(
+            '--about is required: one plain line on what the job is, written for the '
+            'human. It is the title they read on the agent\'s card.')
+    return validate.line(value, "--about", max_len=validate.MAX_ABOUT)
+
 
 def _plugins_file() -> str:
     """Where enablement is written, spelled the way the config says. See `_preset_dir_help`."""
@@ -1464,7 +1510,7 @@ def _context_text(data: dict) -> str:
 # the counter — so a `board` row would pair a huge latency with ~zero counted output and skew
 # the fleet-wide max/p95 this report exists to make legible. Nothing is lost: efficiency
 # analysis is about command cost, not how long a person left a dashboard open.
-_USAGE_SKIP = {"board"}
+_USAGE_SKIP = {"board", "web"}
 # An env marker an internal sb-subprocess sets to keep its own call out of the usage log.
 # The board's per-agent `sb inspect` poll (board.py `_inspect`) sets it: that poll was
 # ~99.7% of every `inspect` row and buried the real agent/human signal the log exists for.
@@ -1612,6 +1658,17 @@ def _main(argv: Optional[list[str]], capture: dict[str, Any]) -> int:
         print("sb: `sb plugins` has been split. Prompt fragments are now `sb presets`;\n"
               "    code plugins are `sb plugin list`.", file=sys.stderr)
         return 2
+
+    # Before the store: it serves every repo, so it must not open or migrate the one it is
+    # started in. `whoami` needs a store, so only the environment half of `_agent_caller`
+    # can run here.
+    if args.cmd == "web":
+        if any(os.environ.get(v) for v in _AGENT_SESSION_ENV):
+            print("sb: `sb web` is the human's page; agents use `sb` verbs.",
+                  file=sys.stderr)
+            return 2
+        from . import web
+        return web.run(port=args.port, extra_repos=args.repo)
 
     # Writable, deliberately, even for `sb status` and `sb log`. This is the short-lived
     # process running current code that `store._connect_readonly` says the migration
@@ -1900,9 +1957,9 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         # the only thing left standing between "always start another" and losing track of
         # the ones you have: nothing here reuses them, so the way back has to be said.
         others = [] if args.name else b.running_tops()
-        name = b.start(name=args.name, task=args.task, model=args.model)
+        name = b.start(name=args.name, task=args.task, model=args.model, about=args.about)
         also = (f"\n  still running: {', '.join(others)}"
-                f" — back to one with: sb start --name {others[-1]}") if others else ""
+                f" — back to one with: sb start --name {others[-1]} --about \"<the job>\"") if others else ""
         _emit(args, f"dispatcher '{name}' ready in its own workspace — switch to it, "
                     f"or: sb tell {name} \"...\"{also}",
               {"name": name, "running": others})
@@ -1941,6 +1998,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         name = b.delegate(args.task, role=args.role, as_prompt=args.as_prompt,
                           topic=args.name, isolation=args.isolation,
                           model=args.model, with_=args.with_, me=me, handoff=args.handoff,
+                          about=args.about,
                           emit_guidance=not getattr(args, "json", False), **join)
         where = f" (joined workspace '{args.workspace}')" if args.workspace else ""
         # A spawn can end in three places, not two: confirmed, confirmed-nowhere-but-the
@@ -2233,15 +2291,15 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         return 0
 
     if cmd == "ask":
-        r = b.ask(args.target, args.question, me=me)
+        r = b.ask(args.target, args.question, parts=args.parts, me=me)
         if r["target"] == HUMAN:
             # Says WHAT they read, not just that they were told. "The board", not `sb
             # board`: this is read by an agent, and the verb is deliberately not part of an
             # agent's vocabulary (see the human-only refusal in `board` above, and the
             # shipped prompts, which say "a board row" and never name the command).
             note = (f"asked the human — question {r['id']}. It marks your row on their "
-                    f"board until somebody answers it; what they actually read is your own "
-                    f"chat, so the full question belongs there")
+                    f"board and their page until somebody answers it; they read the parts "
+                    f"you passed and your own chat, so the full message belongs there")
         else:
             note = (f"asked {r['target']} — question {r['id']}. Nothing waits: they are "
                     f"told, and you are woken when they answer")
@@ -2275,7 +2333,9 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         elif not args.mine and me == HUMAN:
             rows = list(store.open_questions(db, target=HUMAN))
         data = [{"id": q["id"], "asker": q["asker"], "target": q["target"],
-                 "body": q["body"], "created_at": q["created_at"]} for q in rows]
+                 "body": q["body"], "created_at": q["created_at"],
+                 "parts": (json.loads(store._value(q, "parts"))
+                           if store._value(q, "parts") else None)} for q in rows]
         human = "\n".join(f"{q['id']:>4}  {q['asker']} -> {q['target']}: {q['body']}"
                            for q in data) or "no open questions"
         _emit(args, human, {"questions": data})

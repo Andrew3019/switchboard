@@ -933,12 +933,12 @@ class FragmentInjectionTest(Sandbox):
 
     def test_a_bound_fragment_reaches_the_system_prompt(self):
         self.bind("@todo")
-        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing")
+        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job")
         self.assertEqual(code, 0, err)
         self.assertIn(self.FRAGMENT, self.prompts())
 
     def test_an_explicit_fragment_reaches_the_system_prompt(self):
-        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing", "--with", "@todo")
+        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job", "--with", "@todo")
         self.assertEqual(code, 0, err)
         self.assertIn(self.FRAGMENT, self.prompts())
 
@@ -946,21 +946,21 @@ class FragmentInjectionTest(Sandbox):
         """The single most important property in the design, asserted on the path that
         would lose it: the fragment went out and the plugin never ran."""
         self.bind("@todo")
-        self.run_sb("delegate", "do a thing", "--name", "a thing")
+        self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job")
         self.assertIn(self.FRAGMENT, self.prompts())
         self.assertEqual([k for k in sys.modules if k.startswith("sb_plugin_")], [])
 
     def test_a_fragment_rides_the_with_list_and_gets_no_new_slot(self):
         self.preset("p", "# p\nPPP")
         self.bind("p", "@todo")
-        self.run_sb("delegate", "do a thing", "--name", "a thing", "--with", "extra")
+        self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job", "--with", "extra")
         tail = self.bindings()[-3:]
         self.assertEqual(tail, ["PPP", self.FRAGMENT, "extra"])
 
     def test_as_does_not_displace_a_fragment(self):
         """`--as` replaces the role prompt at position 4 and never touches `with_`."""
         self.bind("@todo")
-        self.run_sb("delegate", "do a thing", "--name", "a thing", "--as", "you are a duck")
+        self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job", "--as", "you are a duck")
         self.assertIn("you are a duck", self.prompts())
         self.assertEqual(self.bindings()[-1], self.FRAGMENT)
 
@@ -970,7 +970,7 @@ class FragmentInjectionTest(Sandbox):
         self.ship("multi", FIXTURE, agent_md="# multi\nfirst line\n\n- a\n- b\n")
         self.enable("todo", "multi")
         self.bind("@todo", "@multi")
-        self.run_sb("delegate", "do a thing", "--name", "a thing")
+        self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job")
         self.assertIn("a ; b", self.bindings()[-1])
         for p in self.prompts():
             self.assertNotIn("\n", p)
@@ -978,14 +978,14 @@ class FragmentInjectionTest(Sandbox):
     # -- the asymmetry, at the spawn -------------------------------------
 
     def test_an_explicit_fragment_that_fails_stops_the_spawn(self):
-        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing", "--with", "@nope")
+        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job", "--with", "@nope")
         self.assertNotEqual(code, 0)
         self.assertIn("@nope", err)
         self.assertEqual(self.h.started, [])
 
     def test_a_bound_fragment_that_fails_spawns_anyway_and_warns(self):
         self.bind("@nope")
-        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing")
+        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job")
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.h.started), 1)
         self.assertIn("@nope", err)
@@ -993,7 +993,7 @@ class FragmentInjectionTest(Sandbox):
 
     def test_a_skipped_fragment_is_logged(self):
         self.bind("@nope")
-        self.run_sb("delegate", "do a thing", "--name", "a thing")
+        self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job")
         _, out, _ = self.run_sb("log", "--json")
         kinds = [e["kind"] for e in json.loads(out)["events"]]
         self.assertIn("fragment_skipped", kinds)
@@ -1002,7 +1002,7 @@ class FragmentInjectionTest(Sandbox):
         """Not survivable, unlike an unresolvable `@name`: nothing about the machine makes
         a bare plugin name right, so skipping it would only hide a typo forever."""
         self.bind("todo")
-        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing")
+        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job")
         self.assertNotEqual(code, 0)
         self.assertIn("write '@todo'", err)
         self.assertEqual(self.h.started, [])
@@ -1011,7 +1011,7 @@ class FragmentInjectionTest(Sandbox):
         self.ship("fat", FIXTURE, agent_md="# fat\n" + ("wordy " * plugins.FRAGMENT_BUDGET))
         self.enable("todo", "fat")
         self.bind("@fat")
-        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing")
+        code, _, err = self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job")
         self.assertEqual(code, 0, err)
         self.assertLessEqual(len(self.bindings()[-1]), plugins.FRAGMENT_BUDGET)
         _, out, _ = self.run_sb("log", "--json")
@@ -1112,13 +1112,14 @@ class IsolationTest(Sandbox):
                   "merge",
                   "workspace",                          # reads and tears down; no spawn
                   "plugin", "doctor",                   # level 3
-                  "plugins"}                            # retired, answers before anything
+                  "plugins",                            # retired, answers before anything
+                  "web"}                                # the human's server, before the store
         self.assertEqual(verbs - higher, set(self.LEVEL_0))
 
     # 2 ------------------------------------------------------------------
 
     def test_2_delegate_spawns_normally(self):
-        code, out, err = self.run_sb("delegate", "do a thing", "--name", "a thing")
+        code, out, err = self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job")
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.h.started), 1)
         self.assertNeverImported()
@@ -1128,7 +1129,7 @@ class IsolationTest(Sandbox):
         Skipping it would pass the test above and lose the property: sb was never going to
         run the code, so a `SystemExit` at module scope has no bearing on a markdown file
         sitting next to it. §11 item 4 records the same thing for an incompatible API."""
-        self.run_sb("delegate", "do a thing", "--name", "a thing")
+        self.run_sb("delegate", "do a thing", "--name", "a thing", "--about", "a job")
         self.assertIn("something an agent is told",
                       [section_body(p) for p in self.h.started[0]["prompts"]])
         self.assertNeverImported()
@@ -1139,7 +1140,7 @@ class IsolationTest(Sandbox):
         with mock.patch.dict(os.environ):
             for var in cli._AGENT_SESSION_ENV:
                 os.environ.pop(var, None)
-            code, out, err = self.run_sb("start")
+            code, out, err = self.run_sb("start", "--about", "a job")
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.h.started), 1)
         self.assertNeverImported()
