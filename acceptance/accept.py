@@ -432,7 +432,7 @@ def check_fanout(clone: Clone, rid: str, log: Log) -> Check:
     def spawn(i: int, topic: str) -> None:
         name = spawned(topic)
         task = (f"Your entire job is one command. Run it now, as your first action: "
-                f"sb done \"{token} {name}\" — do not read any file, do not explore, "
+                f"sb done \"{token} {name}\" --verified \"not verified\" --not-done \"nothing outstanding\" — do not read any file, do not explore, "
                 f"do not run anything else.")
         spawns[name] = clone.sb("delegate", task, "--name", topic, "--json",
                                 timeout=SPAWN_S)
@@ -515,13 +515,13 @@ def check_doorbell(clone: Clone, rid: str, log: Log) -> Check:
     # `_ring` defers on. An earlier version asked the parent for two commands in order and
     # measured the direct ring instead: the parent's turn had ended before its child got
     # round to reporting, which is the same reason runs 2 and 3 never isolated this.
-    child_task = f'Run this one command and nothing else: sb done "{ctok}"'
+    child_task = f'Run this one command and nothing else: sb done "{ctok}" --verified "not verified" --not-done "nothing outstanding"'
     parent_task = (
         f"Do exactly this and nothing else. FIRST, run this as ONE single shell command: "
         f"sb delegate '{child_task}' --name {ctopic} && sleep 45 . "
         f"THEN stop: run no command at all, call no tool, end your turn and wait quietly. "
         f"LATER, only if you are told that you have mail, run: sb inbox — and then finish "
-        f"by running: sb done \"WOKEN <paste here the exact text of what you read>\"")
+        f"by running: sb done \"WOKEN <paste here the exact text of what you read>\" --verified \"not verified\" --not-done \"nothing outstanding\"")
 
     # No `--role`: the default is `worker`, whose whole job here is to delegate, and since
     # #326 delegation is an ordinary agent capability that no role is short of. This used to
@@ -626,7 +626,7 @@ def check_block(clone: Clone, rid: str, log: Log) -> Check:
              f"sb block \"acceptance probe {rid}\" . "
              f"Later, when the human has answered you, run: sb inbox — and then finish by "
              f"running: sb done \"READ <paste here the exact text of every message you "
-             f"read>\". Do nothing else at any point.")
+             f"read>\" --verified \"not verified\" --not-done \"nothing outstanding\". Do nothing else at any point.")
     spawn = clone.sb("delegate", btask, "--name", btopic, "--json", timeout=SPAWN_S)
     if spawn.rc != 0:
         c.ok, c.seconds, c.headline = False, now() - t0, "the agent could not be spawned"
@@ -641,7 +641,7 @@ def check_block(clone: Clone, rid: str, log: Log) -> Check:
     blocked_at = now()
 
     stask = (f"Run these two commands and nothing else: first "
-             f"sb tell {blocker} \"{sib_tok}\" , then sb done \"sent\".")
+             f"sb tell {blocker} \"{sib_tok}\" , then sb done \"sent\" --verified \"not verified\" --not-done \"nothing outstanding\".")
     clone.sb("delegate", stask, "--name", stopic, "--json", timeout=SPAWN_S)
     sent = wait_until(lambda: clone.query(
         "SELECT * FROM messages WHERE from_agent=? AND to_agent=?", (sibling, blocker)),
@@ -712,7 +712,7 @@ def check_sweep(clone: Clone, rid: str, log: Log) -> Check:
     dtopic, ktopic = f"{rid}-d", f"{rid}-k"
     closable, refused = spawned(dtopic), spawned(ktopic)
 
-    dtask = (f"Your entire job is one command. Run it now: sb done \"done {rid}\" — "
+    dtask = (f"Your entire job is one command. Run it now: sb done \"done {rid}\" --verified \"not verified\" --not-done \"nothing outstanding\" — "
              f"nothing else.")
     ktask = (f"Run this exact command immediately and as your only action: "
              f"sb block \"acceptance probe {rid} — stay blocked\" . Then do nothing "

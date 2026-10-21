@@ -120,6 +120,11 @@ def with_handoff(task: Optional[str], handoff: Optional[str]) -> str:
     return f"{text} HANDOFF: {extra}" if extra else text
 
 
+def done_report(summary: str, verified: str, not_done: str) -> str:
+    """The one line `sb done` delivers: what was done, what verified it, what was not done."""
+    return f"{summary} | verified: {verified} | not done: {not_done}"
+
+
 ISOLATION_OWN = "own"
 ISOLATION_SHARED = "shared"
 ISOLATIONS = (ISOLATION_OWN, ISOLATION_SHARED)
@@ -5824,6 +5829,9 @@ class Broker:
                         handoff=handoff or None,
                         awaiting_task=bool(awaiting_task),
                         session_id=agent.session_id or None)
+        if handoff and handoff.strip():
+            store.log_event(self.db, kind="handoff", agent=me, to=name, body=handoff.strip(),
+                            via="delegate")
         # EVERY agent opens with the tree beside it, not just the top-level
         # orchestrator `sb start` makes: `delegate` is the one place every spawn
         # passes through, so this is the one place the board can be opened without
@@ -6362,7 +6370,7 @@ class Broker:
     def tell(
         self, targets: Iterable[str], message: str, *, me: Optional[str] = None,
         kind: str = "tell", needs_reply: bool = False, no_reply: bool = False,
-        mode: str = NORMAL,
+        mode: str = NORMAL, handoff: bool = False,
     ) -> list[int]:
         """Send and return, always. Reply flags change what the recipient READS.
 
@@ -6384,6 +6392,8 @@ class Broker:
         """
         mode = normalize_tell_mode(mode)
         me = me or self.whoami()
+        if handoff:
+            message = with_handoff("", message).strip()
         ids = []
         for who in targets:
             t = self._resolve(who, me)
@@ -6394,7 +6404,7 @@ class Broker:
                 raise ValueError(
                     "the human has no mailbox — a message to them would never be read. "
                     "Use `sb ask human \"<question>\"` if you need an answer, or `sb done "
-                    "\"<summary>\"` to report what you did."
+                    "\"<summary>\" --verified ... --not-done ...` to report what you did."
                 )
             # A name nothing knows is a typo, and it is refused HERE — the "whatever
             # handled an unknown name" that `same_tree` assumes exists downstream of it,
@@ -6415,19 +6425,22 @@ class Broker:
                 # Its own path from the first line: the text travels INLINE rather than
                 # behind a doorbell, so the row it writes holds the cancel wrapper and is
                 # marked read on delivery. Nothing below this branch applies to it.
-                ids.append(self._interrupt(t, message, me=me, needs_reply=needs_reply,
-                                           no_reply=no_reply))
-                continue
-            mid = store.put_message(
-                self.db, from_agent=me, to_agent=t, kind=kind, body=message,
-                needs_reply=needs_reply, no_reply=no_reply,
-            )
+                mid = self._interrupt(t, message, me=me, needs_reply=needs_reply,
+                                      no_reply=no_reply)
+            else:
+                mid = store.put_message(
+                    self.db, from_agent=me, to_agent=t, kind=kind, body=message,
+                    needs_reply=needs_reply, no_reply=no_reply,
+                )
+                # The human's own mail is treated as an ANSWER by the doorbell: it is never
+                # held back to be coalesced with a burst (see `_ring`). It does NOT resolve an
+                # open Question — only `sb answer`/`sb resolve` do that.
+                self._ring(t, f"{tag(me)} {self._say('notify.mail')}",
+                           mode=mode, answer=(me == HUMAN))
             ids.append(mid)
-            # The human's own mail is treated as an ANSWER by the doorbell: it is never
-            # held back to be coalesced with a burst (see `_ring`). It does NOT resolve an
-            # open Question — only `sb answer`/`sb resolve` do that.
-            self._ring(t, f"{tag(me)} {self._say('notify.mail')}",
-                       mode=mode, answer=(me == HUMAN))
+            if handoff:
+                store.log_event(self.db, kind="handoff", agent=me, to=t, message=mid,
+                                body=message, via="tell")
         return ids
 
     def inbox(self, *, me: Optional[str] = None, peek: bool = False) -> list:
@@ -7587,6 +7600,12 @@ class Broker:
         store.put_message(self.db, from_agent=by, to_agent=asker, kind="tell", body=body)
         self._ring(asker, f"{tag(by)} {self._say('notify.mail')}", mode=NORMAL, answer=True)
 
+    def _open_work(self, who: str, duties) -> list[str]:
+        """What holds an agent back from cleanup (#331): incomplete Steps it owns, Questions it asked."""
+        work = [f"step {s.get('plan')}/{s.get('step')} ({s.get('state')})"
+                for s in duties.owned_by(who) if s.get("state") != "complete"]
+        return work + [f"question {q['id']}" for q in store.open_questions(self.db, asker=who)]
+
     def _drop_questions(self, who: str, *, by: str) -> None:
         """A closing agent's open Questions end with it — no separate `sb withdraw` first.
 
@@ -7734,6 +7753,8 @@ class Broker:
             a["name"]: kids for a in candidates
             if a["name"] != me and (kids := self.live_descendants(a["name"]))
         }
+        from . import obligations
+        duties = obligations.EMPTY if force else obligations.collect_facts(self.repo)
         if held and names:
             raise ValueError(
                 "still working underneath: "
@@ -7978,6 +7999,10 @@ class Broker:
                               "gate — only closing the row clears the mail"
                               + (". --force closes it: the message survives in its inbox"
                                  if names else ""))
+                    continue
+                if work := self._open_work(a["name"], duties):
+                    refuse(a, "still owns open work: " + ", ".join(work)
+                              + (". --force closes it anyway" if names else ""))
                     continue
                 # A row written before `--keep` was removed. Nothing writes this any
                 # more, so this only ever fires for an agent that predates the removal —

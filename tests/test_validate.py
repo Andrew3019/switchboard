@@ -227,12 +227,26 @@ class CliBoundaryTest(unittest.TestCase):
 
     def test_empty_strings_are_caught_for_every_verb_that_takes_prose(self):
         self.bad(["delegate", "   "])
-        self.bad(["done", "   "])
+        self.bad(["done", "   ", "--verified", "not verified", "--not-done", "nothing outstanding"])
         self.bad(["ask", "human", "\t"])
         self.bad(["tell", "worker-1", "  "])
 
+    def test_done_refuses_a_report_missing_either_of_its_other_two_fields(self):
+        """#329: the command enforces what was verified and what was not done."""
+        self.bad(["done", "fixed it"])
+        self.bad(["done", "fixed it", "--verified", "pytest tests/test_x.py"])
+        self.bad(["done", "fixed it", "--not-done", "nothing outstanding"])
+        self.bad(["done", "fixed it", "--verified", " ", "--not-done", "nothing outstanding"])
+
+    def test_done_delivers_all_three_fields_on_one_line(self):
+        args = parse(["done", " fixed it ", "--verified", "pytest tests/test_x.py",
+                      "--not-done", "the docs pass"])
+        _validate(args)
+        self.assertEqual(args.summary, "fixed it | verified: pytest tests/test_x.py | "
+                                       "not done: the docs pass")
+
     def test_done_and_a_question_must_be_one_line(self):
-        self.bad(["done", "fixed it\nand tested it"])
+        self.bad(["done", "fixed it\nand tested it", "--verified", "not verified", "--not-done", "nothing outstanding"])
         self.bad(["ask", "human", "stuck\nbadly"])
 
     def test_a_question_to_a_person_refuses_a_line_shaped_like_a_report(self):
@@ -240,9 +254,9 @@ class CliBoundaryTest(unittest.TestCase):
         where the misuse is visible, so this must fail before anything is written."""
         long = "the whole answer, " * 40
         self.bad(["ask", "human", long])
-        args = parse(["done", long])
+        args = parse(["done", long, "--verified", "not verified", "--not-done", "nothing outstanding"])
         _validate(args)                              # `done` is a report and may be long
-        self.assertEqual(args.summary, long.strip())
+        self.assertTrue(args.summary.startswith(long.strip() + " | verified: "))
         args = parse(["ask", "human", "  need a decision on the auth split  "])
         _validate(args)
         self.assertEqual(args.question, "need a decision on the auth split")

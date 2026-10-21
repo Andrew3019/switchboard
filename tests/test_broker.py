@@ -1325,6 +1325,21 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(row["no_reply"], 1)
         self.assertIn("no reply expected", self.h.prompts[0][1])
 
+    def test_a_handoff_tell_is_labelled_for_the_receiver_and_logged_as_a_handoff(self):
+        """#330: a handoff is a structured message, logged with sender and receiver."""
+        from switchboard.cli import build_parser
+        self.assertTrue(build_parser().parse_args(["tell", "w", "hi", "--handoff"]).handoff)
+        store.create_agent(self.db, name="a", role="lead")
+        store.create_agent(self.db, name="b", role="worker", parent="a")
+        (mid,) = self.b.tell(["b"], "you own the PR now; tests pass", me="a", handoff=True)
+        self.assertEqual(store.get_message(self.db, mid)["body"],
+                         "HANDOFF: you own the PR now; tests pass")
+        (ev,) = store.history(self.db, kinds=["handoff"])
+        self.assertEqual(ev["agent"], "a")
+        self.assertEqual(json.loads(ev["payload"])["to"], "b")
+        self.b.tell(["b"], "plain note", me="a")
+        self.assertEqual(len(store.history(self.db, kinds=["handoff"])), 1)
+
     def test_legacy_when_idle_mode_is_normal_at_a_busy_target(self):
         store.create_agent(self.db, name="w", role="worker", pane_id="w1:p1")
         self.h.states_by_name = {"w": "working"}
@@ -3137,18 +3152,47 @@ class BrokerTest(unittest.TestCase):
         [m] = store.unread_for(self.db, "asker", mark=False)
         self.assertIn("target", m["body"])                # it learns which agent went
 
-    def test_a_finished_agent_swept_normally_still_clears_its_question(self):
-        """Not gated on `--force`. A finished agent that still holds an open question is
-        swept by a bare `sb cleanup`, and the question goes with the pane exactly as it
-        does under force — the trigger is the close, not the flag."""
+    def test_a_finished_agent_holding_its_own_question_is_not_cleaned_up(self):
+        """#331: a finished agent with an unresolved Question it asked is held by the sweep
+        and by name; only `--force` closes it, and the question goes with the pane."""
         store.create_agent(self.db, name="orch", role="lead")
         store.create_agent(self.db, name="kid", role="worker", parent="orch",
                            pane_id="w1:p1", session_id="s-kid")
         q = self.b.ask(HUMAN, "which branch?", me="kid")["id"]
         store.set_state(self.db, "kid", "done")
         self.h.states_by_name = {"kid": "idle"}
-        self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
+        self.assertEqual(self.b.cleanup(me="orch"), [])
+        self.assertEqual(self.b.cleanup(["kid"], me="orch"), [])
+        self.assertEqual(self.b.cleanup(["kid"], me="orch", force=True), ["kid"])
         self.assertEqual(store.get_question(self.db, q)["state"], store.Q_WITHDRAWN)
+
+    def test_a_finished_agent_owning_an_incomplete_step_is_not_swept(self):
+        """#331: owning an incomplete Step holds an agent back; once it completes, the
+        agent is cleanable again. Reached through the real plans `derive` seam."""
+        from switchboard import obligations
+        plugin = Path(__file__).resolve().parent.parent / "defaults" / "plugins" / "plans"
+        state = self.repo / "plans-state"
+        state.mkdir()
+        _mod, hook = obligations._load("plans", plugin)
+        self.enterContext(mock.patch.object(
+            obligations, "hooks", lambda repo: [("plans", hook, state)]))
+
+        def plans(progress):
+            step = {"id": "step-1", "name": "Implement", "kind": "implement",
+                    "owner": "kid", "progress": progress, "deps": []}
+            (state / "plans.json").write_text(json.dumps({"plans": [
+                {"id": "p-1", "title": "a job", "steps": [step],
+                 "change": {"path": "direct", "pr": None, "landing": None}}]}))
+
+        store.create_agent(self.db, name="orch", role="lead")
+        store.create_agent(self.db, name="kid", role="worker", parent="orch",
+                           pane_id="w1:p1", session_id="s-kid")
+        store.set_state(self.db, "kid", "done")
+        self.h.states_by_name = {"kid": "idle"}
+        plans("open")
+        self.assertEqual(self.b.cleanup(me="orch"), [])
+        plans("done")
+        self.assertEqual(self.b.cleanup(me="orch"), ["kid"])
 
     def test_cleanup_never_closes_an_agent_with_unread_mail(self):
         store.create_agent(self.db, name="orch", role="lead")

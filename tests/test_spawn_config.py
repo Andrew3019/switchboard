@@ -134,6 +134,12 @@ class OneCallTest(SpawnConfigSandbox):
         self.assertIn("build the thing properly", first)
         self.assertIn("client.py", first)
         self.assertFalse(any("client.py" in p for p in prompts), prompts)
+        db = store.connect(self.repo)
+        try:
+            (ev,) = store.history(db, kinds=["handoff"])
+        finally:
+            db.close()
+        self.assertEqual((ev["agent"], json.loads(ev["payload"])["to"]), ("lead-1", name))
 
         # The Step is the spawnee's, and so is the Plan, end to end.
         self.assertEqual(self.step("step-2")["owner"], name)

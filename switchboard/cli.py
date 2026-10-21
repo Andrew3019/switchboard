@@ -372,6 +372,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="CANCEL what they are doing and deliver this instead — for "
                         "changing course, not for being quick")
     t.set_defaults(mode=broker_mod.NORMAL)
+    t.add_argument("--handoff", action="store_true",
+                   help="this message hands work over: what they are now responsible for, "
+                        "your conclusions, constraints, current state, what remains, and "
+                        "where the deeper context lives. Logged as a handoff")
 
     # Agents only. A human has no mailbox — see the `inbox` branch in `run`.
     ib = cmd("inbox", help="read your unread messages")
@@ -398,7 +402,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "rise one level and report to whoever you report to, instead of being "
                     "left under an agent that has finished. Your summary is the hand-off "
                     "note they read it with.")
-    dn.add_argument("summary")
+    dn.add_argument("summary", help="what was done")
+    dn.add_argument("--verified", metavar="HOW",
+                    help='what was verified and by what command, or "not verified"')
+    dn.add_argument("--not-done", metavar="WHAT",
+                    help='what was not done, or "nothing outstanding"')
     dn.add_argument("--preserve-children", action="store_true",
                     help="hand your live children up to your own parent as you finish — "
                          "they keep their panes, their checkouts and their work, and "
@@ -900,8 +908,16 @@ def _validate(args) -> None:
         args.agents = [validate.agent_name(name) for name in args.agents]
 
     elif cmd == "done":
-        # herdr carries the summary as `report-agent --message`, so one line.
-        args.summary = validate.line(args.summary, "summary")
+        if args.verified is None or args.not_done is None:
+            raise validate.Invalid(
+                'sb done takes three fields: the summary (what was done), --verified '
+                '"<what you checked and the command>" (or "not verified"), and --not-done '
+                '"<what you left out or deferred>" (or "nothing outstanding")')
+        args.summary = validate.line(
+            broker_mod.done_report(validate.line(args.summary, "summary"),
+                                   validate.line(args.verified, "--verified"),
+                                   validate.line(args.not_done, "--not-done")),
+            "the summary, --verified and --not-done together")
 
     elif cmd == "close":
         # Optional — a summary-less close is the kill switch. When present it is a report to
@@ -2041,7 +2057,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
     if cmd == "tell":
         ids = b.tell(args.who, args.message, me=me,
                      needs_reply=args.needs_reply, no_reply=getattr(args, "no_reply", False),
-                     mode=args.mode)
+                     mode=args.mode, handoff=getattr(args, "handoff", False))
         # Whether the doorbell actually rang. `tell` used to report plain success even
         # when the ring failed outright, so the sender proceeded believing the handoff had
         # happened — liveness loss, which in an async system is worse than an error.

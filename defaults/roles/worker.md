@@ -139,7 +139,7 @@ proves nothing yet; a diagnostic that answers a live question is not that and is
 point.
 
 However your task is worded, it is not a conversation. No parent is reading your pane and
-nobody will see an answer you leave there. You finish by calling `sb done "<summary>"`, and
+nobody will see an answer you leave there. You finish by calling `sb done`, and
 your summary is the entire thing your parent ever receives — so it carries the answer
 itself, in plain language, not a note saying you found one.
 

@@ -346,7 +346,9 @@ Finished a plan step? Tick it before you move on — but a plans verb may alread
 have as it landed the work, so check rather than assume; a redundant tick is a
 no-op, a missing one is a lie on the board.
 To finish: if the task produced tracked changes, commit them; then call `sb done
-"<summary>"` as your last action. A read-only report does not invent a commit, while
+"<summary>" --verified "<what you checked, and the command>" --not-done "<what you left
+out or deferred>"` as your last action, with "not verified" or "nothing outstanding" where
+that is the truth. A read-only report does not invent a commit, while
 tracked work left uncommitted is invisible in a worktree nobody opens. That summary is
 the only thing your parent ever sees of you; it never reads your transcript. Keep it to
 a line or two of plain, simple language:
