@@ -744,8 +744,8 @@ class RolesTest(unittest.TestCase):
         r = roles.load(self.repo)
         want = {
             "dispatcher": ("claude", "claude-opus-5-5", "medium"),
-            "researcher": ("claude", "claude-sonnet-5", "medium"),
-            "reviewer":   ("claude", "claude-sonnet-5", "high"),
+            "researcher": ("claude", "claude-sonnet-5-5", "medium"),
+            "reviewer":   ("claude", "claude-sonnet-5-5", "high"),
             "worker":     ("claude", "claude-opus-5-5", "medium"),
             "planner":    ("claude", "claude-opus-5-5", "medium"),
         }
@@ -757,7 +757,7 @@ class RolesTest(unittest.TestCase):
         self.assertEqual(got, want)
 
         self.assertEqual(roles.get(r, "reviewer").spec().cli_args(),
-                         ["--model", "claude-sonnet-5", "--effort", "high"])
+                         ["--model", "claude-sonnet-5-5", "--effort", "high"])
         self.assertEqual(roles.get(r, "worker").spec().cli_args(),
                          ["--model", "claude-opus-5-5", "--effort", "medium"])
 

@@ -67,7 +67,7 @@ class ModelsTest(unittest.TestCase):
         set is asserted whole rather than tier by tier.
         """
         t = self.load()
-        self.assertEqual(t.resolve("cheap").model, "claude-sonnet-5")
+        self.assertEqual(t.resolve("cheap").model, "claude-sonnet-5-5")
         self.assertEqual(t.resolve("strong").model, "claude-opus-5-5")
         pinned = {n for n in t.names()
                   if (t.resolve(n).model or "").startswith("claude-")}
@@ -80,7 +80,7 @@ class ModelsTest(unittest.TestCase):
     def test_cli_args_carry_model_and_effort(self):
         """--model and --effort are both real claude flags; see models.py for the citation."""
         self.assertEqual(
-            self.load().resolve("cheap").cli_args(), ["--model", "claude-sonnet-5", "--effort", "medium"])
+            self.load().resolve("cheap").cli_args(), ["--model", "claude-sonnet-5-5", "--effort", "medium"])
         self.assertEqual(
             self.load().resolve("strong").cli_args(), ["--model", "claude-opus-5-5", "--effort", "medium"])
 
@@ -458,7 +458,7 @@ class CliSurfaceTest(unittest.TestCase):
     def test_models_verb_reports_resolved_flags(self):
         d = self._models_json()
         self.assertEqual(d["tiers"]["cheap"]["cli_args"],
-                         ["--model", "claude-sonnet-5", "--effort", "medium"])
+                         ["--model", "claude-sonnet-5-5", "--effort", "medium"])
         self.assertEqual(d["tiers"]["default"]["cli_args"],
                          ["--model", "claude-opus-5-5", "--effort", "medium"])
 

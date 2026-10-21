@@ -42,7 +42,7 @@ model = "careful"
 +++
 
 <!--
-TIER: `careful` — Sonnet 5 at high effort. Deliberately NOT `strong`: a repo that wants its
+TIER: `careful` — Sonnet 5.5 at high effort. Deliberately NOT `strong`: a repo that wants its
 reviews expensive says so in its own `.switchboard/roles.toml`. The shipped baseline should
 not spend anyone's money by default.
 

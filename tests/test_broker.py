@@ -502,7 +502,7 @@ class BrokerTest(unittest.TestCase):
         """
         self.b.delegate("t", topic="t", role="researcher", me="orch")   # cheap
         self.assertEqual(self.h.started[0]["model_args"],
-                         ["--model", "claude-sonnet-5", "--effort", "medium"])
+                         ["--model", "claude-sonnet-5-5", "--effort", "medium"])
 
     def test_an_explicit_model_is_a_tier_name_too(self):
         """`--model strong` must be resolved, not handed to the CLI as a model id."""
@@ -537,7 +537,7 @@ class BrokerTest(unittest.TestCase):
                            cwd=str(self.repo))
         name = self.b.delegate("t", topic="t", role="researcher", me="boss")
         self.assertEqual(self.h.started[0]["model_args"],
-                         ["--model", "claude-sonnet-5", "--effort", "medium"])   # researcher's own
+                         ["--model", "claude-sonnet-5-5", "--effort", "medium"])   # researcher's own
         self.assertIsNone(store.get_agent(self.db, name)["tier"])
 
     def test_an_explicit_model_beats_an_inherited_codex_tier(self):
@@ -4028,7 +4028,7 @@ class BrokerTest(unittest.TestCase):
                            cwd=str(self.repo), pane_id="w1:p1")
         self.b.restore("kid")
         self.assertEqual(self.h.started[-1]["model_args"],
-                         ["--model", "claude-sonnet-5", "--effort", "medium"])
+                         ["--model", "claude-sonnet-5-5", "--effort", "medium"])
 
     def test_restore_comes_back_on_the_tier_it_was_spawned_with(self):
         """Restore brings back the SAME agent, not a fresh one of its role. `--model`
@@ -4063,7 +4063,7 @@ class BrokerTest(unittest.TestCase):
         self.assertIsNone(store.get_agent(self.db, "kid")["tier"])
         self.b.restore("kid")
         self.assertEqual(self.h.started[-1]["model_args"],
-                         ["--model", "claude-sonnet-5", "--effort", "medium"])
+                         ["--model", "claude-sonnet-5-5", "--effort", "medium"])
 
     # -- v2 wave 4 (#322/#323): a restart is not a result, and held mail survives ------
 
