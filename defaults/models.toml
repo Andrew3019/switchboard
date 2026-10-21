@@ -56,7 +56,7 @@ provider = "claude"
 # Read this before using `--model cheap` expecting the old behaviour: it is now sonnet at
 # medium effort everywhere, not just for researchers.
 provider = "claude"
-model    = "claude-sonnet-5"
+model    = "claude-sonnet-5-5"
 effort   = "medium"
 
 [tiers.default]
@@ -82,7 +82,7 @@ provider = "claude"
 # consumer: running the checks and telling a real defect from your own bad invocation.
 # Same price per token as `cheap`; the difference is how long it thinks.
 provider = "claude"
-model    = "claude-sonnet-5"
+model    = "claude-sonnet-5-5"
 effort   = "high"
 
 [tiers.strong]
