@@ -241,6 +241,10 @@ class Cache:
         except (OSError, subprocess.TimeoutExpired) as e:
             self.pr_error[repo.id] = str(e)
             return
+        if p.returncode != 0 and "none of the git remotes" in p.stderr:
+            self.prs[repo.id] = []
+            self.pr_error.pop(repo.id, None)
+            return
         if p.returncode != 0:
             self.pr_error[repo.id] = p.stderr.strip() or "gh pr list failed"
             return
