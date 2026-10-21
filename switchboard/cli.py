@@ -153,8 +153,8 @@ def build_parser() -> argparse.ArgumentParser:
                                    "starting another")
     st.add_argument("--model", help=_tier_help())
     st.add_argument("--about", metavar="LINE",
-                    help="one plain line on what the job is: the title the human reads "
-                         "on its card. Required")
+                    help="one plain line on what the job is: the title on its card. "
+                         "Optional — without it the card shows the name")
 
     # Hidden on purpose. The board is a human's screen, and `sb` is the vocabulary
     # agents are handed — see the refusal in main(). SUPPRESS keeps it out of
@@ -751,7 +751,12 @@ def _validate(args) -> None:
             args.name = validate.agent_name(args.name, "--name")
         if args.task is not None:
             args.task = validate.line(args.task, "task")
-        args.about = _about(args.about)
+        # NOT `_about`: optional here. `--about` is required so an agent's spawn arrives
+        # with a title the HUMAN can read, and only a human runs `sb start` — they are
+        # the reader, and a card they did not title falls back to the name (web.py).
+        # `--name <running one>` also only switches to it, where an about would be dropped.
+        if args.about is not None:
+            args.about = validate.line(args.about, "--about", max_len=validate.MAX_ABOUT)
         # Same rule as `delegate --model`, and deliberately the same call: both take a
         # TIER name out of the same open vocabulary, so a value one accepts and the other
         # rejects would be two answers to one question.
@@ -1021,7 +1026,8 @@ def _validate(args) -> None:
         _validate_plugin(args)
 
 def _about(value: Optional[str]) -> str:
-    """`--about` on a spawn typed at the CLI. Required here and only here (`Broker.delegate`)."""
+    """`--about` on `sb delegate`. Required here and only here: not in `Broker.delegate`,
+    which `sb start` and plugins reach directly, and not on `sb start` (see `_validate`)."""
     if value is None:
         raise validate.Invalid(
             '--about is required: one plain line on what the job is, written for the '
@@ -1951,7 +1957,8 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
             print(f"sb: `sb start` creates a top-level dispatcher, and only a human "
                   f"does that — {who}.\n"
                   f"    An agent that needs another agent delegates one:\n"
-                  f"      sb delegate \"<task>\" --role worker", file=sys.stderr)
+                  f"      sb delegate \"<task>\" --role worker --name \"<topic>\" "
+                  f"--about \"<the job>\"", file=sys.stderr)
             return 1
         # Read BEFORE starting, or the one we are about to make is in the list. This is
         # the only thing left standing between "always start another" and losing track of
@@ -1959,7 +1966,7 @@ def _dispatch(args, b: Broker, db, h: Herdr) -> int:
         others = [] if args.name else b.running_tops()
         name = b.start(name=args.name, task=args.task, model=args.model, about=args.about)
         also = (f"\n  still running: {', '.join(others)}"
-                f" — back to one with: sb start --name {others[-1]} --about \"<the job>\"") if others else ""
+                f" — back to one with: sb start --name {others[-1]}") if others else ""
         _emit(args, f"dispatcher '{name}' ready in its own workspace — switch to it, "
                     f"or: sb tell {name} \"...\"{also}",
               {"name": name, "running": others})

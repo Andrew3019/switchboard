@@ -139,7 +139,7 @@ by the task owner that holds the worktree.
 
 ```
 ./bin/sb delegate "<hold and follow instructions>" --role lead --model strong --name "eval run 0825" --about "Run the plans eval cases"
-./bin/sb tell lead-eval-run-0825 "spawn <n> planners with ./bin/sb delegate, --role planner, one --name per case"
+./bin/sb tell lead-eval-run-0825 "spawn <n> planners with ./bin/sb delegate, --role planner, one --name and --about per case"
 ```
 
 **Quote every `--name`.** It takes one argument, and `--name eval run` is refused outright
