@@ -34,6 +34,11 @@ page, so the positional line is no longer "bookkeeping that reaches nobody": it 
 one-line decision, the card's headline. The chat rule stands; the parts sit beside it.
 The parts are described, never given as a call to copy (DESIGN-TRUTH 2026-08-14).
 
+2026-11-10, sb web — `--context` added and required for the human. The page showed the
+headline, about and options but not the explanation the agent wrote in chat, so a person
+reading only the page had to infer it. The person reads the terminal OR the page, never
+both, so each must carry the full context; "the chat may say more" went with it.
+
 To change it for one repo, write `<repo>/.switchboard/protocol.md`. That file REPLACES
 this one rather than merging into it — a protocol assembled from two halves is a protocol
 nobody can read.
@@ -422,10 +427,12 @@ thing as the last message in your own chat, then `sb ask human`. Its line is the
 decision you are waiting for, in ONE short line; a question long enough to be the
 message is refused, and shortening it is not the fix. Its flags carry the parts, each
 in plain words for someone who has not followed your work: `--about` what the work is,
-`--catch-up` what happened since they last replied to you, `--blocked` what waits on
+`--context` everything they need to know to answer — the explanation from your chat,
+findings and trade-offs included, because they may read only the page — `--catch-up`
+what happened since they last replied to you, `--blocked` what waits on
 the answer, `--recommend` the option you would pick and `--option` each other one, and
-`--link` any URL or file worth opening. The parts and the chat say the same thing; the
-chat may say more. Before asking, run `sb questions --mine` and `sb withdraw` any open
+`--link` any URL or file worth opening. The parts and the chat say the same thing, and
+each must be enough on its own: they read one or the other, never both. Before asking, run `sb questions --mine` and `sb withdraw` any open
 question the new one replaces. End that chat message with a section headed "Where we are now" and one
 line under it, twenty words at most and the header not counted: what the whole task or
 topic is, and what stage it has reached — investigating, designing, waiting on a

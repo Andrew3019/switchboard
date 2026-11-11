@@ -259,20 +259,23 @@ class CliBoundaryTest(unittest.TestCase):
         _validate(args)                              # `done` is a report and may be long
         self.assertTrue(args.summary.startswith(long.strip() + " | verified: "))
         args = parse(["ask", "human", "  need a decision on the auth split  ",
-                      "--about", "a", "--blocked", "b", "--catch-up", "c", "--recommend", "d"])
+                      "--about", "a", "--context", "x", "--blocked", "b", "--catch-up", "c",
+                      "--recommend", "d"])
         _validate(args)
         self.assertEqual(args.question, "need a decision on the auth split")
 
     def test_a_question_to_a_person_carries_its_parts(self):
         """`questions.parts` is what the `sb web` page reads, so its shape is pinned: the
         recommended option first, a file link stored absolute, anything else refused."""
+        self.bad(["ask", "human", "which branch?", "--about", "a", "--context", "x",
+                  "--blocked", "b", "--catch-up", "c"])              # no --recommend
         self.bad(["ask", "human", "which branch?", "--about", "a", "--blocked", "b",
-                  "--catch-up", "c"])                                # no --recommend
+                  "--catch-up", "c", "--recommend", "d"])            # no --context
         with tempfile.TemporaryDirectory() as directory:
             note = Path(directory) / "note.md"
             note.write_text("x", encoding="utf-8")
             argv = ["ask", "human", "which branch?", "--about", "the auth\nsplit",
-                    "--blocked", "b", "--catch-up", "c", "--option", "B",
+                    "--context", "finding one\n\nfinding two", "--blocked", "b", "--catch-up", "c", "--option", "B",
                     "--recommend", "A | because", "--link", "Note | note.md",
                     "--link", "https://example.com/pr/1"]
             with mock.patch("os.getcwd", return_value=directory):
@@ -281,6 +284,7 @@ class CliBoundaryTest(unittest.TestCase):
                 for bad in ("javascript:alert(1)", "missing.md"):
                     self.bad(argv[:-1] + [bad])
         self.assertEqual(args.parts["about"], "the auth\nsplit")
+        self.assertEqual(args.parts["context"], "finding one\n\nfinding two")
         self.assertEqual(args.parts["options"],
                          [{"label": "A", "detail": "because", "recommended": True},
                           {"label": "B", "detail": None, "recommended": False}])

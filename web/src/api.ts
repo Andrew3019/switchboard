@@ -2,6 +2,7 @@ export type Option = { label: string; detail: string | null; recommended: boolea
 export type Link = { title: string | null; target: string; kind: "url" | "file" };
 export type Parts = {
   about?: string | null;
+  context?: string | null;
   catch_up?: string | null;
   blocked?: string | null;
   options?: Option[];
