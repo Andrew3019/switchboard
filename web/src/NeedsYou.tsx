@@ -60,6 +60,12 @@ function QuestionCard({ q, repo, now }: { q: Question; repo: RepoState; now: num
             <p className="prose">{p.about}</p>
           </div>
         )}
+        {p.context && (
+          <div className="field">
+            <div className="lbl">What you need to know</div>
+            <p className="prose">{p.context}</p>
+          </div>
+        )}
         {p.catch_up && (
           <div className="field">
             <div className="lbl">Since you last replied to this agent · {ago(now, q.last_reply_at)}</div>

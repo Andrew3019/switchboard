@@ -81,8 +81,9 @@ _URL = re.compile(r"https?://\S+\Z", re.I)
 _SCHEME = re.compile(r"[a-z][a-z0-9+.-]*:", re.I)
 
 # The parts a question to a person must carry, as (key in `parts`, the flag that sets it).
-HUMAN_QUESTION_PARTS = (("about", "--about"), ("blocked", "--blocked"),
-                        ("catch_up", "--catch-up"), ("options", "--recommend"))
+HUMAN_QUESTION_PARTS = (("about", "--about"), ("context", "--context"),
+                        ("blocked", "--blocked"), ("catch_up", "--catch-up"),
+                        ("options", "--recommend"))
 
 
 class Invalid(ValueError):
@@ -176,13 +177,15 @@ def reason(value: Optional[str], field: str = "reason") -> str:
     return v
 
 
-def question_parts(*, about: Optional[str] = None, catch_up: Optional[str] = None,
-                   blocked: Optional[str] = None, recommend: Optional[str] = None,
+def question_parts(*, about: Optional[str] = None, context: Optional[str] = None,
+                   catch_up: Optional[str] = None, blocked: Optional[str] = None, recommend: Optional[str] = None,
                    options: Iterable[str] = (), links: Iterable[str] = (),
                    cwd: str) -> Optional[dict]:
     """The structured parts of `sb ask`, as stored in `questions.parts`. None if none given.
 
-    The text parts never reach herdr, so they may be multi-line. A file link is resolved
+    The text parts never reach herdr, so they may be multi-line. `context` is the whole
+    explanation from the agent's chat — the human may read only the page — so it is capped
+    like a message, not like a part. A file link is resolved
     against `cwd` and stored absolute, because whoever reads it later stands somewhere else.
     """
     options = list(options)
@@ -190,13 +193,14 @@ def question_parts(*, about: Optional[str] = None, catch_up: Optional[str] = Non
     if options and recommend is None:
         raise Invalid("--option needs a --recommend beside it: one option is the one you "
                       "recommend, and it goes first")
-    if all(v is None for v in (about, catch_up, blocked, recommend)) and not links:
+    if all(v is None for v in (about, context, catch_up, blocked, recommend)) and not links:
         return None
     opts = [] if recommend is None else [dict(_option(recommend, "--recommend"),
                                               recommended=True)]
     opts += [dict(_option(o, "--option"), recommended=False) for o in options]
     return {
         "about": None if about is None else text(about, "--about", max_len=MAX_QUESTION_PART),
+        "context": None if context is None else text(context, "--context"),
         "catch_up": (None if catch_up is None
                      else text(catch_up, "--catch-up", max_len=MAX_QUESTION_PART)),
         "blocked": (None if blocked is None
@@ -212,6 +216,7 @@ def human_question(parts: Optional[dict]) -> None:
     if missing:
         raise Invalid(
             f"a question to the human needs {', '.join(missing)}: what the work is about, "
+            f"everything they need to know to answer (the explanation from your chat), "
             f"what is blocked until they answer, what happened since they last replied to "
             f"you, and the option you recommend. They read these on their page beside "
             f"the one-line decision.")

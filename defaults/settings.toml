@@ -449,7 +449,7 @@ inline_mail = 8000
 question_line = 200
 
 # One structured part of a question (`sb ask --about`, `--catch-up`, `--blocked`, an
-# option's detail). These never reach herdr, so they may be multi-line, and the human reads
+# option's detail). `--context` is the exception: it is the whole explanation, capped as `text`. These never reach herdr, so they may be multi-line, and the human reads
 # them on the `sb web` page. A part is a few sentences; a cap ten times that is a runaway
 # guard, not style advice.
 question_part = 4000

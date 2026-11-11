@@ -447,6 +447,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "message")
     ak.add_argument("--about", metavar="TEXT",
                     help="what the work is about, in plain words. Required for the human")
+    ak.add_argument("--context", metavar="TEXT",
+                    help="everything the human needs to answer: the explanation from your "
+                         "chat message, findings and trade-offs included. They may read "
+                         "only the page. May be several lines. Required for the human")
     ak.add_argument("--catch-up", metavar="TEXT",
                     help="what happened since the human last replied to you. Required for "
                          "the human")
@@ -973,7 +977,7 @@ def _validate(args) -> None:
         else:
             args.question = validate.line(args.question, "question")
         args.parts = validate.question_parts(
-            about=args.about, catch_up=args.catch_up, blocked=args.blocked,
+            about=args.about, context=args.context, catch_up=args.catch_up, blocked=args.blocked,
             recommend=args.recommend, options=args.option, links=args.link,
             cwd=os.getcwd())
         if args.target == broker_mod.HUMAN:

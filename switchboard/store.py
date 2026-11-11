@@ -456,7 +456,7 @@ CREATE TABLE questions (
     escalated_at  INTEGER,            -- when `sb escalate` repointed this at the human.
                                       -- NULL is every question nobody escalated, which is
                                       -- what rows predating the column read as too.
-    parts         TEXT                -- JSON: about, catch_up, blocked, options, links
+    parts         TEXT                -- JSON: about, context, catch_up, blocked, options, links
                                       -- (`validate.question_parts`), read by `sb web`.
                                       -- NULL when the asker passed none of those flags.
 );

@@ -35,7 +35,8 @@ from switchboard.broker import (  # noqa: E402
 from switchboard.herdr import Agent, HerdrError, section_body  # noqa: E402
 
 # The parts `sb ask` requires of a question that reaches the human (`validate.human_question`).
-HUMAN_PARTS = {"about": "the auth split", "blocked": "the merge", "catch_up": "nothing new",
+HUMAN_PARTS = {"about": "the auth split", "context": "the two options and their costs",
+               "blocked": "the merge", "catch_up": "nothing new",
                "options": [{"label": "A", "detail": None, "recommended": True}], "links": []}
 
 
