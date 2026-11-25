@@ -44,6 +44,7 @@ import re
 from pathlib import Path
 from typing import Callable, Collection, Iterable, Optional, Sequence
 
+from . import capacity as capacity_mod
 from . import codex as codex_mod
 from . import config
 from . import guidance
@@ -5535,6 +5536,13 @@ class Broker:
     ) -> str:
         me = me or self.whoami()
         self.require_capability(me, CAP_SPAWN)
+        # THE MEMORY GATE, before anything is created — a refusal here leaves no pane, no
+        # worktree and no row behind (`capacity`). A top is a human's `sb start`; not gated.
+        if not is_top:
+            refused = capacity_mod.refusal(self.repo)
+            if refused:
+                store.log_event(self.db, kind="spawn_refused_memory", agent=me)
+                raise ValueError(refused)
         # A TASKLESS SPAWN IS AN IDLING CHILD, not a refusal (#145). A parent that is about
         # to be handed the real context — the human said "spawn it, I will tell it" — has
         # only a topic to type, and while `task` was required it typed the topic AS the

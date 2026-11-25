@@ -403,6 +403,18 @@ ignored_content_holds = false
 auto = true
 
 
+[capacity]
+# The memory gate (`switchboard/capacity.py`). `sb delegate` refuses a spawn when
+# `available - per_agent_mb < reserve_mb` — when one more agent would eat the headroom the
+# machine needs to stay responsive. Unknown memory (an OS that will not say) is allowed;
+# `sb start` is never gated. Set loose on purpose, as a better-than-nothing first step: it
+# exists to stop the swap-to-a-halt freeze, not to ration agents. Raise `reserve_mb` on a
+# machine that still stalls; set `enabled = false` to turn it off.
+enabled = true
+reserve_mb = 1024
+per_agent_mb = 500
+
+
 [limits]
 # Limits. The caps below are in characters; none is a buffer limit, and they are smell
 # detectors. The retention entry at the end is a calendar-day limit instead.

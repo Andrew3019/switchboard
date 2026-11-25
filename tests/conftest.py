@@ -8,7 +8,7 @@ import tempfile
 
 import pytest
 
-from switchboard import usage
+from switchboard import capacity, usage
 
 
 # The test store is disposable, so durability across a machine crash is not part of what
@@ -49,3 +49,10 @@ def _isolate_usage_sink():
                 os.environ.pop(usage.USAGE_DIR_ENV, None)
             else:
                 os.environ[usage.USAGE_DIR_ENV] = previous
+
+
+@pytest.fixture(autouse=True)
+def _memory_reads_unknown(monkeypatch):
+    """The memory gate answers "unknown, allowed" for every test, so the suite does not pass
+    or fail on how much RAM the machine running it has free. `test_capacity` sets it."""
+    monkeypatch.setattr(capacity, "available_bytes", lambda: None)
